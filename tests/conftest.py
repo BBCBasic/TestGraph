@@ -13,6 +13,8 @@ def migrate_db():
     if p.exists():p.unlink()
     cfg=Config("alembic.ini")
     command.upgrade(cfg,"head")
+    from scripts.seed import run as seed
+    seed()
     yield
     if p.exists():p.unlink()
 
