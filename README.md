@@ -66,7 +66,9 @@ pytest -q
 1. Push this repository to GitHub.
 2. Create a Railway project from the GitHub repository.
 3. Add a PostgreSQL service.
-4. Set `DATABASE_URL` to Railway's PostgreSQL connection variable/reference.
+4. In the API service, use **Add Reference** and select the Postgres service's
+   `DATABASE_URL`. Do not paste the displayed `${{Postgres.DATABASE_URL}}` text
+   as a plain value and do not add quotes around it.
 5. Add variables:
 
 ```text
@@ -81,6 +83,12 @@ CORS_ORIGINS=["https://<your-domain>"]
 `railway.json` configures:
 - pre-deploy migrations: `alembic upgrade head`
 - Uvicorn start command using Railway's `$PORT`
+
+The application converts Railway's `postgresql://` URL to SQLAlchemy's
+`postgresql+psycopg://` form because the project uses Psycopg 3. On a successful
+deployment, Alembic logs `Context impl PostgresqlImpl`. An unresolved reference
+or a Railway deployment that falls back to SQLite now stops with a specific
+configuration error before the API starts.
 - readiness health check at `/health/ready`
 
 After the first deployment, run `python -m scripts.seed` from a Railway shell or one-off command.
