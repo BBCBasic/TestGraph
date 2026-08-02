@@ -1,3 +1,6 @@
+import uuid
+
+
 def create_user(client,auth,name,weights):
     r=client.post("/api/v1/users",headers=auth,json={"display_name":name,"profile_data":{"dimension_importance":weights}});assert r.status_code==200;return r.json()
 def create_subject(client,auth,key="dishoom-test"):
@@ -11,10 +14,30 @@ def test_health_and_discovery(client):
     assert railway_probe.json()["status"]=="ready"
     assert client.get("/.well-known/review-service.json").status_code==200
     assert client.get("/openapi.json").status_code==200
+    schemas=client.get("/schemas").json()["supported_subject_types"]
+    assert schemas["recipe"]["version"]=="1.0"
+    assert client.get("/schemas/recipe/1.0").status_code==200
 
 def test_auth_required(client):
     r=client.post("/api/v1/users",json={"display_name":"X"})
     assert r.status_code==401
+
+def test_openapi_declares_authentication_and_error_responses(client):
+    document=client.get("/openapi.json").json()
+    schemes=document["components"]["securitySchemes"]
+    assert schemes["DevelopmentApiKey"]=={"type":"apiKey","in":"header","name":"X-API-Key","description":"Development API key configured by the service operator."}
+    assert schemes["BearerAuth"]["type"]=="http"
+    assert schemes["BearerAuth"]["scheme"]=="bearer"
+    create_user_operation=document["paths"]["/api/v1/users"]["post"]
+    assert {"DevelopmentApiKey":[]} in create_user_operation["security"]
+    assert {"BearerAuth":[]} in create_user_operation["security"]
+    assert "401" in create_user_operation["responses"]
+    assert "404" in document["paths"]["/api/v1/experiences/{experience_id}"]["get"]["responses"]
+
+def test_pagination_rejects_negative_values(client):
+    for path in ("/api/v1/subjects", "/api/v1/experiences"):
+        assert client.get(path,params={"limit":-1}).status_code==422
+        assert client.get(path,params={"offset":-1}).status_code==422
 
 def test_draft_idempotency_publish_and_personalisation(client,auth):
     robert=create_user(client,auth,"Robert Test",{"noise":0.9,"food":0.9,"service":0.8})
@@ -37,3 +60,63 @@ def test_unknown_domain_field_rejected(client,auth):
     payload={"owner_id":u["id"],"subject_id":s["id"],"subject_type":"restaurant","schema_version":"1.0","headline":"x","summary":"x","common_data":{},"domain_data":{"food":5,"invented_field":2},"provenance":{"source_method":"test"}}
     r=client.post("/api/v1/experiences/drafts",headers=auth,json=payload)
     assert r.status_code==400
+
+def test_recipe_create_draft_publish_and_retrieve(client,auth):
+    owner=create_user(client,auth,"Recipe Flow User",{"flavour":0.9,"difficulty":0.7})
+    key=f"recipe-flow-{uuid.uuid4()}"
+    subject_response=client.post("/api/v1/subjects",headers=auth,json={
+        "subject_type":"recipe",
+        "name":"Roast tomato pasta",
+        "canonical_key":key,
+        "metadata_json":{"cuisine":"Italian"},
+    })
+    assert subject_response.status_code==200
+    subject=subject_response.json()
+    draft_response=client.post("/api/v1/experiences/drafts",headers={**auth,"Idempotency-Key":key},json={
+        "owner_id":owner["id"],
+        "subject_id":subject["id"],
+        "subject_type":"recipe",
+        "schema_version":"1.0",
+        "visibility":"public",
+        "headline":"Deep flavour with very little effort",
+        "summary":"Roasting the tomatoes made the sauce rich and repeat-worthy.",
+        "common_data":{
+            "subjective_impressions":[{
+                "category":"flavour",
+                "statement":"The roasted tomatoes tasted unusually rich.",
+                "sentiment":0.9,
+                "importance_to_reviewer":0.9,
+            }],
+            "would_repeat":True,
+            "strengths":["flavour","simplicity"],
+        },
+        "domain_data":{
+            "overall_rating":9,
+            "flavour":9.5,
+            "instruction_clarity":8.5,
+            "preparation_time_accuracy":8,
+            "ingredient_availability":9,
+            "difficulty":2,
+            "repeat_worthiness":9.5,
+            "modifications":["Added chilli flakes"],
+        },
+        "provenance":{"source_method":"test","source_client":"pytest"},
+        "consent":{"user_approved":False},
+    })
+    assert draft_response.status_code==201
+    draft=draft_response.json()
+    assert draft["publication_status"]=="draft"
+    assert client.get(f"/api/v1/experiences/{draft['id']}").json()["publication_status"]=="draft"
+
+    publish_response=client.post(
+        f"/api/v1/experiences/{draft['id']}/publish",
+        headers=auth,
+        json={"user_approved":True,"approved_version":draft["version"]},
+    )
+    assert publish_response.status_code==200
+    assert publish_response.json()["publication_status"]=="published"
+
+    retrieved=client.get(f"/api/v1/experiences/{draft['id']}")
+    assert retrieved.status_code==200
+    assert retrieved.json()["publication_status"]=="published"
+    assert retrieved.json()["domain_data"]["flavour"]==9.5
