@@ -6,6 +6,9 @@ def create_subject(client,auth,key="dishoom-test"):
 def test_health_and_discovery(client):
     assert client.get("/health/live").status_code==200
     assert client.get("/health/ready").json()["database"]=="ok"
+    railway_probe=client.get("/health/ready",headers={"Host":"healthcheck.railway.app"})
+    assert railway_probe.status_code==200
+    assert railway_probe.json()["status"]=="ready"
     assert client.get("/.well-known/review-service.json").status_code==200
     assert client.get("/openapi.json").status_code==200
 
