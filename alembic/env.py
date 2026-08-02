@@ -5,7 +5,10 @@ from app.core.config import get_settings
 from app.db.base import Base
 from app.models import entities  # noqa
 config=context.config
-config.set_main_option("sqlalchemy.url",get_settings().database_url)
+# Alembic stores options in ConfigParser, where a literal percent sign in a
+# database password must be escaped. ConfigParser converts it back when read.
+database_url = get_settings().database_url.replace("%", "%%")
+config.set_main_option("sqlalchemy.url", database_url)
 if config.config_file_name: fileConfig(config.config_file_name)
 target_metadata=Base.metadata
 
