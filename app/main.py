@@ -9,7 +9,10 @@ from app.core.config import get_settings
 
 settings=get_settings()
 app=FastAPI(title="TasteGraph",version="1.0.0",description="AI-native structured experience storage and personalised review interpretation.")
-app.add_middleware(TrustedHostMiddleware,allowed_hosts=settings.allowed_hosts or ["*"])
+# Railway readiness probes always use this internal hostname. Trust it in code so
+# a missing or malformed ALLOWED_HOSTS deployment variable cannot block startup.
+trusted_hosts=list(dict.fromkeys([*settings.allowed_hosts,"healthcheck.railway.app"]))
+app.add_middleware(TrustedHostMiddleware,allowed_hosts=trusted_hosts)
 app.add_middleware(CORSMiddleware,allow_origins=settings.cors_origins,allow_methods=["*"],allow_headers=["*"],allow_credentials=False)
 
 @app.middleware("http")
