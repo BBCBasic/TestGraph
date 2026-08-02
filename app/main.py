@@ -1,5 +1,7 @@
 from __future__ import annotations
+import os
 import uuid
+from urllib.parse import urlsplit
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
@@ -9,9 +11,20 @@ from app.core.config import get_settings
 
 settings=get_settings()
 app=FastAPI(title="TasteGraph",version="1.0.0",description="AI-native structured experience storage and personalised review interpretation.")
-# Railway readiness probes always use this internal hostname. Trust it in code so
-# a missing or malformed ALLOWED_HOSTS deployment variable cannot block startup.
-trusted_hosts=list(dict.fromkeys([*settings.allowed_hosts,"healthcheck.railway.app"]))
+
+# Railway readiness probes use a fixed internal hostname, while the public domain
+# is injected at runtime. Add both automatically so deployment does not depend on
+# duplicating Railway-managed hostnames in ALLOWED_HOSTS.
+railway_public_domain=os.getenv("RAILWAY_PUBLIC_DOMAIN")
+configured_public_domain=urlsplit(settings.public_base_url).hostname
+trusted_hosts=list(dict.fromkeys(
+    host for host in [
+        *settings.allowed_hosts,
+        "healthcheck.railway.app",
+        railway_public_domain,
+        configured_public_domain,
+    ] if host
+))
 app.add_middleware(TrustedHostMiddleware,allowed_hosts=trusted_hosts)
 app.add_middleware(CORSMiddleware,allow_origins=settings.cors_origins,allow_methods=["*"],allow_headers=["*"],allow_credentials=False)
 
