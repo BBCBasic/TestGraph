@@ -202,13 +202,10 @@ def schema(subject_type: str, version: str, db: Session = Depends(get_db)):
 @router.get("/.well-known/review-service.json")
 def discovery():
     return {
-        "service": "TasteGraph", "version": "1.0",
+        "service": "TasteGraph", "version": "1.1",
         "purpose": "Structured experience storage and retrieval across supported domains",
-        "openapi": "/openapi.json", "schemas": "/schemas",
-        "capabilities": ["public_review_read", "canonical_subject_resolution", "authenticated_draft_write"],
-        "authentication": {"type": "api_key", "header": "X-API-Key", "oauth2": "planned"},
+        "openapi": "/openapi.json", "schemas": "/schemas", "mcp": "/mcp",
+        "capabilities": ["public_review_read", "canonical_subject_resolution", "authenticated_draft_write", "oauth_mcp"],
+        "authentication": {"current": "oauth2_pkce", "development_fallback": "api_key"},
     }
 
-
-@router.get("/.well-known/oauth-authorization-server")
-def oauth_placeholder(): return {"status": "not_implemented", "planned": "OAuth 2.1 with scoped access tokens"}
