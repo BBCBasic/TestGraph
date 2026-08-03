@@ -8,7 +8,7 @@ def run():
     try:
         schema_specs = [
             ("recipe", "1.0", "stable", RecipeReviewData.model_json_schema()),
-            ("restaurant", "1.0", "beta", RestaurantReviewData.model_json_schema()),
+            ("restaurant", "1.0", "stable", RestaurantReviewData.model_json_schema()),
         ]
         for subject_type, version, status, json_schema in schema_specs:
             schema = db.scalar(select(SchemaDefinition).where(

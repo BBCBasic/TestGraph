@@ -4,13 +4,16 @@ from typing import Any, Literal
 from uuid import UUID
 from pydantic import BaseModel, ConfigDict, Field
 
+
 class StrictModel(BaseModel):
     model_config = ConfigDict(extra="forbid", from_attributes=True)
+
 
 class Observation(StrictModel):
     category: str
     statement: str
     confidence: float = Field(ge=0, le=1)
+
 
 class SubjectiveImpression(StrictModel):
     category: str
@@ -18,6 +21,7 @@ class SubjectiveImpression(StrictModel):
     sentiment: float = Field(ge=-1, le=1)
     importance_to_reviewer: float = Field(ge=0, le=1)
     confidence: float = Field(default=0.8, ge=0, le=1)
+
 
 class CommonExperienceData(StrictModel):
     observations: list[Observation] = []
@@ -27,6 +31,7 @@ class CommonExperienceData(StrictModel):
     would_repeat: bool | None = None
     special_journey_worthy: bool | None = None
     confidence: dict[str, float] = {}
+
 
 class Provenance(StrictModel):
     source_method: str
@@ -42,6 +47,7 @@ class Provenance(StrictModel):
     inferred_fields: list[str] = []
     notes: str | None = None
 
+
 class Consent(StrictModel):
     user_approved: bool = False
     authorization_basis: Literal["user_approval", "licensed_source"] | None = None
@@ -49,14 +55,24 @@ class Consent(StrictModel):
     approved_at: datetime | None = None
     approved_version: int | None = None
 
+
 class UserCreate(StrictModel):
     display_name: str
     bio: str | None = None
     profile_data: dict[str, Any] = {}
 
+
 class UserRead(UserCreate):
     id: UUID
     created_at: datetime
+
+
+class UserPublicRead(StrictModel):
+    id: UUID
+    display_name: str
+    bio: str | None = None
+    created_at: datetime
+
 
 class SubjectCreate(StrictModel):
     subject_type: str
@@ -65,9 +81,11 @@ class SubjectCreate(StrictModel):
     canonical_identifiers: dict[str, Any] = {}
     metadata_json: dict[str, Any] = {}
 
+
 class SubjectRead(SubjectCreate):
     id: UUID
     created_at: datetime
+
 
 class ExperienceCreate(StrictModel):
     owner_id: UUID
@@ -82,6 +100,18 @@ class ExperienceCreate(StrictModel):
     provenance: Provenance
     consent: Consent = Consent()
 
+
+class ExperiencePatch(StrictModel):
+    expected_version: int = Field(ge=1)
+    visibility: Literal["private", "unlisted", "public", "aggregate_only"] | None = None
+    headline: str | None = None
+    summary: str | None = None
+    common_data: CommonExperienceData | None = None
+    domain_data: dict[str, Any] | None = None
+    provenance: Provenance | None = None
+    consent: Consent | None = None
+
+
 class ExperienceRead(ExperienceCreate):
     id: UUID
     publication_status: str
@@ -93,14 +123,17 @@ class ExperienceRead(ExperienceCreate):
     published_at: datetime | None
     deleted_at: datetime | None
 
+
 class PublishRequest(StrictModel):
     user_approved: bool
     approved_version: int
+
 
 class PairwiseAlignmentUpsert(StrictModel):
     source_user_id: UUID
     target_user_id: UUID
     dimensions: dict[str, float]
+
 
 class PersonalisedDimension(StrictModel):
     dimension: str
@@ -109,6 +142,7 @@ class PersonalisedDimension(StrictModel):
     pairwise_alignment: float
     relevance: float
     explanation: str
+
 
 class PersonalisedReview(StrictModel):
     experience_id: UUID

@@ -1,7 +1,11 @@
+import hmac
 from dataclasses import dataclass
-from fastapi import Header, HTTPException, Security, status
-from fastapi.security import APIKeyHeader, HTTPAuthorizationCredentials, HTTPBearer
+
+from fastapi import HTTPException, Security, status
+from fastapi.security import APIKeyHeader
+
 from app.core.config import get_settings
+
 
 @dataclass
 class Principal:
@@ -9,34 +13,44 @@ class Principal:
     client_id: str
     scopes: set[str]
 
+
 ALL_DEV_SCOPES = {
     "profile:read", "profile:write", "experience:read", "experience:draft",
-    "experience:publish", "experience:delete", "recommendation:read", "subject:write"
+    "experience:edit", "experience:publish", "experience:delete",
+    "recommendation:read", "subject:write", "alignment:write",
 }
 
-development_api_key = APIKeyHeader(
+api_key_header = APIKeyHeader(
     name="X-API-Key",
-    scheme_name="DevelopmentApiKey",
-    description="Development API key configured by the service operator.",
-    auto_error=False,
-)
-bearer_auth = HTTPBearer(
-    scheme_name="BearerAuth",
-    description="The development API key supplied as a bearer token.",
+    scheme_name="ApiKey",
+    description="A server-issued, revocable client credential. Client identity and scopes are derived from the credential.",
     auto_error=False,
 )
 
+
+def _principal_for_key(supplied: str) -> Principal | None:
+    settings = get_settings()
+    if hmac.compare_digest(supplied, settings.development_api_key):
+        return Principal(subject="development-user", client_id="development-client", scopes=ALL_DEV_SCOPES)
+    for client_id, credential in settings.client_api_keys.items():
+        if hmac.compare_digest(supplied, credential.secret):
+            return Principal(subject=credential.subject, client_id=client_id, scopes=set(credential.scopes))
+    return None
+
+
+async def optional_principal(x_api_key: str | None = Security(api_key_header)) -> Principal | None:
+    if x_api_key is None:
+        return None
+    principal = _principal_for_key(x_api_key)
+    if principal is None:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials")
+    return principal
+
+
 def require_scope(required_scope: str):
-    async def dependency(
-        x_api_key: str | None = Security(development_api_key),
-        bearer: HTTPAuthorizationCredentials | None = Security(bearer_auth),
-        x_client_id: str | None = Header(default="development-client"),
-    ) -> Principal:
-        settings = get_settings()
-        supplied = bearer.credentials if bearer and bearer.scheme.lower() == "bearer" else x_api_key
-        if supplied != settings.development_api_key:
-            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or missing credentials")
-        principal = Principal(subject="development-user", client_id=x_client_id or "development-client", scopes=ALL_DEV_SCOPES)
+    async def dependency(principal: Principal | None = Security(optional_principal)) -> Principal:
+        if principal is None:
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing credentials")
         if required_scope not in principal.scopes:
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Insufficient scope")
         return principal
