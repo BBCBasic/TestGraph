@@ -82,7 +82,13 @@ def test_sparse_recipe_review_omits_unmentioned_null_ratings(client,auth):
     })
     assert response.status_code==201
     assert response.json()["domain_data"]=={"modifications":[]}
-    assert all(value is not None for value in response.json()["domain_data"].values())
+    def contains_null(value):
+        if isinstance(value, dict):
+            return any(contains_null(item) for item in value.values())
+        if isinstance(value, list):
+            return any(contains_null(item) for item in value)
+        return value is None
+    assert not contains_null(response.json())
 
 def test_recipe_create_draft_publish_and_retrieve(client,auth):
     owner=create_user(client,auth,"Recipe Flow User",{"flavour":0.9,"difficulty":0.7})
