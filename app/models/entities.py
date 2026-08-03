@@ -114,3 +114,37 @@ class AuditEvent(Base):
     request_id: Mapped[str] = mapped_column(String(100), index=True)
     details: Mapped[dict] = mapped_column(JsonType, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
+
+class OAuthClient(Base):
+    __tablename__ = "oauth_clients"
+    client_id: Mapped[str] = mapped_column(String(120), primary_key=True)
+    redirect_uris: Mapped[list] = mapped_column(JsonType, default=list)
+    client_name: Mapped[str | None] = mapped_column(String(240))
+    token_endpoint_auth_method: Mapped[str] = mapped_column(String(40), default="none")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
+
+class OAuthAuthorizationCode(Base):
+    __tablename__ = "oauth_authorization_codes"
+    id: Mapped[uuid.UUID] = mapped_column(UuidType, primary_key=True, default=new_uuid)
+    code_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    client_id: Mapped[str] = mapped_column(String(120), ForeignKey("oauth_clients.client_id"), index=True)
+    user_id: Mapped[uuid.UUID] = mapped_column(UuidType, ForeignKey("users.id"), index=True)
+    redirect_uri: Mapped[str] = mapped_column(Text)
+    code_challenge: Mapped[str] = mapped_column(String(160))
+    scope: Mapped[str] = mapped_column(String(500))
+    resource: Mapped[str] = mapped_column(Text)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
+
+class OAuthRefreshToken(Base):
+    __tablename__ = "oauth_refresh_tokens"
+    id: Mapped[uuid.UUID] = mapped_column(UuidType, primary_key=True, default=new_uuid)
+    token_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    client_id: Mapped[str] = mapped_column(String(120), ForeignKey("oauth_clients.client_id"), index=True)
+    user_id: Mapped[uuid.UUID] = mapped_column(UuidType, ForeignKey("users.id"), index=True)
+    scope: Mapped[str] = mapped_column(String(500))
+    resource: Mapped[str] = mapped_column(Text)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
