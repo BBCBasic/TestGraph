@@ -33,7 +33,7 @@ python run.py
 
 Open http://127.0.0.1:8000 and http://127.0.0.1:8000/docs.
 
-Development API key: `dev-secret` in `X-API-Key` or `Authorization: Bearer dev-secret`.
+Development API key: `dev-secret` in `X-API-Key`. Client identity is derived from the credential; `X-Client-ID` is not trusted.
 
 ## Import the open UCI recipe reviews
 
@@ -75,6 +75,7 @@ pytest -q
 ENVIRONMENT=production
 APP_SECRET=<random secret>
 DEVELOPMENT_API_KEY=<long random key>
+CLIENT_API_KEYS={} # optional JSON map of revocable client credentials and scopes
 PUBLIC_BASE_URL=https://<your-domain>
 ALLOWED_HOSTS=["<your-domain>","<railway-domain>"]
 CORS_ORIGINS=["https://<your-domain>"]
@@ -99,7 +100,9 @@ After the first deployment, run `python -m scripts.seed` from a Railway shell or
 - Versioned schema registry
 - Domain-specific Pydantic validation stored as JSON/JSONB
 - Draft-first publication with explicit approval/version
-- Development API-key authentication behind a replaceable scope dependency
+- Development API-key authentication plus optional revocable, scoped client credentials
+- Central read policy: public lists expose only published public reviews; drafts/private data require authentication
+- Canonical subject resolution and version-checked draft editing
 - OAuth discovery placeholder
 - Idempotency keys
 - Provenance, consent, ownership and visibility
@@ -112,3 +115,19 @@ After the first deployment, run `python -m scripts.seed` from a Railway shell or
 - Pagination-ready list endpoints
 - Alembic migrations
 - SQLite locally; PostgreSQL on Railway
+
+
+## Safe read and editing routes
+
+- Public lists return only experiences that are both `published` and `public`.
+- Exact IDs may also retrieve a published `unlisted` experience.
+- Drafts and private experiences require an `experience:read` credential.
+- `aggregate_only` experiences are never returned as individual reviews.
+- Resolve subjects with `GET /api/v1/subjects/resolve?subject_type=recipe&canonical_key=...`.
+- Edit a draft with `PATCH /api/v1/experiences/{id}` and its current `expected_version`.
+
+Optional client credentials are configured as a JSON object in `CLIENT_API_KEYS`. Each object key is the verified client ID; each value contains `secret`, `subject`, and `scopes`. Example:
+
+```json
+{"claude-code":{"secret":"replace-with-a-long-random-secret","subject":"robert","scopes":["subject:write","experience:draft","experience:edit","experience:publish"]}}
+```
