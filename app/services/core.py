@@ -1,12 +1,10 @@
 from __future__ import annotations
 import hashlib, json
 from datetime import datetime, timezone
-from uuid import UUID
 from sqlalchemy import select
 from sqlalchemy.orm import Session
-from pydantic import ValidationError
-from app.models.entities import AuditEvent, Experience, IdempotencyRecord, PairwiseAlignment, SchemaDefinition, Subject, User
-from app.schemas.common import ExperienceCreate, PairwiseAlignmentUpsert
+from app.models.entities import AuditEvent, Experience, PairwiseAlignment, User
+from app.schemas.common import ExperienceCreate
 from app.schemas.domains import DOMAIN_MODELS
 
 
@@ -14,7 +12,7 @@ def validate_domain(subject_type: str, version: str, payload: dict) -> dict:
     model = DOMAIN_MODELS.get(subject_type)
     if not model:
         raise ValueError(f"Unsupported subject_type: {subject_type}")
-    return model.model_validate(payload).model_dump()
+    return model.model_validate(payload).model_dump(mode="json")
 
 
 def request_hash(payload: dict) -> str:
@@ -56,21 +54,21 @@ def publish_experience(db: Session, obj: Experience, approved_version: int, *, a
 
 def personalised(db: Session, obj: Experience, reader: User) -> dict:
     source = db.get(User, obj.owner_id)
-    alignment = db.scalar(select(PairwiseAlignment).where(PairwiseAlignment.source_user_id==source.id, PairwiseAlignment.target_user_id==reader.id))
+    alignment = db.scalar(select(PairwiseAlignment).where(PairwiseAlignment.source_user_id == source.id, PairwiseAlignment.target_user_id == reader.id))
     pair = alignment.dimensions if alignment else {}
     reader_weights = (reader.profile_data or {}).get("dimension_importance", {})
-    dims=[]
+    dims = []
     for imp in (obj.common_data or {}).get("subjective_impressions", []):
-        d=imp["category"]
-        reviewer_sentiment=float(imp.get("sentiment",0))
-        reader_importance=float(reader_weights.get(d, 0.5))
-        pairwise=float(pair.get(d, 0.5))
-        relevance=round(0.55*reader_importance+0.45*pairwise,3)
-        level="High" if relevance>=0.7 else "Low" if relevance<0.4 else "Moderate"
-        dims.append({"dimension":d,"reviewer_sentiment":reviewer_sentiment,"reader_importance":reader_importance,"pairwise_alignment":pairwise,"relevance":relevance,"explanation":f"{level} relevance for {reader.display_name}: importance {reader_importance:.2f}, alignment {pairwise:.2f}."})
-    dims.sort(key=lambda x:x["relevance"], reverse=True)
-    overall=round(sum(d["relevance"] for d in dims)/len(dims),3) if dims else 0.0
-    top=", ".join(d["dimension"] for d in dims[:2]) or "the available evidence"
-    low=", ".join(d["dimension"] for d in dims[-2:] if d["relevance"]<0.4)
-    conclusion=f"Give most weight to {top}." + (f" Give less weight to {low}." if low else "")
-    return {"experience_id":obj.id,"reader_id":reader.id,"overall_relevance":overall,"reader_specific_conclusion":conclusion,"dimensions":dims}
+        d = imp["category"]
+        reviewer_sentiment = float(imp.get("sentiment", 0))
+        reader_importance = float(reader_weights.get(d, 0.5))
+        pairwise = float(pair.get(d, 0.5))
+        relevance = round(0.55 * reader_importance + 0.45 * pairwise, 3)
+        level = "High" if relevance >= 0.7 else "Low" if relevance < 0.4 else "Moderate"
+        dims.append({"dimension": d, "reviewer_sentiment": reviewer_sentiment, "reader_importance": reader_importance, "pairwise_alignment": pairwise, "relevance": relevance, "explanation": f"{level} relevance for {reader.display_name}: importance {reader_importance:.2f}, alignment {pairwise:.2f}."})
+    dims.sort(key=lambda x: x["relevance"], reverse=True)
+    overall = round(sum(d["relevance"] for d in dims) / len(dims), 3) if dims else 0.0
+    top = ", ".join(d["dimension"] for d in dims[:2]) or "the available evidence"
+    low = ", ".join(d["dimension"] for d in dims[-2:] if d["relevance"] < 0.4)
+    conclusion = f"Give most weight to {top}." + (f" Give less weight to {low}." if low else "")
+    return {"experience_id": obj.id, "reader_id": reader.id, "overall_relevance": overall, "reader_specific_conclusion": conclusion, "dimensions": dims}
