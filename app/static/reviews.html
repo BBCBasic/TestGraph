@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>TasteGraph reviews</title>
+  <style>
+    :root{color-scheme:light;--ink:#18211c;--muted:#607067;--paper:#f6f3eb;--card:#fffdf8;--line:#d9dfd8;--accent:#236b4b;--accent-soft:#dceee3}
+    *{box-sizing:border-box}body{margin:0;background:var(--paper);color:var(--ink);font:16px/1.5 system-ui,-apple-system,sans-serif}
+    header,main{width:min(1040px,calc(100% - 32px));margin:auto}header{padding:44px 0 24px}h1{margin:0;font:700 clamp(2rem,6vw,4rem)/1.05 Georgia,serif}
+    header p{max-width:650px;color:var(--muted);font-size:1.05rem}.toolbar{display:flex;gap:10px;flex-wrap:wrap;margin:24px 0}
+    input,select,button{font:inherit;border:1px solid var(--line);border-radius:12px;background:white;padding:11px 13px;color:var(--ink)}input{flex:1;min-width:220px}button{cursor:pointer}button:hover{border-color:var(--accent)}
+    #status{color:var(--muted);margin:0 0 16px}.grid{display:grid;gap:16px;padding-bottom:48px}.card{background:var(--card);border:1px solid var(--line);border-radius:18px;padding:20px;box-shadow:0 7px 24px #203b2b0d}
+    .eyebrow{display:flex;gap:8px;align-items:center;color:var(--accent);font-weight:700;text-transform:uppercase;letter-spacing:.08em;font-size:.75rem}.card h2{font:700 1.5rem/1.2 Georgia,serif;margin:8px 0}.meta{color:var(--muted);font-size:.9rem}.summary{font-size:1.05rem}.fields{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:8px;margin:16px 0}.field{background:#f3f6f2;border-radius:10px;padding:10px}.field b{display:block;font-size:.78rem;color:var(--muted);text-transform:capitalize}.field span{overflow-wrap:anywhere}
+    details{border-top:1px solid var(--line);padding-top:12px}summary{cursor:pointer;color:var(--accent);font-weight:650}pre{overflow:auto;background:#152019;color:#dff4e6;padding:16px;border-radius:12px;font-size:.78rem;white-space:pre-wrap;word-break:break-word}.empty{padding:40px;text-align:center;color:var(--muted)}
+    a{color:var(--accent)}@media(min-width:760px){.grid{grid-template-columns:repeat(2,minmax(0,1fr))}}
+  </style>
+</head>
+<body>
+  <header>
+    <a href="/">← TasteGraph</a>
+    <h1>Review browser</h1>
+    <p>A readable view of the public structured reviews. Open “Raw JSON” on any card to see exactly what the API stores and returns.</p>
+    <div class="toolbar">
+      <input id="search" type="search" placeholder="Search reviews or subjects…" aria-label="Search reviews">
+      <select id="type" aria-label="Filter by review type"><option value="">All types</option></select>
+      <button id="refresh" type="button">Refresh</button>
+    </div>
+    <p id="status" role="status">Loading reviews…</p>
+  </header>
+  <main><div id="reviews" class="grid"></div></main>
+  <script>
+    const state={experiences:[],subjects:new Map()};
+    const esc=value=>String(value??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+    const label=value=>String(value).replaceAll('_',' ');
+    const display=value=>Array.isArray(value)?value.map(v=>typeof v==='object'?JSON.stringify(v):v).join(', '):typeof value==='object'?JSON.stringify(value):String(value);
+    function usefulFields(review){
+      const data={...(review.common_data||{}),...(review.domain_data||{})};
+      return Object.entries(data).filter(([,v])=>v!==null&&v!==''&&!(Array.isArray(v)&&!v.length)).slice(0,10);
+    }
+    function render(){
+      const query=document.querySelector('#search').value.trim().toLowerCase();
+      const type=document.querySelector('#type').value;
+      const matches=state.experiences.filter(review=>{
+        const subject=state.subjects.get(review.subject_id)||{};
+        return (!type||review.subject_type===type)&&(!query||JSON.stringify({review,subject}).toLowerCase().includes(query));
+      });
+      document.querySelector('#status').textContent=`Showing ${matches.length} of ${state.experiences.length} public reviews`;
+      document.querySelector('#reviews').innerHTML=matches.length?matches.map(review=>{
+        const subject=state.subjects.get(review.subject_id)||{};
+        const title=subject.display_name||subject.name||subject.canonical_key||`${label(review.subject_type)} review`;
+        const summary=review.common_data?.summary||review.domain_data?.review_text||review.domain_data?.summary||'';
+        const fields=usefulFields(review).map(([key,value])=>`<div class="field"><b>${esc(label(key))}</b><span>${esc(display(value))}</span></div>`).join('');
+        return `<article class="card"><div class="eyebrow"><span>${esc(label(review.subject_type))}</span><span>•</span><span>${esc(review.publication_status)}</span></div><h2>${esc(title)}</h2><div class="meta">${esc(review.created_at?new Date(review.created_at).toLocaleDateString():'Date not recorded')}</div>${summary?`<p class="summary">${esc(summary)}</p>`:''}${fields?`<div class="fields">${fields}</div>`:''}<details><summary>Raw JSON</summary><pre>${esc(JSON.stringify(review,null,2))}</pre></details></article>`;
+      }).join(''):'<div class="empty">No reviews match this filter.</div>';
+    }
+    async function load(){
+      document.querySelector('#status').textContent='Loading reviews…';
+      try{
+        const [experiencesResponse,subjectsResponse]=await Promise.all([fetch('/api/v1/experiences?limit=100'),fetch('/api/v1/subjects?limit=100')]);
+        if(!experiencesResponse.ok||!subjectsResponse.ok)throw new Error('The API returned an error');
+        state.experiences=await experiencesResponse.json();
+        const subjects=await subjectsResponse.json();
+        state.subjects=new Map(subjects.map(subject=>[subject.id,subject]));
+        const types=[...new Set(state.experiences.map(review=>review.subject_type))].sort();
+        document.querySelector('#type').innerHTML='<option value="">All types</option>'+types.map(type=>`<option value="${esc(type)}">${esc(label(type))}</option>`).join('');
+        render();
+      }catch(error){document.querySelector('#status').textContent=`Could not load reviews: ${error.message}`;document.querySelector('#reviews').innerHTML='';}
+    }
+    document.querySelector('#search').addEventListener('input',render);
+    document.querySelector('#type').addEventListener('change',render);
+    document.querySelector('#refresh').addEventListener('click',load);
+    load();
+  </script>
+</body>
+</html>
