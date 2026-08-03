@@ -54,13 +54,21 @@
         return `<article class="card"><div class="eyebrow"><span>${esc(label(review.subject_type))}</span><span>•</span><span>${esc(review.publication_status)}</span></div><h2>${esc(title)}</h2><div class="meta">${esc(review.created_at?new Date(review.created_at).toLocaleDateString():'Date not recorded')}</div>${summary?`<p class="summary">${esc(summary)}</p>`:''}${fields?`<div class="fields">${fields}</div>`:''}<details><summary>Raw JSON</summary><pre>${esc(JSON.stringify(review,null,2))}</pre></details></article>`;
       }).join(''):'<div class="empty">No reviews match this filter.</div>';
     }
+    async function fetchAll(path){
+      const records=[];
+      for(let offset=0;;offset+=100){
+        const response=await fetch(`${path}?limit=100&offset=${offset}`);
+        if(!response.ok)throw new Error('The API returned an error');
+        const page=await response.json();
+        records.push(...page);
+        if(page.length<100)return records;
+      }
+    }
     async function load(){
       document.querySelector('#status').textContent='Loading reviews…';
       try{
-        const [experiencesResponse,subjectsResponse]=await Promise.all([fetch('/api/v1/experiences?limit=100'),fetch('/api/v1/subjects?limit=100')]);
-        if(!experiencesResponse.ok||!subjectsResponse.ok)throw new Error('The API returned an error');
-        state.experiences=await experiencesResponse.json();
-        const subjects=await subjectsResponse.json();
+        const [experiences,subjects]=await Promise.all([fetchAll('/api/v1/experiences'),fetchAll('/api/v1/subjects')]);
+        state.experiences=experiences;
         state.subjects=new Map(subjects.map(subject=>[subject.id,subject]));
         const types=[...new Set(state.experiences.map(review=>review.subject_type))].sort();
         document.querySelector('#type').innerHTML='<option value="">All types</option>'+types.map(type=>`<option value="${esc(type)}">${esc(label(type))}</option>`).join('');
