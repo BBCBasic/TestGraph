@@ -12,7 +12,9 @@ def validate_domain(subject_type: str, version: str, payload: dict) -> dict:
     model = DOMAIN_MODELS.get(subject_type)
     if not model:
         raise ValueError(f"Unsupported subject_type: {subject_type}")
-    return model.model_validate(payload).model_dump(mode="json")
+    # Keep records genuinely sparse: an unmentioned optional dimension is not
+    # a measured value and should stay absent instead of becoming null.
+    return model.model_validate(payload).model_dump(mode="json", exclude_none=True)
 
 
 def request_hash(payload: dict) -> str:
