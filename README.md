@@ -1,4 +1,4 @@
-# TasteGraph 1.0
+# TasteGraph 1.1
 
 AI-native structured experience storage and personalised review interpretation.
 
@@ -34,6 +34,18 @@ python run.py
 Open http://127.0.0.1:8000 and http://127.0.0.1:8000/docs.
 
 Development API key: `dev-secret` in `X-API-Key`. Client identity is derived from the credential; `X-Client-ID` is not trusted.
+
+## Connect ChatGPT with OAuth
+
+TasteGraph includes a tool-only MCP app at `/mcp` with three actions:
+
+- `search` — find reviews belonging to the connected TasteGraph user
+- `fetch` — read one complete review
+- `save_review` — resolve/create a subject and save a user-approved review, with retry-safe idempotency
+
+The production connection uses OAuth 2.1 Authorization Code + PKCE. ChatGPT receives a short-lived scoped token; it never receives the connection code, API key or TasteGraph owner ID.
+
+Before the first deployment, add a long random `OAUTH_CONNECTION_CODE` in Railway. After deployment, run `python -m scripts.list_users`, then set `OAUTH_OWNER_USER_ID` to Robert's existing TasteGraph user UUID and allow Railway to redeploy.
 
 ## Import the open UCI recipe reviews
 
@@ -76,6 +88,8 @@ ENVIRONMENT=production
 APP_SECRET=<random secret>
 DEVELOPMENT_API_KEY=<long random key>
 CLIENT_API_KEYS={} # optional JSON map of revocable client credentials and scopes
+OAUTH_OWNER_USER_ID=<Robert user UUID>
+OAUTH_CONNECTION_CODE=<long random connection code>
 PUBLIC_BASE_URL=https://<your-domain>
 ALLOWED_HOSTS=["<your-domain>","<railway-domain>"]
 CORS_ORIGINS=["https://<your-domain>"]
@@ -103,7 +117,8 @@ After the first deployment, run `python -m scripts.seed` from a Railway shell or
 - Development API-key authentication plus optional revocable, scoped client credentials
 - Central read policy: public lists expose only published public reviews; drafts/private data require authentication
 - Canonical subject resolution and version-checked draft editing
-- OAuth discovery placeholder
+- OAuth 2.1 Authorization Code + PKCE, dynamic client registration, refresh-token rotation and scoped access tokens
+- ChatGPT-compatible MCP endpoint with authenticated `search`, `fetch` and `save_review` tools
 - Idempotency keys
 - Provenance, consent, ownership and visibility
 - Pairwise reviewer-reader alignment
@@ -131,3 +146,4 @@ Optional client credentials are configured as a JSON object in `CLIENT_API_KEYS`
 ```json
 {"claude-code":{"secret":"replace-with-a-long-random-secret","subject":"robert","scopes":["subject:write","experience:draft","experience:edit","experience:publish"]}}
 ```
+
