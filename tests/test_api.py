@@ -25,12 +25,12 @@ def test_auth_required(client):
 def test_openapi_declares_authentication_and_error_responses(client):
     document=client.get("/openapi.json").json()
     schemes=document["components"]["securitySchemes"]
-    assert schemes["DevelopmentApiKey"]=={"type":"apiKey","in":"header","name":"X-API-Key","description":"Development API key configured by the service operator."}
-    assert schemes["BearerAuth"]["type"]=="http"
-    assert schemes["BearerAuth"]["scheme"]=="bearer"
+    assert set(schemes)=={"ApiKey"}
+    assert schemes["ApiKey"]["type"]=="apiKey"
+    assert schemes["ApiKey"]["in"]=="header"
+    assert schemes["ApiKey"]["name"]=="X-API-Key"
     create_user_operation=document["paths"]["/api/v1/users"]["post"]
-    assert {"DevelopmentApiKey":[]} in create_user_operation["security"]
-    assert {"BearerAuth":[]} in create_user_operation["security"]
+    assert {"ApiKey":[]} in create_user_operation["security"]
     assert "401" in create_user_operation["responses"]
     assert "404" in document["paths"]["/api/v1/experiences/{experience_id}"]["get"]["responses"]
 
@@ -44,13 +44,13 @@ def test_draft_idempotency_publish_and_personalisation(client,auth):
     fred=create_user(client,auth,"Fred Test",{"noise":0.15,"food":0.95,"service":0.75})
     subject=create_subject(client,auth)
     client.put("/api/v1/alignments",headers=auth,json={"source_user_id":robert["id"],"target_user_id":fred["id"],"dimensions":{"noise":0.2,"food":0.8,"service":0.7}})
-    payload={"owner_id":robert["id"],"subject_id":subject["id"],"subject_type":"restaurant","schema_version":"1.0","visibility":"private","headline":"Too noisy and disappointing","summary":"A difficult room with dull daal.","common_data":{"observations":[{"category":"service","statement":"Asked for water three times.","confidence":0.95}],"subjective_impressions":[{"category":"noise","statement":"Too noisy.","sentiment":-0.9,"importance_to_reviewer":0.9},{"category":"food","statement":"Daal was dull.","sentiment":-0.7,"importance_to_reviewer":0.9}],"weaknesses":["noise","service"]},"domain_data":{"food":4,"service":3,"atmosphere":2,"noise":2,"meal_pacing":4},"provenance":{"source_method":"llm_conversation","source_client":"chatgpt"},"consent":{"user_approved":False}}
+    payload={"owner_id":robert["id"],"subject_id":subject["id"],"subject_type":"restaurant","schema_version":"1.0","visibility":"private","headline":"Too noisy and disappointing","summary":"A difficult room with dull daal.","common_data":{"observations":[{"category":"service","statement":"Asked for water three times.","confidence":0.95}],"subjective_impressions":[{"category":"noise","statement":"Too noisy.","sentiment":-0.9,"importance_to_reviewer":0.9},{"category":"food","statement":"Daal was dull.","sentiment":-0.7,"importance_to_reviewer":0.9}],"weaknesses":["noise","service"]},"domain_data":{"food":4,"service":3,"atmosphere":2,"noise_comfort":2,"meal_pacing":4},"provenance":{"source_method":"llm_conversation","source_client":"chatgpt"},"consent":{"user_approved":False}}
     h={**auth,"Idempotency-Key":"same-review-1"}
     r1=client.post("/api/v1/experiences/drafts",headers=h,json=payload);assert r1.status_code==201
     r2=client.post("/api/v1/experiences/drafts",headers=h,json=payload);assert r2.status_code in (200,201);assert r1.json()["id"]==r2.json()["id"]
     exp=r1.json()
     p=client.post(f"/api/v1/experiences/{exp['id']}/publish",headers=auth,json={"user_approved":True,"approved_version":1});assert p.status_code==200;assert p.json()["publication_status"]=="published"
-    pr=client.get(f"/api/v1/experiences/{exp['id']}/for/{fred['id']}");assert pr.status_code==200
+    pr=client.get(f"/api/v1/experiences/{exp['id']}/for/{fred['id']}",headers=auth);assert pr.status_code==200
     dims={x["dimension"]:x for x in pr.json()["dimensions"]}
     assert dims["food"]["relevance"]>dims["noise"]["relevance"]
 
@@ -106,7 +106,7 @@ def test_recipe_create_draft_publish_and_retrieve(client,auth):
     assert draft_response.status_code==201
     draft=draft_response.json()
     assert draft["publication_status"]=="draft"
-    assert client.get(f"/api/v1/experiences/{draft['id']}").json()["publication_status"]=="draft"
+    assert client.get(f"/api/v1/experiences/{draft['id']}",headers=auth).json()["publication_status"]=="draft"
 
     publish_response=client.post(
         f"/api/v1/experiences/{draft['id']}/publish",
