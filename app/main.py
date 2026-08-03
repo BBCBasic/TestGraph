@@ -1,15 +1,17 @@
 from __future__ import annotations
 import os
 import uuid
+from pathlib import Path
 from urllib.parse import urlsplit
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from app.api.routes import router
 from app.core.config import get_settings
 
 settings=get_settings()
+REVIEWS_HTML = Path(__file__).parent / "static" / "reviews.html"
 app=FastAPI(title="TasteGraph",version="1.0.0",description="AI-native structured experience storage and personalised review interpretation.")
 
 # Railway readiness probes use a fixed internal hostname, while the public domain
@@ -47,6 +49,10 @@ async def value_error_handler(request:Request,exc:ValueError):
 
 @app.get("/",response_class=HTMLResponse)
 def home():
-    return """<!doctype html><html><head><title>TasteGraph</title><style>body{font-family:system-ui;max-width:860px;margin:40px auto;padding:0 20px}code{background:#eee;padding:2px 5px}</style></head><body><h1>TasteGraph</h1><p>AI-native structured experience storage.</p><ul><li><a href='/docs'>API documentation</a></li><li><a href='/schemas'>Schema registry</a></li><li><a href='/.well-known/review-service.json'>LLM discovery record</a></li><li><a href='/health/ready'>Health</a></li></ul></body></html>"""
+    return """<!doctype html><html><head><title>TasteGraph</title><style>body{font-family:system-ui;max-width:860px;margin:40px auto;padding:0 20px}code{background:#eee;padding:2px 5px}</style></head><body><h1>TasteGraph</h1><p>AI-native structured experience storage.</p><ul><li><a href='/reviews'>Browse reviews</a></li><li><a href='/docs'>API documentation</a></li><li><a href='/schemas'>Schema registry</a></li><li><a href='/.well-known/review-service.json'>LLM discovery record</a></li><li><a href='/health/ready'>Health</a></li></ul></body></html>"""
+
+@app.get("/reviews", response_class=FileResponse, include_in_schema=False)
+def review_browser():
+    return FileResponse(REVIEWS_HTML)
 
 app.include_router(router)
