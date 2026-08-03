@@ -94,7 +94,7 @@ def list_subjects(subject_type: str | None = None, limit: PageLimit = 50, offset
     return list(db.scalars(q.offset(offset).limit(limit)).all())
 
 
-@router.post("/api/v1/experiences/drafts", response_model=ExperienceRead, status_code=201, responses={**AUTH_RESPONSES, 409: {"description": "Idempotency key conflict."}})
+@router.post("/api/v1/experiences/drafts", response_model=ExperienceRead, response_model_exclude_none=True, status_code=201, responses={**AUTH_RESPONSES, 409: {"description": "Idempotency key conflict."}})
 def create_draft(payload: ExperienceCreate, request: Request, response: Response, db: Session = Depends(get_db), idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"), principal: Principal = Depends(require_scope("experience:draft"))):
     req_id = request.state.request_id
     p_hash = request_hash(payload.model_dump(mode="json"))
@@ -111,12 +111,12 @@ def create_draft(payload: ExperienceCreate, request: Request, response: Response
     return obj
 
 
-@router.get("/api/v1/experiences/{experience_id}", response_model=ExperienceRead, responses=NOT_FOUND_RESPONSE)
+@router.get("/api/v1/experiences/{experience_id}", response_model=ExperienceRead, response_model_exclude_none=True, responses=NOT_FOUND_RESPONSE)
 def get_experience(experience_id: uuid.UUID, db: Session = Depends(get_db), principal: Principal | None = Security(optional_principal)):
     return _get_readable_experience(db, experience_id, principal)
 
 
-@router.get("/api/v1/experiences", response_model=list[ExperienceRead])
+@router.get("/api/v1/experiences", response_model=list[ExperienceRead], response_model_exclude_none=True)
 def list_experiences(subject_id: uuid.UUID | None = None, owner_id: uuid.UUID | None = None, subject_type: str | None = None, limit: PageLimit = 50, offset: PageOffset = 0, db: Session = Depends(get_db)):
     q = select(Experience).where(
         Experience.deleted_at.is_(None),
@@ -130,7 +130,7 @@ def list_experiences(subject_id: uuid.UUID | None = None, owner_id: uuid.UUID | 
     return list(db.scalars(q.offset(offset).limit(limit)).all())
 
 
-@router.patch("/api/v1/experiences/{experience_id}", response_model=ExperienceRead, responses={**AUTH_RESPONSES, **NOT_FOUND_RESPONSE, 409: {"description": "Only the expected draft version can be edited."}})
+@router.patch("/api/v1/experiences/{experience_id}", response_model=ExperienceRead, response_model_exclude_none=True, responses={**AUTH_RESPONSES, **NOT_FOUND_RESPONSE, 409: {"description": "Only the expected draft version can be edited."}})
 def edit_draft(experience_id: uuid.UUID, payload: ExperiencePatch, request: Request, db: Session = Depends(get_db), principal: Principal = Depends(require_scope("experience:edit"))):
     obj = db.get(Experience, experience_id)
     if not obj or obj.deleted_at: raise HTTPException(404, "Experience not found")
@@ -154,7 +154,7 @@ def edit_draft(experience_id: uuid.UUID, payload: ExperiencePatch, request: Requ
     return obj
 
 
-@router.post("/api/v1/experiences/{experience_id}/publish", response_model=ExperienceRead, responses={**AUTH_RESPONSES, **NOT_FOUND_RESPONSE, 409: {"description": "Draft version conflict."}})
+@router.post("/api/v1/experiences/{experience_id}/publish", response_model=ExperienceRead, response_model_exclude_none=True, responses={**AUTH_RESPONSES, **NOT_FOUND_RESPONSE, 409: {"description": "Draft version conflict."}})
 def publish(experience_id: uuid.UUID, payload: PublishRequest, request: Request, db: Session = Depends(get_db), principal: Principal = Depends(require_scope("experience:publish"))):
     obj = db.get(Experience, experience_id)
     if not obj or obj.deleted_at: raise HTTPException(404, "Experience not found")
