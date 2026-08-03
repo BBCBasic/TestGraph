@@ -9,10 +9,16 @@ class StrictModel(BaseModel):
     model_config = ConfigDict(extra="forbid", from_attributes=True)
 
 
+EvidenceType = Literal["asserted", "elicited", "assented", "inferred"]
+
+
 class Observation(StrictModel):
     category: str
     statement: str
     confidence: float = Field(ge=0, le=1)
+    evidence_type: EvidenceType = "asserted"
+    supporting_quote: str | None = None
+    source_reference: str | None = None
 
 
 class SubjectiveImpression(StrictModel):
@@ -21,6 +27,9 @@ class SubjectiveImpression(StrictModel):
     sentiment: float = Field(ge=-1, le=1)
     importance_to_reviewer: float = Field(ge=0, le=1)
     confidence: float = Field(default=0.8, ge=0, le=1)
+    evidence_type: EvidenceType = "asserted"
+    supporting_quote: str | None = None
+    source_reference: str | None = None
 
 
 class CommonExperienceData(StrictModel):
