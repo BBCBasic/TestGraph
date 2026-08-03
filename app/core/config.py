@@ -23,6 +23,10 @@ class Settings(BaseSettings):
     cors_origins: List[str] = ["http://127.0.0.1:8000", "http://localhost:8000"]
     log_level: str = "INFO"
     max_request_bytes: int = 1_000_000
+    oauth_owner_user_id: str | None = None
+    oauth_connection_code: str = "connect-dev"
+    oauth_access_token_minutes: int = 60
+    oauth_refresh_token_days: int = 30
 
     model_config = SettingsConfigDict(env_file=".env", case_sensitive=False)
 
@@ -59,9 +63,15 @@ class Settings(BaseSettings):
     def prevent_ephemeral_railway_sqlite(self):
         if os.getenv("RAILWAY_ENVIRONMENT") and self.database_url.startswith("sqlite"):
             raise ValueError("Railway is using SQLite. Add a Postgres DATABASE_URL reference to the API service.")
+        if self.environment.lower() == "production":
+            if self.oauth_connection_code == "connect-dev" or len(self.oauth_connection_code) < 20:
+                raise ValueError("OAUTH_CONNECTION_CODE must be a long private value in production")
+            if self.app_secret == "change-me" or len(self.app_secret) < 32:
+                raise ValueError("APP_SECRET must be a long random value in production")
         return self
 
 
 @lru_cache
 def get_settings() -> Settings:
     return Settings()
+
