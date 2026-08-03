@@ -61,6 +61,29 @@ def test_unknown_domain_field_rejected(client,auth):
     r=client.post("/api/v1/experiences/drafts",headers=auth,json=payload)
     assert r.status_code==400
 
+def test_sparse_recipe_review_omits_unmentioned_null_ratings(client,auth):
+    owner=create_user(client,auth,"Sparse Recipe User",{})
+    key=f"sparse-recipe-{uuid.uuid4()}"
+    subject=client.post("/api/v1/subjects",headers=auth,json={
+        "subject_type":"recipe",
+        "name":"French onion soup",
+        "canonical_key":key,
+    }).json()
+    response=client.post("/api/v1/experiences/drafts",headers=auth,json={
+        "owner_id":owner["id"],
+        "subject_id":subject["id"],
+        "subject_type":"recipe",
+        "schema_version":"1.0",
+        "headline":"Patience with the onions",
+        "summary":"Sweat the onions for longer than expected, then caramelise them.",
+        "common_data":{},
+        "domain_data":{},
+        "provenance":{"source_method":"llm_conversation"},
+    })
+    assert response.status_code==201
+    assert response.json()["domain_data"]=={"modifications":[]}
+    assert all(value is not None for value in response.json()["domain_data"].values())
+
 def test_recipe_create_draft_publish_and_retrieve(client,auth):
     owner=create_user(client,auth,"Recipe Flow User",{"flavour":0.9,"difficulty":0.7})
     key=f"recipe-flow-{uuid.uuid4()}"
