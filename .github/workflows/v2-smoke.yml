@@ -12,6 +12,7 @@ jobs:
   test:
     runs-on: ubuntu-latest
     env:
+      PYTHONPATH: .
       ENVIRONMENT: development
       DATABASE_URL: sqlite:///./test_v2.db
       APP_SECRET: test-secret-for-ci-only
@@ -26,5 +27,5 @@ jobs:
           python-version: '3.11'
       - run: pip install -r requirements.txt
       - run: python -m compileall -q app
-      - run: pytest -q tests/test_v2_concepts.py
+      - run: python -m pytest -q tests/test_v2_concepts.py
       - run: rm -f test_v2.db && alembic upgrade head
