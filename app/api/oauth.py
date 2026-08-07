@@ -28,8 +28,12 @@ def _hash(value: str) -> str:
     return hashlib.sha256(value.encode()).hexdigest()
 
 
-def _resource() -> str:
-    return f"{get_settings().public_base_url.rstrip('/')}/mcp"
+def _resource(path: str = "/mcp") -> str:
+    return f"{get_settings().public_base_url.rstrip('/')}{path}"
+
+
+def _allowed_resources() -> set[str]:
+    return {_resource("/mcp"), _resource("/mcp-v2")}
 
 
 def _issuer() -> str:
@@ -70,7 +74,7 @@ def _validate_authorize(db: Session, *, response_type: str, client_id: str, redi
     _client(db, client_id, redirect_uri)
     if code_challenge_method != "S256" or not code_challenge:
         raise HTTPException(400, "PKCE S256 is required")
-    if resource != _resource():
+    if resource not in _allowed_resources():
         raise HTTPException(400, "Invalid OAuth resource")
     return _validate_scope(scope)
 
@@ -114,28 +118,33 @@ def _user_from_capability(db: Session, supplied: str) -> User | None:
 
 
 def _connecting_user(db: Session, supplied: str) -> User | None:
-    # Normal connector login: the user's existing capability URL/key identifies
-    # exactly which TasteGraph account the OAuth grant belongs to.
     user = _user_from_capability(db, supplied)
     if user:
         return user
-
-    # Legacy single-owner code is retained for private development/testing.
     legacy = get_settings().oauth_connection_code
     if legacy and hmac.compare_digest(supplied, legacy):
         return _owner(db)
     return None
 
 
-@router.get("/.well-known/oauth-protected-resource")
-@router.get("/.well-known/oauth-protected-resource/mcp")
-def protected_resource_metadata():
+def _resource_metadata(resource: str) -> dict:
     return {
-        "resource": _resource(),
+        "resource": resource,
         "authorization_servers": [_issuer()],
         "scopes_supported": sorted(ALLOWED_SCOPES),
         "resource_documentation": f"{_issuer()}/integrations",
     }
+
+
+@router.get("/.well-known/oauth-protected-resource")
+@router.get("/.well-known/oauth-protected-resource/mcp")
+def protected_resource_metadata():
+    return _resource_metadata(_resource("/mcp"))
+
+
+@router.get("/.well-known/oauth-protected-resource/mcp-v2")
+def protected_resource_metadata_v2():
+    return _resource_metadata(_resource("/mcp-v2"))
 
 
 @router.get("/.well-known/oauth-authorization-server")
@@ -278,7 +287,7 @@ async def token(request: Request, db: Session = Depends(get_db)):
     grant_type = str(form.get("grant_type", ""))
     client_id = str(form.get("client_id", ""))
     resource = str(form.get("resource", ""))
-    if resource != _resource():
+    if resource not in _allowed_resources():
         return JSONResponse({"error": "invalid_target"}, status_code=400)
     if not db.get(OAuthClient, client_id):
         return JSONResponse({"error": "invalid_client"}, status_code=400)
