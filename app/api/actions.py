@@ -160,7 +160,48 @@ def save_review(
 
 @router.get("/openapi.json", include_in_schema=False)
 def actions_openapi():
-    """Minimal OpenAPI document intentionally kept simple for ChatGPT Actions import."""
+    """OpenAPI document kept simple enough for ChatGPT Actions import."""
+    rating = {"type": "number", "minimum": 0, "maximum": 10}
+    observation = {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["category", "statement", "confidence"],
+        "properties": {
+            "category": {"type": "string"},
+            "statement": {"type": "string"},
+            "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+            "evidence_type": {"type": "string", "enum": ["asserted", "elicited", "assented", "inferred"], "default": "asserted"},
+            "supporting_quote": {"type": "string"},
+            "source_reference": {"type": "string"}
+        }
+    }
+    impression = {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["category", "statement", "sentiment", "importance_to_reviewer"],
+        "properties": {
+            "category": {"type": "string"},
+            "statement": {"type": "string"},
+            "sentiment": {"type": "number", "minimum": -1, "maximum": 1},
+            "importance_to_reviewer": {"type": "number", "minimum": 0, "maximum": 1},
+            "confidence": {"type": "number", "minimum": 0, "maximum": 1, "default": 0.8},
+            "evidence_type": {"type": "string", "enum": ["asserted", "elicited", "assented", "inferred"], "default": "asserted"},
+            "supporting_quote": {"type": "string"},
+            "source_reference": {"type": "string"}
+        }
+    }
+    dish = {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["name"],
+        "properties": {
+            "name": {"type": "string"},
+            "rating": rating,
+            "notes": {"type": "string"},
+            "shared": {"type": "boolean", "default": False},
+            "would_order_again": {"type": "boolean"}
+        }
+    }
     review_schema = {
         "type": "object",
         "additionalProperties": False,
@@ -178,13 +219,49 @@ def actions_openapi():
             "summary": {"type": "string"},
             "common_data": {
                 "type": "object",
-                "description": "Structured common review data. Use getTasteGraphSchema first when fields are uncertain.",
-                "additionalProperties": True
+                "description": "Common review structure. Empty arrays/objects are valid when no common observations were captured.",
+                "additionalProperties": False,
+                "properties": {
+                    "observations": {"type": "array", "items": observation, "default": []},
+                    "subjective_impressions": {"type": "array", "items": impression, "default": []},
+                    "strengths": {"type": "array", "items": {"type": "string"}, "default": []},
+                    "weaknesses": {"type": "array", "items": {"type": "string"}, "default": []},
+                    "would_repeat": {"type": "boolean"},
+                    "special_journey_worthy": {"type": "boolean"},
+                    "confidence": {"type": "object", "additionalProperties": {"type": "number"}, "default": {}}
+                }
             },
             "domain_data": {
                 "type": "object",
-                "description": "Recipe- or restaurant-specific structured data. Use getTasteGraphSchema first and only send permitted fields.",
-                "additionalProperties": True
+                "description": "Structured domain fields. Call getTasteGraphSchema first. Restaurant fields include overall_rating, food and service. Recipe fields include overall_rating, flavour and difficulty.",
+                "additionalProperties": False,
+                "properties": {
+                    "overall_rating": rating,
+                    "food": rating,
+                    "service": rating,
+                    "atmosphere": rating,
+                    "value": rating,
+                    "noise_comfort": rating,
+                    "meal_pacing": rating,
+                    "drinks": rating,
+                    "visit_date": {"type": "string", "format": "date"},
+                    "meal_type": {"type": "string", "enum": ["breakfast", "brunch", "lunch", "afternoon_tea", "dinner", "late_night", "other"]},
+                    "party_size": {"type": "integer", "minimum": 1, "maximum": 100},
+                    "occasion": {"type": "string"},
+                    "wait_minutes": {"type": "integer", "minimum": 0, "maximum": 1440},
+                    "spend_per_person": {"type": "number", "minimum": 0},
+                    "currency": {"type": "string", "minLength": 3, "maxLength": 3},
+                    "dishes": {"type": "array", "items": dish, "default": []},
+                    "standout_dishes": {"type": "array", "items": {"type": "string"}, "default": []},
+                    "disappointing_dishes": {"type": "array", "items": {"type": "string"}, "default": []},
+                    "flavour": rating,
+                    "instruction_clarity": rating,
+                    "preparation_time_accuracy": rating,
+                    "ingredient_availability": rating,
+                    "difficulty": rating,
+                    "repeat_worthiness": rating,
+                    "modifications": {"type": "array", "items": {"type": "string"}, "default": []}
+                }
             },
             "visibility": {"type": "string", "enum": ["private", "unlisted", "public", "aggregate_only"], "default": "private"},
             "user_approved": {"type": "boolean", "description": "Must be true only after explicit user approval."},
@@ -196,7 +273,7 @@ def actions_openapi():
         "openapi": "3.1.0",
         "info": {
             "title": "TasteGraph ChatGPT Actions",
-            "version": "1.0.1",
+            "version": "1.0.2",
             "description": "Private read/write access to a user's TasteGraph review memory. Saving requires explicit user approval in the conversation."
         },
         "servers": [{"url": _base()}],
@@ -204,9 +281,7 @@ def actions_openapi():
             "securitySchemes": {
                 "bearerAuth": {"type": "http", "scheme": "bearer", "description": "TasteGraph capability key beginning tg_"}
             },
-            "schemas": {
-                "ReviewCreate": review_schema
-            }
+            "schemas": {"ReviewCreate": review_schema}
         },
         "security": [{"bearerAuth": []}],
         "paths": {
@@ -225,7 +300,7 @@ def actions_openapi():
                 "post": {
                     "operationId": "saveTasteGraphReview",
                     "summary": "Save an explicitly approved TasteGraph review",
-                    "description": "Call only after the user has explicitly approved the completed review. Set user_approved=true. Use getTasteGraphSchema first when structured fields are uncertain. Reuse the same idempotency_key when retrying the same review.",
+                    "description": "Call only after the user has explicitly approved the completed review. common_data and domain_data are required. Set user_approved=true. Use getTasteGraphSchema first and reuse the same idempotency_key when retrying the same review.",
                     "x-openai-isConsequential": True,
                     "requestBody": {
                         "required": True,
