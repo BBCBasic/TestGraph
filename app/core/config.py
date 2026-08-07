@@ -12,13 +12,21 @@ class ClientCredential(BaseModel):
     scopes: set[str] = set()
 
 
+def _default_public_base_url() -> str:
+    """Use Railway's public hostname automatically, while keeping localhost for development."""
+    railway_public_domain = os.getenv("RAILWAY_PUBLIC_DOMAIN", "").strip()
+    if railway_public_domain:
+        return f"https://{railway_public_domain}"
+    return "http://127.0.0.1:8000"
+
+
 class Settings(BaseSettings):
     environment: str = "development"
     database_url: str = "sqlite:///./tastegraph.db"
     app_secret: str = "change-me"
     development_api_key: str = "dev-secret"
     client_api_keys: dict[str, ClientCredential] = {}
-    public_base_url: str = "http://127.0.0.1:8000"
+    public_base_url: str = Field(default_factory=_default_public_base_url)
     allowed_hosts: List[str] = ["127.0.0.1", "localhost", "testserver"]
     cors_origins: List[str] = ["http://127.0.0.1:8000", "http://localhost:8000"]
     log_level: str = "INFO"
@@ -74,4 +82,3 @@ class Settings(BaseSettings):
 @lru_cache
 def get_settings() -> Settings:
     return Settings()
-
