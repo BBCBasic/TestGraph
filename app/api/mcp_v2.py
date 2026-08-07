@@ -14,6 +14,7 @@ from app.db.session import get_db
 from app.models.v2 import Concept, V2Experience, V2Subject
 from app.schemas.v2 import AssessmentCreate, ConceptEnsure, ExperienceCreate, FieldProposal, SubjectEnsure
 from app.services.v2 import create_assessment, create_experience, ensure_concept, ensure_subject, vocabulary
+from app.services.write_safety import begin_idempotent_write, finish_idempotent_write
 
 router = APIRouter()
 PROTOCOL_VERSION = "2025-06-18"
@@ -49,7 +50,7 @@ TOOLS = [
     {"name": "get_concept", "title": "Get canonical concept vocabulary", "description": "Look up inherited canonical fields and aliases before writing.",
      "inputSchema": {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"], "additionalProperties": False},
      **_security(READ_SECURITY), "annotations": {"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False}},
-    {"name": "save_experience", "title": "Save an approved direct experience", "description": "Only call after explicit user approval. TasteGraph canonicalises aliases. Include proposed_fields only for genuinely new dimensions.",
+    {"name": "save_experience", "title": "Save an approved direct experience", "description": "Only call after explicit user approval. TasteGraph canonicalises aliases. Include proposed_fields only for genuinely new dimensions. Reuse idempotency_key when retrying the same write.",
      "inputSchema": {"type": "object", "properties": {
          "concept_path": {"type": "string"}, "concept_description": {"type": "string"}, "subject_name": {"type": "string"},
          "canonical_key": {"type": "string"}, "identifiers": {"type": "object", "additionalProperties": True, "default": {}},
@@ -57,15 +58,17 @@ TOOLS = [
          "summary": {"type": "string"}, "raw_text": {"type": "string"}, "structured_data": {"type": "object", "additionalProperties": True, "default": {}},
          "proposed_fields": {"type": "array", "items": _proposal_schema(), "default": []},
          "visibility": {"type": "string", "enum": ["private", "unlisted", "public", "aggregate_only"], "default": "private"},
-         "user_approved": {"type": "boolean"}, "source_client": {"type": "string", "default": "mcp-v2"}},
-      "required": ["concept_path", "subject_name", "canonical_key", "headline", "summary", "user_approved"], "additionalProperties": False},
-     **_security(WRITE_SECURITY), "annotations": {"readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": False}},
-    {"name": "save_assessment", "title": "Save AI-derived assessment", "description": "Save AI analysis of external evidence separately from user experiences.",
+         "user_approved": {"type": "boolean"}, "source_client": {"type": "string", "default": "mcp-v2"},
+         "idempotency_key": {"type": "string", "minLength": 8, "maxLength": 200}},
+      "required": ["concept_path", "subject_name", "canonical_key", "headline", "summary", "user_approved", "idempotency_key"], "additionalProperties": False},
+     **_security(WRITE_SECURITY), "annotations": {"readOnlyHint": False, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False}},
+    {"name": "save_assessment", "title": "Save AI-derived assessment", "description": "Save AI analysis of external evidence separately from user experiences. Reuse idempotency_key when retrying the same write.",
      "inputSchema": {"type": "object", "properties": {"subject_id": {"type": "string"}, "assessment_type": {"type": "string"},
          "evidence": {"type": "object", "additionalProperties": True, "default": {}}, "analysis": {"type": "object", "additionalProperties": True, "default": {}},
          "conclusion": {"type": "string"}, "confidence": {"type": "number", "minimum": 0, "maximum": 1}, "source_model": {"type": "string"},
-         "provenance": {"type": "object", "additionalProperties": True, "default": {}}}, "required": ["subject_id", "assessment_type"], "additionalProperties": False},
-     **_security(WRITE_SECURITY), "annotations": {"readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": True}},
+         "provenance": {"type": "object", "additionalProperties": True, "default": {}}, "idempotency_key": {"type": "string", "minLength": 8, "maxLength": 200}},
+      "required": ["subject_id", "assessment_type", "idempotency_key"], "additionalProperties": False},
+     **_security(WRITE_SECURITY), "annotations": {"readOnlyHint": False, "destructiveHint": False, "idempotentHint": True, "openWorldHint": True}},
 ]
 
 
@@ -118,18 +121,30 @@ def _get_concept(db, args):
 
 def _save_experience(db, principal, args):
     if args.get("user_approved") is not True: return _error("Explicit user approval is required before saving a direct experience")
+    relevant = {k: v for k, v in args.items() if k != "idempotency_key"}
+    client_id = f"{principal.client_id}:v2"
+    payload_hash, prior = begin_idempotent_write(db, client_id=client_id, key=f"experience:{args['idempotency_key']}", payload=relevant)
+    if prior is not None: return _result(prior)
     proposals = [FieldProposal.model_validate(x) for x in args.get("proposed_fields", [])]
     concept = ensure_concept(db, ConceptEnsure(path=args["concept_path"], description=args.get("concept_description"), proposed_fields=proposals, created_by=args.get("source_client", "mcp-v2")))
     subject = ensure_subject(db, SubjectEnsure(concept_path=concept.path, name=args["subject_name"], canonical_key=args["canonical_key"], identifiers=args.get("identifiers", {}), attributes=args.get("subject_attributes", {})), principal.client_id)
     exp = create_experience(db, ExperienceCreate(owner_id=principal.user_id, subject_id=subject.id, headline=args["headline"], summary=args["summary"], raw_text=args.get("raw_text"), structured_data=args.get("structured_data", {}), proposed_fields=proposals, visibility=args.get("visibility", "private"), user_approved=True, source_client=args.get("source_client", "mcp-v2")), principal.client_id)
-    return _result({"saved": True, "experience_id": str(exp.id), "subject_id": str(subject.id), "concept_path": concept.path, "canonical_data": exp.structured_data, "normalization_log": exp.normalization_log})
+    body = {"saved": True, "experience_id": str(exp.id), "subject_id": str(subject.id), "concept_path": concept.path, "canonical_data": exp.structured_data, "normalization_log": exp.normalization_log}
+    finish_idempotent_write(db, client_id=client_id, key=f"experience:{args['idempotency_key']}", payload_hash=payload_hash, response_body=body)
+    return _result(body)
 
 
 def _save_assessment(db, principal, args):
     try: subject_id = uuid.UUID(str(args["subject_id"]))
     except (ValueError, KeyError): return _error("Invalid subject_id")
+    relevant = {k: v for k, v in args.items() if k != "idempotency_key"}
+    client_id = f"{principal.client_id}:v2"
+    payload_hash, prior = begin_idempotent_write(db, client_id=client_id, key=f"assessment:{args['idempotency_key']}", payload=relevant)
+    if prior is not None: return _result(prior)
     obj = create_assessment(db, AssessmentCreate(subject_id=subject_id, user_id=principal.user_id, assessment_type=args["assessment_type"], evidence=args.get("evidence", {}), analysis=args.get("analysis", {}), conclusion=args.get("conclusion"), confidence=args.get("confidence"), source_model=args.get("source_model"), provenance=args.get("provenance", {})))
-    return _result({"saved": True, "assessment_id": str(obj.id), "subject_id": str(obj.subject_id), "provenance_kind": obj.provenance.get("kind")})
+    body = {"saved": True, "assessment_id": str(obj.id), "subject_id": str(obj.subject_id), "provenance_kind": obj.provenance.get("kind")}
+    finish_idempotent_write(db, client_id=client_id, key=f"assessment:{args['idempotency_key']}", payload_hash=payload_hash, response_body=body)
+    return _result(body)
 
 
 @router.post("/mcp-v2")
@@ -137,7 +152,7 @@ async def mcp_v2(request: Request, db: Session = Depends(get_db)):
     body = await request.json(); rpc_id = body.get("id"); method = body.get("method")
     if method and method.startswith("notifications/"): return Response(status_code=202)
     if method == "initialize":
-        result = {"protocolVersion": PROTOCOL_VERSION, "capabilities": {"tools": {"listChanged": False}}, "serverInfo": {"name": "TasteGraph v2", "version": SERVER_VERSION}, "instructions": "Cross-AI experience memory. Check concepts before writes. Direct experiences require approval; external/AI analysis belongs in assessments."}
+        result = {"protocolVersion": PROTOCOL_VERSION, "capabilities": {"tools": {"listChanged": False}}, "serverInfo": {"name": "TasteGraph v2", "version": SERVER_VERSION}, "instructions": "Cross-AI experience memory. Check concepts before writes. Direct experiences require approval; external/AI analysis belongs in assessments. Reuse idempotency keys for retries."}
     elif method == "ping": result = {}
     elif method == "tools/list": result = {"tools": TOOLS}
     elif method == "tools/call":
