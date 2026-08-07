@@ -4,11 +4,11 @@ import re
 from typing import Any
 
 from sqlalchemy import select
-from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.models.v2 import Assessment, Concept, ConceptField, FieldAlias, Source, V2Experience, V2Subject
 from app.schemas.v2 import AssessmentCreate, ConceptEnsure, ExperienceCreate, FieldProposal, SourceCreate, SubjectEnsure
+from app.services.semantic import propose_alias
 
 
 def normalise_token(value: str) -> str:
@@ -67,12 +67,24 @@ def ensure_concept(db: Session, payload: ConceptEnsure) -> Concept:
 
 
 def ensure_field(db: Session, concept: Concept, proposal: FieldProposal, source: str) -> ConceptField:
+    """Ensure a canonical field exists.
+
+    This function deliberately does NOT turn submitted names or suggested aliases
+    into accepted aliases. Semantic equivalence is proposed by authenticated AI
+    clients and promoted only through the consensus service.
+    """
     canonical = proposal.canonical_name.strip()
-    field = db.scalar(select(ConceptField).where(
+    canonical_key = normalise_token(canonical)
+    if not canonical_key:
+        raise ValueError("Canonical field name is invalid")
+    existing_fields = list(db.scalars(select(ConceptField).where(
         ConceptField.concept_id == concept.id,
-        ConceptField.canonical_name == canonical,
         ConceptField.status == "active",
-    ))
+    )).all())
+    matches = [field for field in existing_fields if normalise_token(field.canonical_name) == canonical_key]
+    if len(matches) > 1:
+        raise ValueError(f"Canonical field '{canonical}' is ambiguous")
+    field = matches[0] if matches else None
     if not field:
         field = ConceptField(
             concept_id=concept.id,
@@ -86,26 +98,6 @@ def ensure_field(db: Session, concept: Concept, proposal: FieldProposal, source:
         )
         db.add(field); db.flush()
         concept.version += 1
-
-    aliases = {proposal.submitted_name, *proposal.aliases}
-    for alias in aliases:
-        alias_key = normalise_token(alias)
-        if not alias_key:
-            continue
-        existing = db.scalar(select(FieldAlias).where(
-            FieldAlias.concept_id == concept.id,
-            FieldAlias.alias_normalized == alias_key,
-        ))
-        if existing and existing.field_id != field.id:
-            raise ValueError(f"Alias '{alias}' is already assigned to another canonical field")
-        if not existing:
-            db.add(FieldAlias(
-                concept_id=concept.id,
-                field_id=field.id,
-                alias=alias,
-                alias_normalized=alias_key,
-                source=source,
-            ))
     return field
 
 
@@ -131,7 +123,10 @@ def vocabulary(db: Session, concept: Concept) -> dict[str, Any]:
             ConceptField.status == "active",
         )).all())
         for field in node_fields:
-            fields[normalise_token(field.canonical_name)] = field
+            key = normalise_token(field.canonical_name)
+            if key in fields and fields[key].id != field.id:
+                raise ValueError(f"Inherited canonical field collision for '{field.canonical_name}'")
+            fields[key] = field
             origins[field.canonical_name] = node.path
         node_aliases = list(db.scalars(select(FieldAlias).where(FieldAlias.concept_id == node.id)).all())
         field_by_id = {field.id: field for field in node_fields}
@@ -142,11 +137,20 @@ def vocabulary(db: Session, concept: Concept) -> dict[str, Any]:
     return {"fields": fields, "aliases": aliases, "origins": origins}
 
 
-def normalise_data(db: Session, concept: Concept, data: dict[str, Any], proposals: list[FieldProposal], source: str) -> tuple[dict, list]:
+def normalise_data(db: Session, concept: Concept, data: dict[str, Any], proposals: list[FieldProposal], proposer_client_id: str) -> tuple[dict, list]:
     proposal_map = {normalise_token(p.submitted_name): p for p in proposals}
-    # Proposals are added to the leaf concept before resolving the submitted data.
     for proposal in proposals:
-        ensure_field(db, concept, proposal, source)
+        field = ensure_field(db, concept, proposal, proposer_client_id)
+        for alias in {proposal.submitted_name, *proposal.aliases}:
+            if normalise_token(alias) and normalise_token(alias) != normalise_token(field.canonical_name):
+                propose_alias(
+                    db,
+                    concept=concept,
+                    alias=alias,
+                    canonical_name=field.canonical_name,
+                    proposer_client_id=proposer_client_id,
+                    rationale="Alias proposed while introducing or using a canonical field",
+                )
     db.flush()
 
     vocab = vocabulary(db, concept)
@@ -160,13 +164,13 @@ def normalise_data(db: Session, concept: Concept, data: dict[str, Any], proposal
         method = None
         if key in vocab["aliases"]:
             canonical = vocab["aliases"][key]
-            method = "alias"
+            method = "accepted_alias"
         elif key in vocab["fields"]:
             canonical = vocab["fields"][key].canonical_name
             method = "canonical"
         elif key in proposal_map:
             canonical = proposal_map[key].canonical_name
-            method = "proposed"
+            method = "new_field_proposal"
         else:
             unknown.append(submitted_name)
             continue
@@ -177,9 +181,9 @@ def normalise_data(db: Session, concept: Concept, data: dict[str, Any], proposal
         log.append({"submitted": submitted_name, "canonical": canonical, "method": method})
 
     if unknown:
-        available = sorted(field.canonical_name for field in vocab["fields"].values())
+        available = sorted({field.canonical_name for field in vocab["fields"].values()})
         raise ValueError({
-            "message": "Unknown fields must be mapped to an existing field or explicitly proposed",
+            "message": "Unknown fields must use an existing canonical field, an accepted alias, or a genuinely new field proposal. If the caller believes an unknown term means an existing field, it should propose that semantic alias separately and write using the existing canonical field until consensus accepts the alias.",
             "unknown_fields": unknown,
             "available_canonical_fields": available,
         })
@@ -236,7 +240,7 @@ def create_experience(db: Session, payload: ExperienceCreate, client_id: str) ->
     concept = db.get(Concept, subject.concept_id)
     if not concept:
         raise ValueError("Subject concept not found")
-    normalised, log = normalise_data(db, concept, payload.structured_data, payload.proposed_fields, payload.source_client)
+    normalised, log = normalise_data(db, concept, payload.structured_data, payload.proposed_fields, client_id)
     source = ensure_source(db, payload.source)
     obj = V2Experience(
         owner_id=payload.owner_id,
