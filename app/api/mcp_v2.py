@@ -13,12 +13,13 @@ from app.core.security import Principal, TokenError, principal_from_authorizatio
 from app.db.session import get_db
 from app.models.v2 import Concept, V2Experience, V2Subject
 from app.schemas.v2 import AssessmentCreate, ConceptEnsure, ExperienceCreate, FieldProposal, SubjectEnsure
+from app.services.semantic import list_alias_candidates, propose_alias
 from app.services.v2 import create_assessment, create_experience, ensure_concept, ensure_subject, vocabulary
 from app.services.write_safety import begin_idempotent_write, finish_idempotent_write
 
 router = APIRouter()
 PROTOCOL_VERSION = "2025-06-18"
-SERVER_VERSION = "2.0.0-alpha"
+SERVER_VERSION = "2.1.0-alpha"
 READ_SECURITY = [{"type": "oauth2", "scopes": ["reviews:read"]}]
 WRITE_SECURITY = [{"type": "oauth2", "scopes": ["reviews:write"]}]
 
@@ -31,44 +32,96 @@ def _proposal_schema():
     return {
         "type": "object",
         "properties": {
-            "submitted_name": {"type": "string"}, "canonical_name": {"type": "string"},
-            "data_type": {"type": "string", "default": "any"}, "description": {"type": "string"},
-            "unit": {"type": "string"}, "allowed_values": {"type": "array", "items": {}},
+            "submitted_name": {"type": "string"},
+            "canonical_name": {"type": "string"},
+            "data_type": {"type": "string", "default": "any"},
+            "description": {"type": "string"},
+            "unit": {"type": "string"},
+            "allowed_values": {"type": "array", "items": {}},
             "aliases": {"type": "array", "items": {"type": "string"}},
         },
-        "required": ["submitted_name", "canonical_name"], "additionalProperties": False,
+        "required": ["submitted_name", "canonical_name"],
+        "additionalProperties": False,
     }
 
 
 TOOLS = [
-    {"name": "search", "title": "Search TasteGraph v2 experiences", "description": "Search the connected user's direct experiences across any domain.",
-     "inputSchema": {"type": "object", "properties": {"query": {"type": "string", "default": ""}, "concept_path": {"type": "string"}, "limit": {"type": "integer", "minimum": 1, "maximum": 20, "default": 10}}, "additionalProperties": False},
-     **_security(READ_SECURITY), "annotations": {"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False}},
-    {"name": "fetch", "title": "Fetch a TasteGraph v2 experience", "description": "Fetch one complete direct experience, including submitted and canonical structured data.",
-     "inputSchema": {"type": "object", "properties": {"id": {"type": "string"}}, "required": ["id"], "additionalProperties": False},
-     **_security(READ_SECURITY), "annotations": {"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False}},
-    {"name": "get_concept", "title": "Get canonical concept vocabulary", "description": "Look up inherited canonical fields and aliases before writing.",
-     "inputSchema": {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"], "additionalProperties": False},
-     **_security(READ_SECURITY), "annotations": {"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False}},
-    {"name": "save_experience", "title": "Save an approved direct experience", "description": "Only call after explicit user approval. TasteGraph canonicalises aliases. Include proposed_fields only for genuinely new dimensions. Reuse idempotency_key when retrying the same write.",
-     "inputSchema": {"type": "object", "properties": {
-         "concept_path": {"type": "string"}, "concept_description": {"type": "string"}, "subject_name": {"type": "string"},
-         "canonical_key": {"type": "string"}, "identifiers": {"type": "object", "additionalProperties": True, "default": {}},
-         "subject_attributes": {"type": "object", "additionalProperties": True, "default": {}}, "headline": {"type": "string"},
-         "summary": {"type": "string"}, "raw_text": {"type": "string"}, "structured_data": {"type": "object", "additionalProperties": True, "default": {}},
-         "proposed_fields": {"type": "array", "items": _proposal_schema(), "default": []},
-         "visibility": {"type": "string", "enum": ["private", "unlisted", "public", "aggregate_only"], "default": "private"},
-         "user_approved": {"type": "boolean"}, "source_client": {"type": "string", "default": "mcp-v2"},
-         "idempotency_key": {"type": "string", "minLength": 8, "maxLength": 200}},
-      "required": ["concept_path", "subject_name", "canonical_key", "headline", "summary", "user_approved", "idempotency_key"], "additionalProperties": False},
-     **_security(WRITE_SECURITY), "annotations": {"readOnlyHint": False, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False}},
-    {"name": "save_assessment", "title": "Save AI-derived assessment", "description": "Save AI analysis of external evidence separately from user experiences. Reuse idempotency_key when retrying the same write.",
-     "inputSchema": {"type": "object", "properties": {"subject_id": {"type": "string"}, "assessment_type": {"type": "string"},
-         "evidence": {"type": "object", "additionalProperties": True, "default": {}}, "analysis": {"type": "object", "additionalProperties": True, "default": {}},
-         "conclusion": {"type": "string"}, "confidence": {"type": "number", "minimum": 0, "maximum": 1}, "source_model": {"type": "string"},
-         "provenance": {"type": "object", "additionalProperties": True, "default": {}}, "idempotency_key": {"type": "string", "minLength": 8, "maxLength": 200}},
-      "required": ["subject_id", "assessment_type", "idempotency_key"], "additionalProperties": False},
-     **_security(WRITE_SECURITY), "annotations": {"readOnlyHint": False, "destructiveHint": False, "idempotentHint": True, "openWorldHint": True}},
+    {
+        "name": "search",
+        "title": "Search TasteGraph v2 experiences",
+        "description": "Search the connected user's direct experiences across any domain.",
+        "inputSchema": {"type": "object", "properties": {"query": {"type": "string", "default": ""}, "concept_path": {"type": "string"}, "limit": {"type": "integer", "minimum": 1, "maximum": 20, "default": 10}}, "additionalProperties": False},
+        **_security(READ_SECURITY),
+        "annotations": {"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
+    },
+    {
+        "name": "fetch",
+        "title": "Fetch a TasteGraph v2 experience",
+        "description": "Fetch one complete direct experience, including submitted and canonical structured data.",
+        "inputSchema": {"type": "object", "properties": {"id": {"type": "string"}}, "required": ["id"], "additionalProperties": False},
+        **_security(READ_SECURITY),
+        "annotations": {"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
+    },
+    {
+        "name": "get_concept",
+        "title": "Get canonical concept vocabulary",
+        "description": "Check canonical fields, accepted aliases, and unresolved client proposals before writing. TasteGraph does not infer semantic equivalence itself.",
+        "inputSchema": {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"], "additionalProperties": False},
+        **_security(READ_SECURITY),
+        "annotations": {"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
+    },
+    {
+        "name": "propose_alias",
+        "title": "Propose a semantic alias mapping",
+        "description": "Use your own language understanding to propose that an unfamiliar term means an existing canonical field. TasteGraph records your authenticated client identity, detects disagreement, and accepts the alias only after independent client consensus.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "concept_path": {"type": "string"},
+                "alias": {"type": "string"},
+                "canonical_name": {"type": "string"},
+                "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+                "rationale": {"type": "string"},
+            },
+            "required": ["concept_path", "alias", "canonical_name"],
+            "additionalProperties": False,
+        },
+        **_security(WRITE_SECURITY),
+        "annotations": {"readOnlyHint": False, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
+    },
+    {
+        "name": "save_experience",
+        "title": "Save an approved direct experience",
+        "description": "Only call after explicit user approval. Check the concept first. Use existing canonical fields. proposed_fields is only for genuinely new dimensions; suggested aliases become client proposals, not immediately accepted aliases. Reuse idempotency_key on retry.",
+        "inputSchema": {"type": "object", "properties": {
+            "concept_path": {"type": "string"}, "concept_description": {"type": "string"}, "subject_name": {"type": "string"},
+            "canonical_key": {"type": "string"}, "identifiers": {"type": "object", "additionalProperties": True, "default": {}},
+            "subject_attributes": {"type": "object", "additionalProperties": True, "default": {}}, "headline": {"type": "string"},
+            "summary": {"type": "string"}, "raw_text": {"type": "string"}, "structured_data": {"type": "object", "additionalProperties": True, "default": {}},
+            "proposed_fields": {"type": "array", "items": _proposal_schema(), "default": []},
+            "visibility": {"type": "string", "enum": ["private", "unlisted", "public", "aggregate_only"], "default": "private"},
+            "user_approved": {"type": "boolean"}, "source_client": {"type": "string", "default": "mcp-v2"},
+            "idempotency_key": {"type": "string", "minLength": 8, "maxLength": 200}},
+            "required": ["concept_path", "subject_name", "canonical_key", "headline", "summary", "user_approved", "idempotency_key"],
+            "additionalProperties": False,
+        },
+        **_security(WRITE_SECURITY),
+        "annotations": {"readOnlyHint": False, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
+    },
+    {
+        "name": "save_assessment",
+        "title": "Save AI-derived assessment",
+        "description": "Save AI analysis of external evidence separately from user experiences. Reuse idempotency_key on retry.",
+        "inputSchema": {"type": "object", "properties": {
+            "subject_id": {"type": "string"}, "assessment_type": {"type": "string"},
+            "evidence": {"type": "object", "additionalProperties": True, "default": {}}, "analysis": {"type": "object", "additionalProperties": True, "default": {}},
+            "conclusion": {"type": "string"}, "confidence": {"type": "number", "minimum": 0, "maximum": 1}, "source_model": {"type": "string"},
+            "provenance": {"type": "object", "additionalProperties": True, "default": {}}, "idempotency_key": {"type": "string", "minLength": 8, "maxLength": 200}},
+            "required": ["subject_id", "assessment_type", "idempotency_key"], "additionalProperties": False,
+        },
+        **_security(WRITE_SECURITY),
+        "annotations": {"readOnlyHint": False, "destructiveHint": False, "idempotentHint": True, "openWorldHint": True},
+    },
 ]
 
 
@@ -87,11 +140,7 @@ def _auth_error(message):
 
 
 def _principal(request: Request, scope: str) -> Principal:
-    return principal_from_authorization(
-        request.headers.get("authorization"),
-        scope,
-        expected_resource=f"{_base()}/mcp-v2",
-    )
+    return principal_from_authorization(request.headers.get("authorization"), scope, expected_resource=f"{_base()}/mcp-v2")
 
 
 def _search(db, principal, args):
@@ -118,9 +167,36 @@ def _get_concept(db, args):
     try: path = normalise_path(str(args.get("path", "")))
     except ValueError as exc: return _error(str(exc))
     concept = db.scalar(select(Concept).where(Concept.path == path, Concept.status == "active"))
-    if not concept: return _error("Concept not found", {"path": path, "instruction": "save_experience may create it; propose only genuinely new fields"})
+    if not concept:
+        return _error("Concept not found", {"path": path, "instruction": "A new concept may be created during save. Do not invent a new field when an existing canonical field already expresses the meaning."})
     vocab = vocabulary(db, concept); unique = {f.id: f for f in vocab["fields"].values()}
-    return _result({"path": concept.path, "version": concept.version, "description": concept.description, "fields": [{"canonical_name": f.canonical_name, "data_type": f.data_type, "description": f.description, "unit": f.unit, "origin": vocab["origins"].get(f.canonical_name)} for f in unique.values()], "aliases": vocab["aliases"]})
+    return _result({
+        "path": concept.path,
+        "version": concept.version,
+        "description": concept.description,
+        "fields": [{"canonical_name": f.canonical_name, "data_type": f.data_type, "description": f.description, "unit": f.unit, "origin": vocab["origins"].get(f.canonical_name)} for f in unique.values()],
+        "accepted_aliases": vocab["aliases"],
+        "alias_candidates": list_alias_candidates(db, concept),
+        "semantic_policy": "Calling AI clients judge language meaning. TasteGraph only records proposals, detects conflicts, and promotes mappings after independent client consensus.",
+    })
+
+
+def _propose_alias(db, principal, args):
+    from app.services.v2 import normalise_path
+    path = normalise_path(str(args.get("concept_path", "")))
+    concept = db.scalar(select(Concept).where(Concept.path == path, Concept.status == "active"))
+    if not concept: return _error("Concept not found", {"path": path})
+    status = propose_alias(
+        db,
+        concept=concept,
+        alias=str(args.get("alias", "")),
+        canonical_name=str(args.get("canonical_name", "")),
+        proposer_client_id=f"{principal.client_id}:v2",
+        confidence=args.get("confidence"),
+        rationale=args.get("rationale"),
+    )
+    db.commit()
+    return _result(status)
 
 
 def _save_experience(db, principal, args):
@@ -130,10 +206,10 @@ def _save_experience(db, principal, args):
     payload_hash, prior = begin_idempotent_write(db, client_id=client_id, key=f"experience:{args['idempotency_key']}", payload=relevant)
     if prior is not None: return _result(prior)
     proposals = [FieldProposal.model_validate(x) for x in args.get("proposed_fields", [])]
-    concept = ensure_concept(db, ConceptEnsure(path=args["concept_path"], description=args.get("concept_description"), proposed_fields=proposals, created_by=args.get("source_client", "mcp-v2")))
-    subject = ensure_subject(db, SubjectEnsure(concept_path=concept.path, name=args["subject_name"], canonical_key=args["canonical_key"], identifiers=args.get("identifiers", {}), attributes=args.get("subject_attributes", {})), principal.client_id)
-    exp = create_experience(db, ExperienceCreate(owner_id=principal.user_id, subject_id=subject.id, headline=args["headline"], summary=args["summary"], raw_text=args.get("raw_text"), structured_data=args.get("structured_data", {}), proposed_fields=proposals, visibility=args.get("visibility", "private"), user_approved=True, source_client=args.get("source_client", "mcp-v2")), principal.client_id)
-    body = {"saved": True, "experience_id": str(exp.id), "subject_id": str(subject.id), "concept_path": concept.path, "canonical_data": exp.structured_data, "normalization_log": exp.normalization_log}
+    concept = ensure_concept(db, ConceptEnsure(path=args["concept_path"], description=args.get("concept_description"), proposed_fields=proposals, created_by=client_id))
+    subject = ensure_subject(db, SubjectEnsure(concept_path=concept.path, name=args["subject_name"], canonical_key=args["canonical_key"], identifiers=args.get("identifiers", {}), attributes=args.get("subject_attributes", {})), client_id)
+    exp = create_experience(db, ExperienceCreate(owner_id=principal.user_id, subject_id=subject.id, headline=args["headline"], summary=args["summary"], raw_text=args.get("raw_text"), structured_data=args.get("structured_data", {}), proposed_fields=proposals, visibility=args.get("visibility", "private"), user_approved=True, source_client=args.get("source_client", "mcp-v2")), client_id)
+    body = {"saved": True, "experience_id": str(exp.id), "subject_id": str(subject.id), "concept_path": concept.path, "canonical_data": exp.structured_data, "normalization_log": exp.normalization_log, "alias_candidates": list_alias_candidates(db, concept)}
     finish_idempotent_write(db, client_id=client_id, key=f"experience:{args['idempotency_key']}", payload_hash=payload_hash, response_body=body)
     return _result(body)
 
@@ -156,11 +232,12 @@ async def mcp_v2(request: Request, db: Session = Depends(get_db)):
     body = await request.json(); rpc_id = body.get("id"); method = body.get("method")
     if method and method.startswith("notifications/"): return Response(status_code=202)
     if method == "initialize":
-        result = {"protocolVersion": PROTOCOL_VERSION, "capabilities": {"tools": {"listChanged": False}}, "serverInfo": {"name": "TasteGraph v2", "version": SERVER_VERSION}, "instructions": "Cross-AI experience memory. Check concepts before writes. Direct experiences require approval; external/AI analysis belongs in assessments. Reuse idempotency keys for retries."}
+        result = {"protocolVersion": PROTOCOL_VERSION, "capabilities": {"tools": {"listChanged": False}}, "serverInfo": {"name": "TasteGraph v2", "version": SERVER_VERSION}, "instructions": "TasteGraph does not interpret language. Before writing, inspect the concept vocabulary. Use your own semantic judgement to reuse canonical fields and call propose_alias when a new term appears equivalent. TasteGraph coordinates independent client proposals and only promotes non-conflicting consensus mappings."}
     elif method == "ping": result = {}
     elif method == "tools/list": result = {"tools": TOOLS}
     elif method == "tools/call":
-        params = body.get("params") or {}; name = params.get("name"); args = params.get("arguments") or {}; scope = "reviews:write" if name in {"save_experience", "save_assessment"} else "reviews:read"
+        params = body.get("params") or {}; name = params.get("name"); args = params.get("arguments") or {}
+        scope = "reviews:write" if name in {"propose_alias", "save_experience", "save_assessment"} else "reviews:read"
         try: principal = _principal(request, scope)
         except TokenError as exc: result = _auth_error(str(exc))
         else:
@@ -168,12 +245,14 @@ async def mcp_v2(request: Request, db: Session = Depends(get_db)):
                 if name == "search": result = _search(db, principal, args)
                 elif name == "fetch": result = _fetch(db, principal, args)
                 elif name == "get_concept": result = _get_concept(db, args)
+                elif name == "propose_alias": result = _propose_alias(db, principal, args)
                 elif name == "save_experience": result = _save_experience(db, principal, args)
                 elif name == "save_assessment": result = _save_assessment(db, principal, args)
                 else: return JSONResponse({"jsonrpc": "2.0", "id": rpc_id, "error": {"code": -32602, "message": "Unknown tool"}})
             except Exception as exc:
                 db.rollback(); result = _error("TasteGraph v2 server error", {"type": type(exc).__name__, "message": str(exc)})
-    else: return JSONResponse({"jsonrpc": "2.0", "id": rpc_id, "error": {"code": -32601, "message": "Method not found"}})
+    else:
+        return JSONResponse({"jsonrpc": "2.0", "id": rpc_id, "error": {"code": -32601, "message": "Method not found"}})
     return JSONResponse({"jsonrpc": "2.0", "id": rpc_id, "result": result})
 
 
