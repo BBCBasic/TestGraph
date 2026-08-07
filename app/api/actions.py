@@ -31,7 +31,6 @@ def _action_credential(db: Session, authorization: str | None):
     try:
         return _credential(db, token.strip()), token.strip()
     except HTTPException as exc:
-        # Do not reveal whether a supplied secret ever existed.
         raise HTTPException(401, "Invalid TasteGraph API key") from exc
 
 
@@ -152,7 +151,6 @@ def save_review(
     except ValueError as exc:
         db.rollback()
         raise HTTPException(422, f"Review validation failed: {exc}") from exc
-    # Never return the secret-bearing capability URL to the Action client.
     safe = dict(body)
     safe["url"] = f"{_base()}/actions/reviews/{safe['experience_id']}"
     safe["read_back"] = safe["url"]
@@ -162,15 +160,44 @@ def save_review(
 
 @router.get("/openapi.json", include_in_schema=False)
 def actions_openapi():
-    """Minimal OpenAPI document intended for ChatGPT Custom GPT Actions import."""
-    common_schema = CommonExperienceData.model_json_schema()
-    review_schema = CapabilityReviewCreate.model_json_schema()
+    """Minimal OpenAPI document intentionally kept simple for ChatGPT Actions import."""
+    review_schema = {
+        "type": "object",
+        "additionalProperties": False,
+        "required": [
+            "subject_type", "subject_name", "canonical_key", "headline", "summary",
+            "common_data", "domain_data", "user_approved", "idempotency_key"
+        ],
+        "properties": {
+            "subject_type": {"type": "string", "enum": ["recipe", "restaurant"]},
+            "subject_name": {"type": "string"},
+            "canonical_key": {"type": "string"},
+            "canonical_identifiers": {"type": "object", "additionalProperties": True},
+            "subject_metadata": {"type": "object", "additionalProperties": True},
+            "headline": {"type": "string"},
+            "summary": {"type": "string"},
+            "common_data": {
+                "type": "object",
+                "description": "Structured common review data. Use getTasteGraphSchema first when fields are uncertain.",
+                "additionalProperties": True
+            },
+            "domain_data": {
+                "type": "object",
+                "description": "Recipe- or restaurant-specific structured data. Use getTasteGraphSchema first and only send permitted fields.",
+                "additionalProperties": True
+            },
+            "visibility": {"type": "string", "enum": ["private", "unlisted", "public", "aggregate_only"], "default": "private"},
+            "user_approved": {"type": "boolean", "description": "Must be true only after explicit user approval."},
+            "idempotency_key": {"type": "string", "minLength": 8, "maxLength": 200},
+            "source_client": {"type": "string", "default": "chatgpt-action"}
+        }
+    }
     spec = {
         "openapi": "3.1.0",
         "info": {
             "title": "TasteGraph ChatGPT Actions",
-            "version": "1.0.0",
-            "description": "Private read/write access to a user's TasteGraph review memory. Saving requires explicit user approval in the conversation.",
+            "version": "1.0.1",
+            "description": "Private read/write access to a user's TasteGraph review memory. Saving requires explicit user approval in the conversation."
         },
         "servers": [{"url": _base()}],
         "components": {
@@ -178,9 +205,8 @@ def actions_openapi():
                 "bearerAuth": {"type": "http", "scheme": "bearer", "description": "TasteGraph capability key beginning tg_"}
             },
             "schemas": {
-                "ReviewCreate": review_schema,
-                "CommonExperienceData": common_schema,
-            },
+                "ReviewCreate": review_schema
+            }
         },
         "security": [{"bearerAuth": []}],
         "paths": {
@@ -192,28 +218,28 @@ def actions_openapi():
                     "parameters": [
                         {"name": "q", "in": "query", "required": False, "schema": {"type": "string", "default": ""}},
                         {"name": "subject_type", "in": "query", "required": False, "schema": {"type": "string", "enum": ["recipe", "restaurant"]}},
-                        {"name": "limit", "in": "query", "required": False, "schema": {"type": "integer", "minimum": 1, "maximum": 20, "default": 10}},
+                        {"name": "limit", "in": "query", "required": False, "schema": {"type": "integer", "minimum": 1, "maximum": 20, "default": 10}}
                     ],
-                    "responses": {"200": {"description": "Matching reviews"}},
+                    "responses": {"200": {"description": "Matching reviews"}}
                 },
                 "post": {
                     "operationId": "saveTasteGraphReview",
                     "summary": "Save an explicitly approved TasteGraph review",
-                    "description": "Call only after the user has seen or clearly specified the completed review and explicitly approved saving it. Set user_approved=true. Use getTasteGraphSchema first when structured fields are uncertain. The idempotency_key must remain unchanged when retrying the same review.",
+                    "description": "Call only after the user has explicitly approved the completed review. Set user_approved=true. Use getTasteGraphSchema first when structured fields are uncertain. Reuse the same idempotency_key when retrying the same review.",
                     "x-openai-isConsequential": True,
                     "requestBody": {
                         "required": True,
-                        "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ReviewCreate"}}},
+                        "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ReviewCreate"}}}
                     },
-                    "responses": {"201": {"description": "Review saved"}, "422": {"description": "Schema validation error"}},
-                },
+                    "responses": {"201": {"description": "Review saved"}, "422": {"description": "Schema validation error"}}
+                }
             },
             "/actions/reviews/{experience_id}": {
                 "get": {
                     "operationId": "fetchTasteGraphReview",
                     "summary": "Fetch one complete TasteGraph review",
                     "parameters": [{"name": "experience_id", "in": "path", "required": True, "schema": {"type": "string", "format": "uuid"}}],
-                    "responses": {"200": {"description": "Complete stored review"}, "404": {"description": "Not found"}},
+                    "responses": {"200": {"description": "Complete stored review"}, "404": {"description": "Not found"}}
                 }
             },
             "/actions/schemas/{subject_type}": {
@@ -222,9 +248,9 @@ def actions_openapi():
                     "summary": "Get the exact common and domain schemas before saving",
                     "description": "Use before saveTasteGraphReview whenever fields are uncertain.",
                     "parameters": [{"name": "subject_type", "in": "path", "required": True, "schema": {"type": "string", "enum": ["recipe", "restaurant"]}}],
-                    "responses": {"200": {"description": "Common and domain JSON schemas"}},
+                    "responses": {"200": {"description": "Common and domain JSON schemas"}}
                 }
-            },
-        },
+            }
+        }
     }
     return JSONResponse(spec, headers={"Cache-Control": "no-store"})
