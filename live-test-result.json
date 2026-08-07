@@ -1,0 +1,17 @@
+{
+  "status": "passed",
+  "tested_at": 1786093644,
+  "experience_id": "d6363681-4a0a-494a-bffc-a78858d66dd8",
+  "headline": "[TEST] GET-only capability write succeeded",
+  "summary": "Fictional automated review created to verify GET prepare, GET commit, and GET read-back against the live TasteGraph service.",
+  "subject_name": "TasteGraph GET Capability Live Test Recipe",
+  "publication_status": "published",
+  "read_back_url": "https://web-production-299bb.up.railway.app/c/tg_VpyTiuZt1w_gsixwg6mxmRH3913eEiRVaAhWRH4NR_o/reviews/d6363681-4a0a-494a-bffc-a78858d66dd8",
+  "flow": [
+    "GET capability/new",
+    "GET capability manifest",
+    "GET prepare-review",
+    "GET commit",
+    "GET read-back"
+  ]
+}
