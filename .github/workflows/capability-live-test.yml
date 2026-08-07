@@ -1,0 +1,87 @@
+name: Capability live round-trip
+
+on:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+jobs:
+  live-test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Wait for Railway and test GET-only write/read
+        env:
+          BASE_URL: https://web-production-299bb.up.railway.app
+        run: |
+          python - <<'PY'
+          import base64, json, os, time, urllib.parse, urllib.request
+
+          base = os.environ['BASE_URL'].rstrip('/')
+
+          def get_json(url, retries=20):
+              last = None
+              for i in range(retries):
+                  try:
+                      req = urllib.request.Request(url, headers={'User-Agent':'TasteGraph-live-test/1.0'})
+                      with urllib.request.urlopen(req, timeout=20) as r:
+                          if r.status != 200:
+                              raise RuntimeError(f'HTTP {r.status}')
+                          return json.loads(r.read().decode())
+                  except Exception as exc:
+                      last = exc
+                      time.sleep(min(5 + i, 15))
+              raise RuntimeError(f'GET failed after retries: {url}: {last}')
+
+          # Wait until the deployed capability manifest includes the GET-only prepare endpoint.
+          personal = None
+          manifest = None
+          for _ in range(30):
+              try:
+                  new = get_json(base + '/capability/new', retries=1)
+                  personal = new['personal_url']
+                  key = personal.rsplit('/', 1)[-1]
+                  print(f'::add-mask::{key}')
+                  manifest = get_json(personal, retries=1)
+                  if 'prepare_review' in manifest.get('endpoints', {}):
+                      break
+              except Exception:
+                  pass
+              time.sleep(10)
+          else:
+              raise RuntimeError('Railway never exposed prepare_review endpoint')
+
+          payload = {
+              'subject_type': 'recipe',
+              'subject_name': 'TasteGraph GET Capability Live Test Recipe',
+              'canonical_key': 'tastegraph-get-capability-live-test-' + str(int(time.time())),
+              'headline': '[TEST] GET-only capability write succeeded',
+              'summary': 'Fictional automated review created to verify GET prepare, GET commit, and GET read-back against the live TasteGraph service.',
+              'common_data': {},
+              'domain_data': {},
+              'visibility': 'private',
+              'user_approved': True,
+              'idempotency_key': 'github-live-test-' + str(int(time.time())),
+              'source_client': 'github-actions-live-test'
+          }
+          raw = json.dumps(payload, separators=(',', ':')).encode()
+          encoded = base64.urlsafe_b64encode(raw).rstrip(b'=').decode()
+          prepare_url = manifest['endpoints']['prepare_review'].replace('{base64url_json}', urllib.parse.quote(encoded, safe=''))
+          prepared = get_json(prepare_url)
+          assert prepared['prepared'] is True and prepared['saved'] is False, prepared
+          commit_url = prepared['commit_url']
+          committed = get_json(commit_url)
+          assert committed['saved'] is True, committed
+          read_url = committed['read_back_url']
+          stored = get_json(read_url)
+
+          assert stored['headline'] == payload['headline'], stored
+          assert stored['summary'] == payload['summary'], stored
+          assert stored['subject']['name'] == payload['subject_name'], stored
+          assert stored['publication_status'] == 'published', stored
+
+          print('ROUND_TRIP_OK')
+          print('experience_id=' + stored['id'])
+          print('headline=' + stored['headline'])
+          print('publication_status=' + stored['publication_status'])
+          print('read_back_url=' + read_url)
+          PY
