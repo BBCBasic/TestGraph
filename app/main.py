@@ -11,7 +11,6 @@ from app.api.routes import router
 from app.api.oauth import router as oauth_router
 from app.api.mcp import router as mcp_router
 from app.api.capability import router as capability_router
-from app.api.capability_test import router as capability_test_router
 from app.core.config import get_settings
 
 settings=get_settings()
@@ -53,7 +52,7 @@ async def value_error_handler(request:Request,exc:ValueError):
 
 @app.get("/",response_class=HTMLResponse)
 def home():
-    return """<!doctype html><html><head><title>TasteGraph</title><style>body{font-family:system-ui;max-width:860px;margin:40px auto;padding:0 20px}code{background:#eee;padding:2px 5px}</style></head><body><h1>TasteGraph</h1><p>AI-native structured experience storage.</p><ul><li><a href='/capability/new'>Create a private AI capability URL</a></li><li><a href='/capability/test-start'>Temporary GET write self-test</a></li><li><a href='/reviews'>Browse reviews</a></li><li><a href='/docs'>API documentation</a></li><li><a href='/schemas'>Schema registry</a></li><li><a href='/.well-known/review-service.json'>AI discovery record</a></li><li><a href='/.well-known/oauth-protected-resource'>OAuth discovery (parked)</a></li><li><a href='/health/ready'>Health</a></li></ul><p>Primary AI access: <code>/capability/new</code>. OAuth/MCP remains available for later use.</p></body></html>"""
+    return """<!doctype html><html><head><title>TasteGraph</title><style>body{font-family:system-ui;max-width:860px;margin:40px auto;padding:0 20px}code{background:#eee;padding:2px 5px}</style></head><body><h1>TasteGraph</h1><p>AI-native structured experience storage.</p><ul><li><a href='/capability/new'>Create a private AI capability URL</a></li><li><a href='/reviews'>Browse reviews</a></li><li><a href='/docs'>API documentation</a></li><li><a href='/schemas'>Schema registry</a></li><li><a href='/.well-known/review-service.json'>AI discovery record</a></li><li><a href='/.well-known/oauth-protected-resource'>OAuth discovery (parked)</a></li><li><a href='/health/ready'>Health</a></li></ul><p>Primary AI access: <code>/capability/new</code>. OAuth/MCP remains available for later use.</p></body></html>"""
 
 @app.get("/reviews", response_class=FileResponse, include_in_schema=False)
 def review_browser():
@@ -61,6 +60,5 @@ def review_browser():
 
 app.include_router(router)
 app.include_router(capability_router)
-app.include_router(capability_test_router)
 app.include_router(oauth_router)
 app.include_router(mcp_router)
