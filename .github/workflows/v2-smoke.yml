@@ -17,8 +17,8 @@ jobs:
       DATABASE_URL: sqlite:///./test_v2.db
       APP_SECRET: test-secret-for-ci-only
       DEVELOPMENT_API_KEY: dev-secret
-      PUBLIC_BASE_URL: http://localhost:8000
-      ALLOWED_HOSTS: '["localhost","testserver"]'
+      PUBLIC_BASE_URL: http://127.0.0.1:8000
+      ALLOWED_HOSTS: '["127.0.0.1","localhost","testserver"]'
       CORS_ORIGINS: '[]'
     steps:
       - uses: actions/checkout@v4
