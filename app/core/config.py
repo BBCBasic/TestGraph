@@ -45,6 +45,18 @@ class Settings(BaseSettings):
             return [v.strip() for v in value.split(",") if v.strip()]
         return value
 
+    @field_validator("public_base_url", mode="before")
+    @classmethod
+    def normalize_public_base_url(cls, value):
+        railway_public_domain = os.getenv("RAILWAY_PUBLIC_DOMAIN", "").strip()
+        if railway_public_domain:
+            # Railway must never advertise localhost to external OAuth/MCP clients,
+            # even if an old PUBLIC_BASE_URL environment variable is still present.
+            return f"https://{railway_public_domain}"
+        if not isinstance(value, str) or not value.strip():
+            return "http://127.0.0.1:8000"
+        return value.strip().rstrip("/")
+
     @field_validator("database_url", mode="before")
     @classmethod
     def normalize_database_url(cls, value):
