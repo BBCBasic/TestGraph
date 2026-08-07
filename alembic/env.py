@@ -4,6 +4,7 @@ from sqlalchemy import engine_from_config, pool
 from app.core.config import get_settings
 from app.db.base import Base
 from app.models import entities  # noqa
+from app.models import v2  # noqa
 config=context.config
 # Alembic stores options in ConfigParser, where a literal percent sign in a
 # database password must be escaped. ConfigParser converts it back when read.
