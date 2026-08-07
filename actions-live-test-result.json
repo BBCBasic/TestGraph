@@ -1,9 +1,0 @@
-{
-  "passed": true,
-  "flow": "Bearer Action search -> schema -> POST save -> GET read-back",
-  "experience_id": "84bad590-9ff0-492b-96b6-2e81e916e514",
-  "subject_name": "TasteGraph ChatGPT Actions Live Test Cafe",
-  "headline": "[TEST] ChatGPT Actions write succeeded",
-  "publication_status": "published",
-  "visibility": "private"
-}
