@@ -1,9 +1,7 @@
 import base64
 import hashlib
 import json
-import os
 import re
-import uuid
 from app.core.config import get_settings
 
 def _pkce(verifier):
@@ -28,7 +26,7 @@ def test_oauth_and_mcp_save_search_fetch(client,auth,monkeypatch):
     verifier="v"*64; challenge=_pkce(verifier); resource="http://127.0.0.1:8000/mcp"
     form={"response_type":"code","client_id":client_id,"redirect_uri":redirect_uri,"state":"state-1",
           "code_challenge":challenge,"code_challenge_method":"S256","resource":resource,
-          "scope":"reviews:read reviews:write","connection_code":"test-connect-code"}
+          "scope":"reviews:read reviews:write","connection_secret":"test-connect-code"}
     approved=client.post("/oauth/authorize",data=form,follow_redirects=False)
     assert approved.status_code==303
     code=re.search(r"[?&]code=([^&]+)",approved.headers["location"]).group(1)
@@ -38,7 +36,7 @@ def test_oauth_and_mcp_save_search_fetch(client,auth,monkeypatch):
     access=tokens.json()["access_token"]
     assert _rpc(client,"initialize").json()["result"]["serverInfo"]["name"]=="TasteGraph"
     tools=_rpc(client,"tools/list").json()["result"]["tools"]
-    assert {t["name"] for t in tools}=={"search","fetch","save_review"}
+    assert {t["name"] for t in tools}=={"search","fetch","get_schema","save_review"}
     unauth=_rpc(client,"tools/call",{"name":"search","arguments":{"query":"Example"}}).json()["result"]
     assert unauth["isError"] and "mcp/www_authenticate" in unauth["_meta"]
     review={"subject_type":"restaurant","subject_name":"Example Bistro","canonical_key":"example-bistro-test",
