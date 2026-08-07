@@ -19,15 +19,29 @@ def normalise_token(value: str) -> str:
     return value.strip("_")
 
 
+def _concept_chain(db: Session, concept: Concept) -> list[Concept]:
+    chain = [concept]
+    current = concept
+    while current.parent_id:
+        current = db.get(Concept, current.parent_id)
+        if not current:
+            break
+        chain.append(current)
+    chain.reverse()
+    return chain
+
+
 def _field_by_canonical(db: Session, concept: Concept, canonical_name: str) -> ConceptField | None:
     target = normalise_token(canonical_name)
-    fields = list(db.scalars(select(ConceptField).where(
-        ConceptField.concept_id == concept.id,
-        ConceptField.status == "active",
-    )).all())
-    matches = [field for field in fields if normalise_token(field.canonical_name) == target]
+    matches: list[ConceptField] = []
+    for node in _concept_chain(db, concept):
+        fields = list(db.scalars(select(ConceptField).where(
+            ConceptField.concept_id == node.id,
+            ConceptField.status == "active",
+        )).all())
+        matches.extend(field for field in fields if normalise_token(field.canonical_name) == target)
     if len(matches) > 1:
-        raise ValueError(f"Canonical field '{canonical_name}' is ambiguous in concept '{concept.path}'")
+        raise ValueError(f"Canonical field '{canonical_name}' is ambiguous in concept hierarchy '{concept.path}'")
     return matches[0] if matches else None
 
 
@@ -102,7 +116,7 @@ def propose_alias(
         raise ValueError("Alias must contain at least one alphanumeric character")
     field = _field_by_canonical(db, concept, canonical_name)
     if not field:
-        raise ValueError(f"Canonical field '{canonical_name}' does not exist in concept '{concept.path}'")
+        raise ValueError(f"Canonical field '{canonical_name}' does not exist in concept hierarchy '{concept.path}'")
 
     if alias_key == normalise_token(field.canonical_name):
         return {
