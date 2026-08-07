@@ -82,12 +82,16 @@ def _error(message, details=None):
 
 
 def _auth_error(message):
-    challenge = f'Bearer resource_metadata="{_base()}/.well-known/oauth-protected-resource", error="insufficient_scope", error_description="{message}"'
+    challenge = f'Bearer resource_metadata="{_base()}/.well-known/oauth-protected-resource/mcp-v2", error="insufficient_scope", error_description="{message}"'
     return {"content": [{"type": "text", "text": f"Authentication required: {message}."}], "isError": True, "_meta": {"mcp/www_authenticate": [challenge]}}
 
 
 def _principal(request: Request, scope: str) -> Principal:
-    return principal_from_authorization(request.headers.get("authorization"), scope)
+    return principal_from_authorization(
+        request.headers.get("authorization"),
+        scope,
+        expected_resource=f"{_base()}/mcp-v2",
+    )
 
 
 def _search(db, principal, args):
@@ -175,4 +179,4 @@ async def mcp_v2(request: Request, db: Session = Depends(get_db)):
 
 @router.get("/mcp-v2")
 def mcp_v2_get():
-    return JSONResponse({"service": "TasteGraph v2 MCP", "version": SERVER_VERSION, "transport": "Streamable HTTP", "method": "POST", "oauth_resource_metadata": f"{_base()}/.well-known/oauth-protected-resource", "tools": [x["name"] for x in TOOLS]}, status_code=405, headers={"Allow": "POST"})
+    return JSONResponse({"service": "TasteGraph v2 MCP", "version": SERVER_VERSION, "transport": "Streamable HTTP", "method": "POST", "oauth_resource_metadata": f"{_base()}/.well-known/oauth-protected-resource/mcp-v2", "tools": [x["name"] for x in TOOLS]}, status_code=405, headers={"Allow": "POST"})
