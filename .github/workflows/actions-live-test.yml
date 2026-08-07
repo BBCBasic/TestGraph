@@ -1,0 +1,96 @@
+name: ChatGPT Actions live round-trip
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - '.github/workflows/actions-live-test.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  live-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Wait for Railway deployment
+        shell: bash
+        run: |
+          set -euo pipefail
+          BASE='https://web-production-299bb.up.railway.app'
+          for i in $(seq 1 60); do
+            code=$(curl -sS -o /tmp/spec.json -w '%{http_code}' "$BASE/actions/openapi.json" || true)
+            if [ "$code" = "200" ] && jq -e '.paths["/actions/reviews"].post.operationId == "saveTasteGraphReview"' /tmp/spec.json >/dev/null 2>&1; then
+              echo 'Actions adapter is deployed.'
+              exit 0
+            fi
+            echo "Waiting for deployment ($i/60), status=$code"
+            sleep 5
+          done
+          echo 'Timed out waiting for Actions adapter.' >&2
+          exit 1
+
+      - name: Exercise read write and read-back
+        shell: bash
+        run: |
+          set -euo pipefail
+          BASE='https://web-production-299bb.up.railway.app'
+
+          curl -fsS "$BASE/capability/new" > /tmp/cap.json
+          PERSONAL=$(jq -r '.personal_url' /tmp/cap.json)
+          KEY=${PERSONAL##*/c/}
+          test -n "$KEY"
+
+          curl -fsS -H "Authorization: Bearer $KEY" "$BASE/actions/reviews?limit=3" > /tmp/search.json
+          jq -e '.count >= 0 and (.results | type == "array")' /tmp/search.json >/dev/null
+
+          curl -fsS -H "Authorization: Bearer $KEY" "$BASE/actions/schemas/restaurant" > /tmp/schema.json
+          jq -e '.subject_type == "restaurant" and .common_data_schema and .domain_data_schema' /tmp/schema.json >/dev/null
+
+          cat > /tmp/review.json <<JSON
+          {
+            "subject_type": "restaurant",
+            "subject_name": "TasteGraph ChatGPT Actions Live Test Cafe",
+            "canonical_key": "tastegraph-chatgpt-actions-live-test-cafe-${GITHUB_RUN_ID}",
+            "canonical_identifiers": {},
+            "subject_metadata": {"test": true},
+            "headline": "[TEST] ChatGPT Actions write succeeded",
+            "summary": "Private automated review created to verify the ChatGPT Actions-compatible Bearer read/write adapter against live Railway.",
+            "common_data": {},
+            "domain_data": {"overall_rating": 8, "food": 8, "service": 8},
+            "visibility": "private",
+            "user_approved": true,
+            "idempotency_key": "chatgpt-actions-live-${GITHUB_RUN_ID}",
+            "source_client": "chatgpt-actions-live-test"
+          }
+          JSON
+
+          curl -fsS -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' \
+            --data-binary @/tmp/review.json "$BASE/actions/reviews" > /tmp/save.json
+          ID=$(jq -r '.experience_id' /tmp/save.json)
+          jq -e '.saved == true and .publication_status == "published"' /tmp/save.json >/dev/null
+          test -n "$ID"
+
+          curl -fsS -H "Authorization: Bearer $KEY" "$BASE/actions/reviews/$ID" > /tmp/readback.json
+          jq -e '.headline == "[TEST] ChatGPT Actions write succeeded" and .publication_status == "published" and .visibility == "private" and .domain_data.overall_rating == 8 and .domain_data.food == 8 and .domain_data.service == 8' /tmp/readback.json >/dev/null
+
+          jq -n \
+            --arg experience_id "$ID" \
+            --arg subject_name "$(jq -r '.subject.name' /tmp/readback.json)" \
+            --arg headline "$(jq -r '.headline' /tmp/readback.json)" \
+            --arg publication_status "$(jq -r '.publication_status' /tmp/readback.json)" \
+            --arg visibility "$(jq -r '.visibility' /tmp/readback.json)" \
+            '{passed:true, flow:"Bearer Action search -> schema -> POST save -> GET read-back", experience_id:$experience_id, subject_name:$subject_name, headline:$headline, publication_status:$publication_status, visibility:$visibility}' \
+            > actions-live-test-result.json
+
+      - name: Commit safe test result
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add actions-live-test-result.json
+          git commit -m 'Record ChatGPT Actions live test result' || exit 0
+          git push
