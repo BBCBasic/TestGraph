@@ -69,7 +69,7 @@ def issue_access_token(*, user_id: uuid.UUID, client_id: str, scope: str, resour
     return f"{encoded}.{_b64url(signature)}", expires_in
 
 
-def decode_access_token(token: str) -> dict:
+def decode_access_token(token: str, expected_resource: str | None = None) -> dict:
     settings = get_settings()
     try:
         header_part, payload_part, signature_part = token.split(".")
@@ -84,7 +84,7 @@ def decode_access_token(token: str) -> dict:
             raise
         raise TokenError("Malformed access token") from exc
     now = int(time.time())
-    resource = f"{settings.public_base_url.rstrip('/')}/mcp"
+    resource = expected_resource or f"{settings.public_base_url.rstrip('/')}/mcp"
     if header.get("alg") != "HS256": raise TokenError("Unsupported token algorithm")
     if payload.get("iss") != settings.public_base_url.rstrip("/"): raise TokenError("Invalid token issuer")
     if payload.get("aud") != resource: raise TokenError("Invalid token audience")
@@ -93,14 +93,14 @@ def decode_access_token(token: str) -> dict:
     return payload
 
 
-def principal_from_authorization(authorization: str | None, required_scope: str) -> Principal:
+def principal_from_authorization(authorization: str | None, required_scope: str, expected_resource: str | None = None) -> Principal:
     settings = get_settings()
     if not authorization or not authorization.lower().startswith("bearer "):
         raise TokenError("No access token provided")
     token = authorization.split(" ", 1)[1]
     if hmac.compare_digest(token, settings.development_api_key):
         return Principal("development-user", "development-client", ALL_DEV_SCOPES)
-    payload = decode_access_token(token)
+    payload = decode_access_token(token, expected_resource=expected_resource)
     scopes = set(str(payload.get("scope", "")).split())
     equivalent = PUBLIC_SCOPE_EQUIVALENTS.get(required_scope)
     if required_scope not in scopes and (not equivalent or equivalent not in scopes):
@@ -146,4 +146,3 @@ def require_scope(required_scope: str):
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Insufficient scope")
         return principal
     return dependency
-
