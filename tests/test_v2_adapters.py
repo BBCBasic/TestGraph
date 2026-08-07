@@ -14,7 +14,7 @@ def test_mcp_v2_write_tools_are_retry_safe_and_expose_semantic_proposals():
         assert tools[name]["annotations"]["idempotentHint"] is True
     assert "propose_alias" in tools
     assert tools["propose_alias"]["inputSchema"]["required"] == ["concept_path", "alias", "canonical_name"]
-    assert "semantic" in tools["propose_alias"]["description"].lower()
+    assert tools["propose_alias"]["annotations"]["idempotentHint"] is True
 
 
 def test_action_v2_openapi_is_generic_separates_assessments_and_exposes_alias_proposals():
