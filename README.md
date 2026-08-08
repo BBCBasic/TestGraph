@@ -73,10 +73,9 @@ A guarded reset page is available at `/development/reset`. It is hidden and retu
 
 ```text
 ENABLE_DEVELOPMENT_RESET=true
-DEVELOPMENT_RESET_TOKEN=<a separate random value of at least 20 characters>
 ```
 
-The page requires the exact confirmation phrase and reset token, then permanently removes v1/v2 review and knowledge data. It preserves users, schemas, OAuth connections and capability credentials. Disable `ENABLE_DEVELOPMENT_RESET` when the control is not needed.
+The page provides one reset button with a browser confirmation, then permanently removes v1/v2 review and knowledge data. It preserves users, schemas, OAuth connections and capability credentials. Disable `ENABLE_DEVELOPMENT_RESET` when the control is not needed.
 
 ## Tests
 
