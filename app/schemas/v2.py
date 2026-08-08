@@ -57,7 +57,7 @@ class ExperienceCreate(StrictModel):
     subject_id: UUID
     headline: str = Field(min_length=1, max_length=240)
     summary: str = Field(min_length=1)
-    raw_text: str | None = None
+    raw_text: str = Field(min_length=1)
     structured_data: dict[str, Any] = {}
     experienced_at: datetime | None = None
     visibility: Literal["private", "unlisted", "public", "aggregate_only"] = "private"
@@ -111,7 +111,7 @@ class ExperienceRead(StrictModel):
     experienced_at: datetime | None
     headline: str
     summary: str
-    raw_text: str | None
+    raw_text: str
     structured_data: dict[str, Any]
     submitted_data: dict[str, Any]
     normalization_log: list[Any]
