@@ -54,6 +54,31 @@ class ConceptField(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
 
 
+class ConceptFieldProposal(Base):
+    __tablename__ = "concept_field_proposals"
+    __table_args__ = (
+        UniqueConstraint(
+            "concept_id", "canonical_name_normalized",
+            name="uq_concept_field_proposal_name",
+        ),
+    )
+    id: Mapped[uuid.UUID] = mapped_column(UuidType, primary_key=True, default=new_uuid)
+    concept_id: Mapped[uuid.UUID] = mapped_column(UuidType, ForeignKey("concepts.id"), index=True)
+    submitted_name: Mapped[str] = mapped_column(String(200))
+    canonical_name: Mapped[str] = mapped_column(String(200))
+    canonical_name_normalized: Mapped[str] = mapped_column(String(200), index=True)
+    json_schema: Mapped[dict] = mapped_column(JsonType)
+    description: Mapped[str | None] = mapped_column(Text)
+    aliases_json: Mapped[list] = mapped_column(JsonType, default=list)
+    proposer_client_id: Mapped[str] = mapped_column(String(200), index=True)
+    status: Mapped[str] = mapped_column(String(20), default="pending", index=True)
+    decision_by: Mapped[str | None] = mapped_column(String(120))
+    decision_reason: Mapped[str | None] = mapped_column(Text)
+    decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc, onupdate=now_utc)
+
+
 class FieldAlias(Base):
     __tablename__ = "field_aliases"
     __table_args__ = (UniqueConstraint("concept_id", "alias_normalized", name="uq_concept_alias"),)
