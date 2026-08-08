@@ -16,6 +16,7 @@ from app.api.capability import router as capability_router
 from app.api.integrations import router as integrations_router
 from app.api.actions import router as actions_router
 from app.api.actions_v2 import router as actions_v2_router
+from app.api.development import router as development_router
 from app.core.config import get_settings
 
 settings=get_settings()
@@ -51,7 +52,12 @@ async def value_error_handler(request:Request,exc:ValueError):
 
 @app.get("/",response_class=HTMLResponse)
 def home():
-    return """<!doctype html><html><head><title>TasteGraph</title><style>body{font-family:system-ui;max-width:860px;margin:40px auto;padding:0 20px}code{background:#eee;padding:2px 5px}</style></head><body><h1>TasteGraph</h1><p>AI-native structured experience storage.</p><ul><li><a href="/api/v2/concepts">V2 concept registry</a></li><li><a href="/actions-v2/openapi.json">V2 ChatGPT Action schema</a></li><li><a href="/mcp-v2">V2 MCP endpoint</a></li><li><a href="/docs">API documentation</a></li><li><a href="/integrations">Existing MCP / AI integration record</a></li><li><a href="/actions/openapi.json">Existing ChatGPT Action schema</a></li><li><a href="/capability/new">Create a private TasteGraph capability URL</a></li><li><a href="/reviews">Legacy review browser</a></li><li><a href="/schemas">Legacy schema registry</a></li><li><a href="/.well-known/review-service.json">AI discovery record</a></li><li><a href="/.well-known/oauth-protected-resource">OAuth protected-resource metadata</a></li><li><a href="/health/ready">Health</a></li></ul><p>V2 adds hierarchical concepts, inherited canonical fields, aliases, flexible structured experiences, sources and AI-derived assessments. Existing /mcp and /actions integrations remain unchanged while v2 is tested separately.</p></body></html>"""
+    development_link = (
+        '<li><a href="/development/reset">Development: empty user data</a></li>'
+        if settings.enable_development_reset
+        else ""
+    )
+    return f"""<!doctype html><html><head><title>TasteGraph</title><style>body{{font-family:system-ui;max-width:860px;margin:40px auto;padding:0 20px}}code{{background:#eee;padding:2px 5px}}</style></head><body><h1>TasteGraph</h1><p>AI-native structured experience storage.</p><ul>{development_link}<li><a href="/api/v2/concepts">V2 concept registry</a></li><li><a href="/actions-v2/openapi.json">V2 ChatGPT Action schema</a></li><li><a href="/mcp-v2">V2 MCP endpoint</a></li><li><a href="/docs">API documentation</a></li><li><a href="/integrations">Existing MCP / AI integration record</a></li><li><a href="/actions/openapi.json">Existing ChatGPT Action schema</a></li><li><a href="/capability/new">Create a private TasteGraph capability URL</a></li><li><a href="/reviews">Legacy review browser</a></li><li><a href="/schemas">Legacy schema registry</a></li><li><a href="/.well-known/review-service.json">AI discovery record</a></li><li><a href="/.well-known/oauth-protected-resource">OAuth protected-resource metadata</a></li><li><a href="/health/ready">Health</a></li></ul><p>V2 adds hierarchical concepts, inherited canonical fields, aliases, flexible structured experiences, sources and AI-derived assessments. Existing /mcp and /actions integrations remain unchanged while v2 is tested separately.</p></body></html>"""
 
 @app.get("/reviews", response_class=FileResponse, include_in_schema=False)
 def review_browser():
@@ -66,3 +72,4 @@ app.include_router(mcp_router)
 app.include_router(mcp_v2_router)
 app.include_router(actions_router)
 app.include_router(actions_v2_router)
+app.include_router(development_router)

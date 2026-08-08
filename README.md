@@ -67,6 +67,17 @@ python -m scripts.import_uci_recipe_reviews --load-bundle data/uci_recipe_review
 
 To inspect loaded records, use `GET /api/v1/subjects?subject_type=recipe` and `GET /api/v1/experiences?subject_type=recipe&publication_status=published` in `/docs`.
 
+## Development data reset
+
+A guarded reset page is available at `/development/reset`. It is hidden and returns 404 unless explicitly enabled:
+
+```text
+ENABLE_DEVELOPMENT_RESET=true
+DEVELOPMENT_RESET_TOKEN=<a separate random value of at least 20 characters>
+```
+
+The page requires the exact confirmation phrase and reset token, then permanently removes v1/v2 review and knowledge data. It preserves users, schemas, OAuth connections and capability credentials. Disable `ENABLE_DEVELOPMENT_RESET` when the control is not needed.
+
 ## Tests
 
 ```bash
