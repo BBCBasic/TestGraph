@@ -14,25 +14,27 @@ depends_on = None
 
 
 def upgrade() -> None:
-    op.add_column("assessments", sa.Column("experience_id", sa.Uuid(), nullable=True))
-    op.create_foreign_key(
-        "fk_assessments_experience_id",
-        "assessments",
-        "v2_experiences",
-        ["experience_id"],
-        ["id"],
-    )
-    op.create_index("ix_assessments_experience_id", "assessments", ["experience_id"])
-    op.add_column(
-        "assessments",
-        sa.Column("created_by_client", sa.String(200), server_default="legacy", nullable=False),
-    )
-    op.create_index("ix_assessments_created_by_client", "assessments", ["created_by_client"])
+    # Batch mode uses SQLite's copy-and-move strategy while remaining valid on
+    # PostgreSQL, so local development and Railway run the same migration.
+    with op.batch_alter_table("assessments") as batch_op:
+        batch_op.add_column(sa.Column("experience_id", sa.Uuid(), nullable=True))
+        batch_op.create_foreign_key(
+            "fk_assessments_experience_id",
+            "v2_experiences",
+            ["experience_id"],
+            ["id"],
+        )
+        batch_op.create_index("ix_assessments_experience_id", ["experience_id"])
+        batch_op.add_column(
+            sa.Column("created_by_client", sa.String(200), server_default="legacy", nullable=False)
+        )
+        batch_op.create_index("ix_assessments_created_by_client", ["created_by_client"])
 
 
 def downgrade() -> None:
-    op.drop_index("ix_assessments_created_by_client", table_name="assessments")
-    op.drop_column("assessments", "created_by_client")
-    op.drop_index("ix_assessments_experience_id", table_name="assessments")
-    op.drop_constraint("fk_assessments_experience_id", "assessments", type_="foreignkey")
-    op.drop_column("assessments", "experience_id")
+    with op.batch_alter_table("assessments") as batch_op:
+        batch_op.drop_index("ix_assessments_created_by_client")
+        batch_op.drop_column("created_by_client")
+        batch_op.drop_index("ix_assessments_experience_id")
+        batch_op.drop_constraint("fk_assessments_experience_id", type_="foreignkey")
+        batch_op.drop_column("experience_id")
