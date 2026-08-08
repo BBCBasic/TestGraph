@@ -1,12 +1,16 @@
 from __future__ import annotations
 
 import re
+import uuid
+from datetime import datetime, timezone
 from typing import Any
 
+from jsonschema import Draft202012Validator
+from jsonschema.exceptions import SchemaError, ValidationError
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.models.v2 import Assessment, Concept, ConceptField, FieldAlias, Source, V2Experience, V2Subject
+from app.models.v2 import Assessment, Concept, ConceptField, ConceptFieldProposal, FieldAlias, Source, V2Experience, V2Subject
 from app.schemas.v2 import AssessmentCreate, ConceptEnsure, ExperienceCreate, FieldProposal, SourceCreate, SubjectEnsure
 from app.services.semantic import propose_alias
 
@@ -38,8 +42,6 @@ def ensure_concept(db: Session, payload: ConceptEnsure) -> Concept:
             merged = dict(existing.definition_json or {})
             merged.update(payload.definition)
             existing.definition_json = merged
-        for proposal in payload.proposed_fields:
-            ensure_field(db, existing, proposal, payload.created_by)
         db.commit(); db.refresh(existing)
         return existing
 
@@ -60,23 +62,21 @@ def ensure_concept(db: Session, payload: ConceptEnsure) -> Concept:
             )
             db.add(current); db.flush()
         parent = current
-    for proposal in payload.proposed_fields:
-        ensure_field(db, parent, proposal, payload.created_by)
     db.commit(); db.refresh(parent)
     return parent
 
 
 def ensure_field(db: Session, concept: Concept, proposal: FieldProposal, source: str) -> ConceptField:
-    """Ensure a canonical field exists.
-
-    This function deliberately does NOT turn submitted names or suggested aliases
-    into accepted aliases. Semantic equivalence is proposed by authenticated AI
-    clients and promoted only through the consensus service.
-    """
+    """Create a canonical field only after an explicit development approval."""
     canonical = proposal.canonical_name.strip()
     canonical_key = normalise_token(canonical)
     if not canonical_key:
         raise ValueError("Canonical field name is invalid")
+    try:
+        Draft202012Validator.check_schema(proposal.json_schema)
+    except SchemaError as exc:
+        raise ValueError(f"Invalid JSON Schema for '{canonical}': {exc.message}") from exc
+
     existing_fields = list(db.scalars(select(ConceptField).where(
         ConceptField.concept_id == concept.id,
         ConceptField.status == "active",
@@ -84,23 +84,172 @@ def ensure_field(db: Session, concept: Concept, proposal: FieldProposal, source:
     matches = [field for field in existing_fields if normalise_token(field.canonical_name) == canonical_key]
     if len(matches) > 1:
         raise ValueError(f"Canonical field '{canonical}' is ambiguous")
-    field = matches[0] if matches else None
-    if not field:
-        field = ConceptField(
-            concept_id=concept.id,
-            canonical_name=canonical,
-            data_type=proposal.data_type,
-            description=proposal.description,
-            unit=proposal.unit,
-            allowed_values=proposal.allowed_values,
-            introduced_version=concept.version,
-            created_by=source,
-        )
-        db.add(field); db.flush()
-        concept.version += 1
+    if matches:
+        return matches[0]
+
+    field = ConceptField(
+        concept_id=concept.id,
+        canonical_name=canonical,
+        data_type=str(proposal.json_schema.get("type", "any")),
+        description=proposal.description,
+        unit=None,
+        allowed_values=list(proposal.json_schema.get("enum", [])),
+        metadata_json={"json_schema": proposal.json_schema},
+        introduced_version=concept.version + 1,
+        created_by=source,
+    )
+    db.add(field)
+    db.flush()
+    concept.version += 1
     return field
 
 
+def propose_concept_fields(
+    db: Session,
+    *,
+    concept: Concept,
+    proposals: list[FieldProposal],
+    proposer_client_id: str,
+) -> list[ConceptFieldProposal]:
+    created: list[ConceptFieldProposal] = []
+    active_names = {
+        normalise_token(name)
+        for name in vocabulary(db, concept)["fields"]
+    }
+    for proposal in proposals:
+        canonical_key = normalise_token(proposal.canonical_name)
+        if not canonical_key:
+            raise ValueError("Canonical field name is invalid")
+        if canonical_key in active_names:
+            raise ValueError(f"Canonical field '{proposal.canonical_name}' already exists")
+        try:
+            Draft202012Validator.check_schema(proposal.json_schema)
+        except SchemaError as exc:
+            raise ValueError(
+                f"Invalid JSON Schema for '{proposal.canonical_name}': {exc.message}"
+            ) from exc
+
+        existing = db.scalar(select(ConceptFieldProposal).where(
+            ConceptFieldProposal.concept_id == concept.id,
+            ConceptFieldProposal.canonical_name_normalized == canonical_key,
+        ))
+        if existing:
+            same = (
+                existing.submitted_name == proposal.submitted_name
+                and existing.canonical_name == proposal.canonical_name
+                and existing.json_schema == proposal.json_schema
+                and existing.description == proposal.description
+                and existing.aliases_json == proposal.aliases
+            )
+            if not same:
+                raise ValueError(
+                    f"A different proposal already exists for '{proposal.canonical_name}'"
+                )
+            if existing.status == "rejected":
+                existing.status = "pending"
+                existing.decision_by = None
+                existing.decision_reason = None
+                existing.decided_at = None
+            created.append(existing)
+            continue
+
+        obj = ConceptFieldProposal(
+            concept_id=concept.id,
+            submitted_name=proposal.submitted_name,
+            canonical_name=proposal.canonical_name,
+            canonical_name_normalized=canonical_key,
+            json_schema=proposal.json_schema,
+            description=proposal.description,
+            aliases_json=proposal.aliases,
+            proposer_client_id=proposer_client_id,
+            status="pending",
+        )
+        db.add(obj)
+        db.flush()
+        created.append(obj)
+    db.commit()
+    for obj in created:
+        db.refresh(obj)
+    return created
+
+
+def list_field_proposals(
+    db: Session,
+    concept: Concept | None = None,
+    *,
+    status: str | None = None,
+) -> list[ConceptFieldProposal]:
+    stmt = select(ConceptFieldProposal)
+    if concept is not None:
+        stmt = stmt.where(ConceptFieldProposal.concept_id == concept.id)
+    if status:
+        stmt = stmt.where(ConceptFieldProposal.status == status)
+    return list(db.scalars(stmt.order_by(ConceptFieldProposal.created_at)).all())
+
+
+def approve_field_proposal(
+    db: Session,
+    proposal_id: uuid.UUID,
+    *,
+    decided_by: str = "development-user",
+) -> ConceptField:
+    proposal = db.get(ConceptFieldProposal, proposal_id)
+    if not proposal:
+        raise ValueError("Field proposal not found")
+    if proposal.status == "rejected":
+        raise ValueError("Rejected field proposals cannot be approved")
+    concept = db.get(Concept, proposal.concept_id)
+    if not concept:
+        raise ValueError("Proposal concept not found")
+    field = ensure_field(
+        db,
+        concept,
+        FieldProposal(
+            submitted_name=proposal.submitted_name,
+            canonical_name=proposal.canonical_name,
+            json_schema=proposal.json_schema,
+            description=proposal.description,
+            aliases=proposal.aliases_json,
+        ),
+        decided_by,
+    )
+    proposal.status = "approved"
+    proposal.decision_by = decided_by
+    proposal.decided_at = datetime.now(timezone.utc)
+    db.commit()
+    db.refresh(field)
+    return field
+
+
+def reject_field_proposal(
+    db: Session,
+    proposal_id: uuid.UUID,
+    *,
+    reason: str | None = None,
+    decided_by: str = "development-user",
+) -> ConceptFieldProposal:
+    proposal = db.get(ConceptFieldProposal, proposal_id)
+    if not proposal:
+        raise ValueError("Field proposal not found")
+    if proposal.status == "approved":
+        raise ValueError("Approved field proposals cannot be rejected")
+    proposal.status = "rejected"
+    proposal.decision_by = decided_by
+    proposal.decision_reason = reason
+    proposal.decided_at = datetime.now(timezone.utc)
+    db.commit()
+    db.refresh(proposal)
+    return proposal
+
+
+def delete_field_proposal(db: Session, proposal_id: uuid.UUID) -> None:
+    proposal = db.get(ConceptFieldProposal, proposal_id)
+    if not proposal:
+        raise ValueError("Field proposal not found")
+    if proposal.status == "approved":
+        raise ValueError("Approved proposals cannot be deleted while their canonical field exists")
+    db.delete(proposal)
+    db.commit()
 def concept_chain(db: Session, concept: Concept) -> list[Concept]:
     chain = [concept]
     current = concept
@@ -137,22 +286,11 @@ def vocabulary(db: Session, concept: Concept) -> dict[str, Any]:
     return {"fields": fields, "aliases": aliases, "origins": origins}
 
 
-def normalise_data(db: Session, concept: Concept, data: dict[str, Any], proposals: list[FieldProposal], proposer_client_id: str) -> tuple[dict, list]:
-    proposal_map = {normalise_token(p.submitted_name): p for p in proposals}
-    for proposal in proposals:
-        field = ensure_field(db, concept, proposal, proposer_client_id)
-        for alias in {proposal.submitted_name, *proposal.aliases}:
-            if normalise_token(alias) and normalise_token(alias) != normalise_token(field.canonical_name):
-                propose_alias(
-                    db,
-                    concept=concept,
-                    alias=alias,
-                    canonical_name=field.canonical_name,
-                    proposer_client_id=proposer_client_id,
-                    rationale="Alias proposed while introducing or using a canonical field",
-                )
-    db.flush()
-
+def normalise_data(
+    db: Session,
+    concept: Concept,
+    data: dict[str, Any],
+) -> tuple[dict, list]:
     vocab = vocabulary(db, concept)
     output: dict[str, Any] = {}
     log: list[dict] = []
@@ -160,20 +298,30 @@ def normalise_data(db: Session, concept: Concept, data: dict[str, Any], proposal
 
     for submitted_name, value in data.items():
         key = normalise_token(submitted_name)
-        canonical = None
+        field = None
         method = None
         if key in vocab["aliases"]:
             canonical = vocab["aliases"][key]
+            field = vocab["fields"][normalise_token(canonical)]
             method = "accepted_alias"
         elif key in vocab["fields"]:
-            canonical = vocab["fields"][key].canonical_name
+            field = vocab["fields"][key]
+            canonical = field.canonical_name
             method = "canonical"
-        elif key in proposal_map:
-            canonical = proposal_map[key].canonical_name
-            method = "new_field_proposal"
         else:
             unknown.append(submitted_name)
             continue
+
+        schema = (field.metadata_json or {}).get("json_schema")
+        if schema:
+            try:
+                Draft202012Validator(schema).validate(value)
+            except ValidationError as exc:
+                location = ".".join(str(part) for part in exc.absolute_path)
+                suffix = f" at {location}" if location else ""
+                raise ValueError(
+                    f"Invalid value for canonical field '{canonical}'{suffix}: {exc.message}"
+                ) from exc
 
         if canonical in output and output[canonical] != value:
             raise ValueError(f"Conflicting values resolve to canonical field '{canonical}'")
@@ -183,13 +331,14 @@ def normalise_data(db: Session, concept: Concept, data: dict[str, Any], proposal
     if unknown:
         available = sorted({field.canonical_name for field in vocab["fields"].values()})
         raise ValueError({
-            "message": "Unknown fields must use an existing canonical field, an accepted alias, or a genuinely new field proposal. If the caller believes an unknown term means an existing field, it should propose that semantic alias separately and write using the existing canonical field until consensus accepts the alias.",
+            "message": (
+                "Unknown fields are not accepted during experience writes. "
+                "Use propose_concept_fields first, then wait for explicit approval."
+            ),
             "unknown_fields": unknown,
             "available_canonical_fields": available,
         })
     return output, log
-
-
 def ensure_subject(db: Session, payload: SubjectEnsure, created_by: str = "ai-client") -> V2Subject:
     concept = _concept(db, payload.concept_path)
     if not concept:
@@ -240,7 +389,7 @@ def create_experience(db: Session, payload: ExperienceCreate, client_id: str) ->
     concept = db.get(Concept, subject.concept_id)
     if not concept:
         raise ValueError("Subject concept not found")
-    normalised, log = normalise_data(db, concept, payload.structured_data, payload.proposed_fields, client_id)
+    normalised, log = normalise_data(db, concept, payload.structured_data)
     source = ensure_source(db, payload.source)
     obj = V2Experience(
         owner_id=payload.owner_id,
