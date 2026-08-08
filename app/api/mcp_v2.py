@@ -11,7 +11,7 @@ from sqlalchemy.orm import Session
 from app.core.config import get_settings
 from app.core.security import Principal, TokenError, principal_from_authorization
 from app.db.session import get_db
-from app.models.v2 import Concept, V2Experience, V2Subject
+from app.models.v2 import Assessment, Concept, V2Experience, V2Subject
 from app.schemas.v2 import AssessmentCreate, ConceptEnsure, ExperienceCreate, FieldProposal, SubjectEnsure
 from app.services.semantic import list_alias_candidates, propose_alias
 from app.services.v2 import (
@@ -138,16 +138,16 @@ TOOLS = [
     {
         "name": "save_assessment",
         "title": "Save AI-derived assessment",
-        "description": "Save AI analysis of external evidence separately from user experiences. Reuse idempotency_key on retry.",
+        "description": "Save AI-derived analysis against the exact experience it evaluates. The server derives the subject, owner, authenticated source client and provenance automatically; do not ask the user to supply them or separately approve routine derived analysis. Reuse idempotency_key on retry.",
         "inputSchema": {"type": "object", "properties": {
-            "subject_id": {"type": "string"}, "assessment_type": {"type": "string"},
+            "experience_id": {"type": "string", "format": "uuid"}, "assessment_type": {"type": "string"},
             "evidence": {"type": "object", "additionalProperties": True, "default": {}}, "analysis": {"type": "object", "additionalProperties": True, "default": {}},
             "conclusion": {"type": "string"}, "confidence": {"type": "number", "minimum": 0, "maximum": 1}, "source_model": {"type": "string"},
             "provenance": {"type": "object", "additionalProperties": True, "default": {}}, "idempotency_key": {"type": "string", "minLength": 8, "maxLength": 200}},
-            "required": ["subject_id", "assessment_type", "idempotency_key"], "additionalProperties": False,
+            "required": ["experience_id", "assessment_type", "idempotency_key"], "additionalProperties": False,
         },
         **_security(WRITE_SECURITY),
-        "annotations": {"readOnlyHint": False, "destructiveHint": False, "idempotentHint": True, "openWorldHint": True},
+        "annotations": {"readOnlyHint": False, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
     },
 ]
 
@@ -186,7 +186,12 @@ def _fetch(db, principal, args):
     row = db.execute(select(V2Experience, V2Subject, Concept).join(V2Subject, V2Experience.subject_id == V2Subject.id).join(Concept, V2Subject.concept_id == Concept.id).where(V2Experience.id == exp_id, V2Experience.owner_id == principal.user_id, V2Experience.deleted_at.is_(None))).first()
     if not row: return _error("Experience not found")
     e,s,c = row
-    return _result({"id": str(e.id), "subject": {"id": str(s.id), "name": s.name, "canonical_key": s.canonical_key, "concept_path": c.path, "identifiers": s.identifiers_json, "attributes": s.attributes_json}, "headline": e.headline, "summary": e.summary, "raw_text": e.raw_text, "structured_data": e.structured_data, "submitted_data": e.submitted_data, "normalization_log": e.normalization_log, "provenance": e.provenance, "created_at": e.created_at.isoformat()})
+    assessments = list(db.scalars(
+        select(Assessment)
+        .where(Assessment.experience_id == e.id)
+        .order_by(Assessment.created_at)
+    ).all())
+    return _result({"id": str(e.id), "subject": {"id": str(s.id), "name": s.name, "canonical_key": s.canonical_key, "concept_path": c.path, "identifiers": s.identifiers_json, "attributes": s.attributes_json}, "headline": e.headline, "summary": e.summary, "raw_text": e.raw_text, "structured_data": e.structured_data, "submitted_data": e.submitted_data, "normalization_log": e.normalization_log, "provenance": e.provenance, "assessments": [{"id": str(a.id), "experience_id": str(a.experience_id), "assessment_type": a.assessment_type, "evidence": a.evidence_json, "analysis": a.analysis_json, "conclusion": a.conclusion, "confidence": a.confidence, "source_model": a.source_model, "provenance": a.provenance, "created_by_client": a.created_by_client, "created_at": a.created_at.isoformat()} for a in assessments], "created_at": e.created_at.isoformat()})
 
 
 def _get_concept(db, args):
@@ -335,14 +340,19 @@ def _save_experience(db, principal, args):
     )
     return _result(body)
 def _save_assessment(db, principal, args):
-    try: subject_id = uuid.UUID(str(args["subject_id"]))
-    except (ValueError, KeyError): return _error("Invalid subject_id")
+    try: experience_id = uuid.UUID(str(args["experience_id"]))
+    except (ValueError, KeyError): return _error("Invalid experience_id")
     relevant = {k: v for k, v in args.items() if k != "idempotency_key"}
     client_id = f"{principal.client_id}:v2"
     payload_hash, prior = begin_idempotent_write(db, client_id=client_id, key=f"assessment:{args['idempotency_key']}", payload=relevant)
     if prior is not None: return _result(prior)
-    obj = create_assessment(db, AssessmentCreate(subject_id=subject_id, user_id=principal.user_id, assessment_type=args["assessment_type"], evidence=args.get("evidence", {}), analysis=args.get("analysis", {}), conclusion=args.get("conclusion"), confidence=args.get("confidence"), source_model=args.get("source_model"), provenance=args.get("provenance", {})))
-    body = {"saved": True, "assessment_id": str(obj.id), "subject_id": str(obj.subject_id), "provenance_kind": obj.provenance.get("kind")}
+    obj = create_assessment(
+        db,
+        AssessmentCreate(experience_id=experience_id, assessment_type=args["assessment_type"], evidence=args.get("evidence", {}), analysis=args.get("analysis", {}), conclusion=args.get("conclusion"), confidence=args.get("confidence"), source_model=args.get("source_model"), provenance=args.get("provenance", {})),
+        client_id=client_id,
+        user_id=principal.user_id,
+    )
+    body = {"saved": True, "assessment_id": str(obj.id), "experience_id": str(obj.experience_id), "subject_id": str(obj.subject_id), "provenance": obj.provenance, "created_by_client": obj.created_by_client}
     finish_idempotent_write(db, client_id=client_id, key=f"assessment:{args['idempotency_key']}", payload_hash=payload_hash, response_body=body)
     return _result(body)
 
@@ -352,7 +362,7 @@ async def mcp_v2(request: Request, db: Session = Depends(get_db)):
     body = await request.json(); rpc_id = body.get("id"); method = body.get("method")
     if method and method.startswith("notifications/"): return Response(status_code=202)
     if method == "initialize":
-        result = {"protocolVersion": PROTOCOL_VERSION, "capabilities": {"tools": {"listChanged": False}}, "serverInfo": {"name": "TasteGraph v2", "version": SERVER_VERSION}, "instructions": "Before writing, inspect the concept vocabulary. New fields must be proposed separately and explicitly approved by the user; save_experience never changes a concept schema. Preserve the user's exact words in raw_text and keep AI-derived interpretation in save_assessment."}
+        result = {"protocolVersion": PROTOCOL_VERSION, "capabilities": {"tools": {"listChanged": False}}, "serverInfo": {"name": "TasteGraph v2", "version": SERVER_VERSION}, "instructions": "Before writing, inspect the concept vocabulary. New fields must be proposed separately and remain pending for occasional user governance; do not make schema administration part of a normal review conversation. save_experience never changes a concept schema. Preserve the user's exact words in raw_text. Save routine AI-derived interpretation against the exact experience with save_assessment; the server supplies its subject, owner and authenticated provenance automatically."}
     elif method == "ping": result = {}
     elif method == "tools/list": result = {"tools": TOOLS}
     elif method == "tools/call":
