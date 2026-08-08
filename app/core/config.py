@@ -26,7 +26,6 @@ class Settings(BaseSettings):
     app_secret: str = "change-me"
     development_api_key: str = "dev-secret"
     enable_development_reset: bool = False
-    development_reset_token: str = ""
     client_api_keys: dict[str, ClientCredential] = {}
     public_base_url: str = Field(default_factory=_default_public_base_url)
     allowed_hosts: List[str] = ["127.0.0.1", "localhost", "testserver"]
@@ -83,11 +82,6 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def prevent_ephemeral_railway_sqlite(self):
-        if self.enable_development_reset and len(self.development_reset_token) < 20:
-            raise ValueError(
-                "DEVELOPMENT_RESET_TOKEN must contain at least 20 characters "
-                "when ENABLE_DEVELOPMENT_RESET is enabled"
-            )
         if os.getenv("RAILWAY_ENVIRONMENT") and self.database_url.startswith("sqlite"):
             raise ValueError("Railway is using SQLite. Add a Postgres DATABASE_URL reference to the API service.")
         if self.environment.lower() == "production":
