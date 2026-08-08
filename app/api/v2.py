@@ -160,22 +160,27 @@ def get_experience(experience_id: uuid.UUID, db: Session = Depends(get_db), prin
 
 @router.post("/assessments", status_code=201)
 def save_assessment(payload: AssessmentCreate, db: Session = Depends(get_db), principal: Principal = Depends(require_scope("experience:publish"))):
-    if payload.user_id and principal.user_id and payload.user_id != principal.user_id:
-        raise HTTPException(403, "Cannot save a personalised assessment for another user")
     try:
-        obj = create_assessment(db, payload)
+        obj = create_assessment(
+            db,
+            payload,
+            client_id=principal.client_id,
+            user_id=principal.user_id,
+        )
     except ValueError as exc:
         db.rollback(); raise HTTPException(422, str(exc))
-    return {"id": str(obj.id), "subject_id": str(obj.subject_id), "user_id": str(obj.user_id) if obj.user_id else None, "assessment_type": obj.assessment_type, "analysis": obj.analysis_json, "conclusion": obj.conclusion, "confidence": obj.confidence, "source_model": obj.source_model, "provenance": obj.provenance}
+    return {"id": str(obj.id), "experience_id": str(obj.experience_id), "subject_id": str(obj.subject_id), "user_id": str(obj.user_id) if obj.user_id else None, "assessment_type": obj.assessment_type, "evidence": obj.evidence_json, "analysis": obj.analysis_json, "conclusion": obj.conclusion, "confidence": obj.confidence, "source_model": obj.source_model, "provenance": obj.provenance, "created_by_client": obj.created_by_client}
 
 
 @router.get("/assessments")
-def find_assessments(subject_id: uuid.UUID | None = None, user_id: uuid.UUID | None = None, limit: PageLimit = 50, db: Session = Depends(get_db), principal: Principal = Depends(require_scope("experience:read"))):
+def find_assessments(experience_id: uuid.UUID | None = None, subject_id: uuid.UUID | None = None, user_id: uuid.UUID | None = None, limit: PageLimit = 50, db: Session = Depends(get_db), principal: Principal = Depends(require_scope("experience:read"))):
     user = user_id or principal.user_id
     stmt = select(Assessment).order_by(Assessment.created_at.desc())
     if subject_id:
         stmt = stmt.where(Assessment.subject_id == subject_id)
+    if experience_id:
+        stmt = stmt.where(Assessment.experience_id == experience_id)
     if user:
         stmt = stmt.where(or_(Assessment.user_id == user, Assessment.user_id.is_(None)))
     rows = list(db.scalars(stmt.limit(limit)).all())
-    return [{"id": str(x.id), "subject_id": str(x.subject_id), "user_id": str(x.user_id) if x.user_id else None, "assessment_type": x.assessment_type, "analysis": x.analysis_json, "conclusion": x.conclusion, "confidence": x.confidence, "source_model": x.source_model, "provenance": x.provenance, "created_at": x.created_at.isoformat()} for x in rows]
+    return [{"id": str(x.id), "experience_id": str(x.experience_id) if x.experience_id else None, "subject_id": str(x.subject_id), "user_id": str(x.user_id) if x.user_id else None, "assessment_type": x.assessment_type, "evidence": x.evidence_json, "analysis": x.analysis_json, "conclusion": x.conclusion, "confidence": x.confidence, "source_model": x.source_model, "provenance": x.provenance, "created_by_client": x.created_by_client, "created_at": x.created_at.isoformat()} for x in rows]

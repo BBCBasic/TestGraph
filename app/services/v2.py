@@ -411,20 +411,38 @@ def create_experience(db: Session, payload: ExperienceCreate, client_id: str) ->
     return obj
 
 
-def create_assessment(db: Session, payload: AssessmentCreate) -> Assessment:
-    subject = db.get(V2Subject, payload.subject_id)
+def create_assessment(
+    db: Session,
+    payload: AssessmentCreate,
+    *,
+    client_id: str,
+    user_id: uuid.UUID | None = None,
+) -> Assessment:
+    experience = db.get(V2Experience, payload.experience_id)
+    if not experience or experience.deleted_at:
+        raise ValueError("Experience not found")
+    if user_id is not None and experience.owner_id != user_id:
+        raise ValueError("Experience not found")
+    subject = db.get(V2Subject, experience.subject_id)
     if not subject or subject.deleted_at:
-        raise ValueError("Subject not found")
+        raise ValueError("Experience subject not found")
     obj = Assessment(
-        subject_id=payload.subject_id,
-        user_id=payload.user_id,
+        subject_id=experience.subject_id,
+        experience_id=experience.id,
+        user_id=experience.owner_id,
         assessment_type=payload.assessment_type,
         evidence_json=payload.evidence,
         analysis_json=payload.analysis,
         conclusion=payload.conclusion,
         confidence=payload.confidence,
         source_model=payload.source_model,
-        provenance={"kind": "ai_derived_assessment", **payload.provenance},
+        provenance={
+            **payload.provenance,
+            "kind": "ai_derived_assessment",
+            "target_experience_id": str(experience.id),
+            "source_client": client_id,
+        },
+        created_by_client=client_id,
     )
     db.add(obj); db.commit(); db.refresh(obj)
     return obj

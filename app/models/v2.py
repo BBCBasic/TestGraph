@@ -148,6 +148,11 @@ class Assessment(Base):
     __tablename__ = "assessments"
     id: Mapped[uuid.UUID] = mapped_column(UuidType, primary_key=True, default=new_uuid)
     subject_id: Mapped[uuid.UUID] = mapped_column(UuidType, ForeignKey("v2_subjects.id"), index=True)
+    experience_id: Mapped[uuid.UUID | None] = mapped_column(
+        UuidType,
+        ForeignKey("v2_experiences.id"),
+        index=True,
+    )
     user_id: Mapped[uuid.UUID | None] = mapped_column(UuidType, ForeignKey("users.id"), index=True)
     assessment_type: Mapped[str] = mapped_column(String(80), index=True)
     evidence_json: Mapped[dict] = mapped_column(JsonType, default=dict)
@@ -156,4 +161,5 @@ class Assessment(Base):
     confidence: Mapped[float | None] = mapped_column()
     source_model: Mapped[str | None] = mapped_column(String(120))
     provenance: Mapped[dict] = mapped_column(JsonType, default=dict)
+    created_by_client: Mapped[str] = mapped_column(String(200), default="unknown", index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
