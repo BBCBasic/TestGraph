@@ -67,8 +67,7 @@ class ExperienceCreate(StrictModel):
 
 
 class AssessmentCreate(StrictModel):
-    subject_id: UUID
-    user_id: UUID | None = None
+    experience_id: UUID
     assessment_type: str
     evidence: dict[str, Any] = {}
     analysis: dict[str, Any] = {}
