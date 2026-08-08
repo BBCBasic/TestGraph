@@ -72,7 +72,7 @@ def test_oauth_mcp_v2_resource_flow(client, auth, monkeypatch):
     assert initialized.json()["result"]["serverInfo"]["name"] == "TasteGraph v2"
 
     tools = _rpc(client, "/mcp-v2", "tools/list", token=access, call_id=2).json()["result"]["tools"]
-    assert {tool["name"] for tool in tools} == {"search", "fetch", "get_concept", "propose_alias", "save_experience", "save_assessment"}
+    assert {tool["name"] for tool in tools} == {"search", "fetch", "get_concept", "propose_concept_fields", "propose_alias", "save_experience", "save_assessment"}
 
     wrong_resource = _rpc(client, "/mcp", "tools/call", {"name": "search", "arguments": {}}, access, 3).json()["result"]
     assert wrong_resource["isError"] is True
