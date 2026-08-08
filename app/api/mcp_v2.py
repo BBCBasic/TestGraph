@@ -14,7 +14,16 @@ from app.db.session import get_db
 from app.models.v2 import Concept, V2Experience, V2Subject
 from app.schemas.v2 import AssessmentCreate, ConceptEnsure, ExperienceCreate, FieldProposal, SubjectEnsure
 from app.services.semantic import list_alias_candidates, propose_alias
-from app.services.v2 import create_assessment, create_experience, ensure_concept, ensure_subject, vocabulary
+from app.services.v2 import (
+    create_assessment,
+    create_experience,
+    ensure_concept,
+    ensure_subject,
+    list_field_proposals,
+    normalise_path,
+    propose_concept_fields,
+    vocabulary,
+)
 from app.services.write_safety import begin_idempotent_write, finish_idempotent_write
 
 router = APIRouter()
@@ -34,13 +43,15 @@ def _proposal_schema():
         "properties": {
             "submitted_name": {"type": "string"},
             "canonical_name": {"type": "string"},
-            "data_type": {"type": "string", "default": "any"},
+            "json_schema": {
+                "type": "object",
+                "description": "Complete JSON Schema for this field, including object properties and array items.",
+                "additionalProperties": True,
+            },
             "description": {"type": "string"},
-            "unit": {"type": "string"},
-            "allowed_values": {"type": "array", "items": {}},
             "aliases": {"type": "array", "items": {"type": "string"}},
         },
-        "required": ["submitted_name", "canonical_name"],
+        "required": ["submitted_name", "canonical_name", "json_schema"],
         "additionalProperties": False,
     }
 
@@ -71,6 +82,23 @@ TOOLS = [
         "annotations": {"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
     },
     {
+        "name": "propose_concept_fields",
+        "title": "Propose canonical concept fields",
+        "description": "Propose fully specified JSON Schema fields without creating an experience. Proposals remain pending until the user approves them on the development concept-fields page.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "concept_path": {"type": "string"},
+                "concept_description": {"type": "string"},
+                "fields": {"type": "array", "minItems": 1, "items": _proposal_schema()},
+            },
+            "required": ["concept_path", "fields"],
+            "additionalProperties": False,
+        },
+        **_security(WRITE_SECURITY),
+        "annotations": {"readOnlyHint": False, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
+    },
+    {
         "name": "propose_alias",
         "title": "Propose a semantic alias mapping",
         "description": "Use your own language understanding to propose that an unfamiliar term means an existing canonical field. TasteGraph records your authenticated client identity, detects disagreement, and accepts the alias only after independent client consensus.",
@@ -92,17 +120,16 @@ TOOLS = [
     {
         "name": "save_experience",
         "title": "Save an approved direct experience",
-        "description": "Only call after explicit user approval. Check the concept first. Use existing canonical fields. proposed_fields is only for genuinely new dimensions; suggested aliases become client proposals, not immediately accepted aliases. Reuse idempotency_key on retry.",
+        "description": "Only call after explicit user approval. The concept and every structured field must already be approved. This tool never changes the schema. Reuse idempotency_key on retry.",
         "inputSchema": {"type": "object", "properties": {
-            "concept_path": {"type": "string"}, "concept_description": {"type": "string"}, "subject_name": {"type": "string"},
+            "concept_path": {"type": "string"}, "subject_name": {"type": "string"},
             "canonical_key": {"type": "string"}, "identifiers": {"type": "object", "additionalProperties": True, "default": {}},
             "subject_attributes": {"type": "object", "additionalProperties": True, "default": {}}, "headline": {"type": "string"},
-            "summary": {"type": "string"}, "raw_text": {"type": "string"}, "structured_data": {"type": "object", "additionalProperties": True, "default": {}},
-            "proposed_fields": {"type": "array", "items": _proposal_schema(), "default": []},
+            "summary": {"type": "string"}, "raw_text": {"type": "string", "minLength": 1}, "structured_data": {"type": "object", "additionalProperties": True, "default": {}},
             "visibility": {"type": "string", "enum": ["private", "unlisted", "public", "aggregate_only"], "default": "private"},
-            "user_approved": {"type": "boolean"}, "source_client": {"type": "string", "default": "mcp-v2"},
+            "user_approved": {"type": "boolean"},
             "idempotency_key": {"type": "string", "minLength": 8, "maxLength": 200}},
-            "required": ["concept_path", "subject_name", "canonical_key", "headline", "summary", "user_approved", "idempotency_key"],
+            "required": ["concept_path", "subject_name", "canonical_key", "headline", "summary", "raw_text", "user_approved", "idempotency_key"],
             "additionalProperties": False,
         },
         **_security(WRITE_SECURITY),
@@ -174,10 +201,53 @@ def _get_concept(db, args):
         "path": concept.path,
         "version": concept.version,
         "description": concept.description,
-        "fields": [{"canonical_name": f.canonical_name, "data_type": f.data_type, "description": f.description, "unit": f.unit, "origin": vocab["origins"].get(f.canonical_name)} for f in unique.values()],
+        "fields": [{"canonical_name": f.canonical_name, "json_schema": (f.metadata_json or {}).get("json_schema", {"type": f.data_type}), "description": f.description, "origin": vocab["origins"].get(f.canonical_name)} for f in unique.values()],
+        "pending_field_proposals": [{
+            "id": str(p.id),
+            "submitted_name": p.submitted_name,
+            "canonical_name": p.canonical_name,
+            "json_schema": p.json_schema,
+            "description": p.description,
+            "aliases": p.aliases_json,
+            "proposed_by": p.proposer_client_id,
+            "status": p.status,
+        } for p in list_field_proposals(db, concept, status="pending")],
         "accepted_aliases": vocab["aliases"],
         "alias_candidates": list_alias_candidates(db, concept),
-        "semantic_policy": "Calling AI clients judge language meaning. TasteGraph only records proposals, detects conflicts, and promotes mappings after independent client consensus.",
+        "semantic_policy": "New fields remain pending until explicit user approval. Experience writes never change the concept schema.",
+    })
+
+
+def _propose_concept_fields(db, principal, args):
+    proposals = [FieldProposal.model_validate(item) for item in args.get("fields", [])]
+    if not proposals:
+        return _error("At least one field proposal is required")
+    client_id = f"{principal.client_id}:v2"
+    concept = ensure_concept(
+        db,
+        ConceptEnsure(
+            path=args["concept_path"],
+            description=args.get("concept_description"),
+            created_by=client_id,
+        ),
+    )
+    rows = propose_concept_fields(
+        db,
+        concept=concept,
+        proposals=proposals,
+        proposer_client_id=client_id,
+    )
+    return _result({
+        "concept_path": concept.path,
+        "concept_version": concept.version,
+        "proposals": [{
+            "id": str(row.id),
+            "canonical_name": row.canonical_name,
+            "json_schema": row.json_schema,
+            "status": row.status,
+        } for row in rows],
+        "approval_url": f"{_base()}/development/concept-fields",
+        "experience_created": False,
     })
 
 
@@ -200,20 +270,70 @@ def _propose_alias(db, principal, args):
 
 
 def _save_experience(db, principal, args):
-    if args.get("user_approved") is not True: return _error("Explicit user approval is required before saving a direct experience")
+    if args.get("user_approved") is not True:
+        return _error("Explicit user approval is required before saving a direct experience")
     relevant = {k: v for k, v in args.items() if k != "idempotency_key"}
     client_id = f"{principal.client_id}:v2"
-    payload_hash, prior = begin_idempotent_write(db, client_id=client_id, key=f"experience:{args['idempotency_key']}", payload=relevant)
-    if prior is not None: return _result(prior)
-    proposals = [FieldProposal.model_validate(x) for x in args.get("proposed_fields", [])]
-    concept = ensure_concept(db, ConceptEnsure(path=args["concept_path"], description=args.get("concept_description"), proposed_fields=proposals, created_by=client_id))
-    subject = ensure_subject(db, SubjectEnsure(concept_path=concept.path, name=args["subject_name"], canonical_key=args["canonical_key"], identifiers=args.get("identifiers", {}), attributes=args.get("subject_attributes", {})), client_id)
-    exp = create_experience(db, ExperienceCreate(owner_id=principal.user_id, subject_id=subject.id, headline=args["headline"], summary=args["summary"], raw_text=args.get("raw_text"), structured_data=args.get("structured_data", {}), proposed_fields=proposals, visibility=args.get("visibility", "private"), user_approved=True, source_client=args.get("source_client", "mcp-v2")), client_id)
-    body = {"saved": True, "experience_id": str(exp.id), "subject_id": str(subject.id), "concept_path": concept.path, "canonical_data": exp.structured_data, "normalization_log": exp.normalization_log, "alias_candidates": list_alias_candidates(db, concept)}
-    finish_idempotent_write(db, client_id=client_id, key=f"experience:{args['idempotency_key']}", payload_hash=payload_hash, response_body=body)
+    payload_hash, prior = begin_idempotent_write(
+        db,
+        client_id=client_id,
+        key=f"experience:{args['idempotency_key']}",
+        payload=relevant,
+    )
+    if prior is not None:
+        return _result(prior)
+
+    path = normalise_path(str(args["concept_path"]))
+    concept = db.scalar(select(Concept).where(Concept.path == path, Concept.status == "active"))
+    if not concept:
+        return _error(
+            "Concept does not exist",
+            {"concept_path": path, "instruction": "Use propose_concept_fields and approve its fields before saving."},
+        )
+    subject = ensure_subject(
+        db,
+        SubjectEnsure(
+            concept_path=concept.path,
+            name=args["subject_name"],
+            canonical_key=args["canonical_key"],
+            identifiers=args.get("identifiers", {}),
+            attributes=args.get("subject_attributes", {}),
+            create_concept_if_missing=False,
+        ),
+        client_id,
+    )
+    exp = create_experience(
+        db,
+        ExperienceCreate(
+            owner_id=principal.user_id,
+            subject_id=subject.id,
+            headline=args["headline"],
+            summary=args["summary"],
+            raw_text=args["raw_text"],
+            structured_data=args.get("structured_data", {}),
+            visibility=args.get("visibility", "private"),
+            user_approved=True,
+            source_client=client_id,
+        ),
+        client_id,
+    )
+    body = {
+        "saved": True,
+        "experience_id": str(exp.id),
+        "subject_id": str(subject.id),
+        "concept_path": concept.path,
+        "canonical_data": exp.structured_data,
+        "normalization_log": exp.normalization_log,
+        "alias_candidates": list_alias_candidates(db, concept),
+    }
+    finish_idempotent_write(
+        db,
+        client_id=client_id,
+        key=f"experience:{args['idempotency_key']}",
+        payload_hash=payload_hash,
+        response_body=body,
+    )
     return _result(body)
-
-
 def _save_assessment(db, principal, args):
     try: subject_id = uuid.UUID(str(args["subject_id"]))
     except (ValueError, KeyError): return _error("Invalid subject_id")
@@ -232,12 +352,12 @@ async def mcp_v2(request: Request, db: Session = Depends(get_db)):
     body = await request.json(); rpc_id = body.get("id"); method = body.get("method")
     if method and method.startswith("notifications/"): return Response(status_code=202)
     if method == "initialize":
-        result = {"protocolVersion": PROTOCOL_VERSION, "capabilities": {"tools": {"listChanged": False}}, "serverInfo": {"name": "TasteGraph v2", "version": SERVER_VERSION}, "instructions": "TasteGraph does not interpret language. Before writing, inspect the concept vocabulary. Use your own semantic judgement to reuse canonical fields and call propose_alias when a new term appears equivalent. TasteGraph coordinates independent client proposals and only promotes non-conflicting consensus mappings."}
+        result = {"protocolVersion": PROTOCOL_VERSION, "capabilities": {"tools": {"listChanged": False}}, "serverInfo": {"name": "TasteGraph v2", "version": SERVER_VERSION}, "instructions": "Before writing, inspect the concept vocabulary. New fields must be proposed separately and explicitly approved by the user; save_experience never changes a concept schema. Preserve the user's exact words in raw_text and keep AI-derived interpretation in save_assessment."}
     elif method == "ping": result = {}
     elif method == "tools/list": result = {"tools": TOOLS}
     elif method == "tools/call":
         params = body.get("params") or {}; name = params.get("name"); args = params.get("arguments") or {}
-        scope = "reviews:write" if name in {"propose_alias", "save_experience", "save_assessment"} else "reviews:read"
+        scope = "reviews:write" if name in {"propose_concept_fields", "propose_alias", "save_experience", "save_assessment"} else "reviews:read"
         try: principal = _principal(request, scope)
         except TokenError as exc: result = _auth_error(str(exc))
         else:
@@ -245,6 +365,7 @@ async def mcp_v2(request: Request, db: Session = Depends(get_db)):
                 if name == "search": result = _search(db, principal, args)
                 elif name == "fetch": result = _fetch(db, principal, args)
                 elif name == "get_concept": result = _get_concept(db, args)
+                elif name == "propose_concept_fields": result = _propose_concept_fields(db, principal, args)
                 elif name == "propose_alias": result = _propose_alias(db, principal, args)
                 elif name == "save_experience": result = _save_experience(db, principal, args)
                 elif name == "save_assessment": result = _save_assessment(db, principal, args)

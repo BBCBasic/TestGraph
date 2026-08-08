@@ -10,9 +10,9 @@ from app.api.capability import _credential, _headers
 from app.core.config import get_settings
 from app.db.session import get_db
 from app.models.v2 import Concept, V2Experience, V2Subject
-from app.schemas.v2 import AssessmentCreate, ConceptEnsure, ExperienceCreate, FieldProposal, SubjectEnsure
+from app.schemas.v2 import AssessmentCreate, ExperienceCreate, SubjectEnsure
 from app.services.semantic import list_alias_candidates, propose_alias
-from app.services.v2 import create_assessment, create_experience, ensure_concept, ensure_subject, normalise_path, vocabulary
+from app.services.v2 import create_assessment, create_experience, ensure_subject, normalise_path, vocabulary
 from app.services.write_safety import begin_idempotent_write, finish_idempotent_write
 
 router = APIRouter(prefix="/actions-v2", tags=["ChatGPT Actions v2"])
@@ -75,19 +75,51 @@ def alias_proposal(payload:dict, authorization:str|None=Header(None,alias="Autho
 @router.post("/experiences", operation_id="saveTasteGraphV2Experience", status_code=201)
 def save(payload:dict, authorization:str|None=Header(None,alias="Authorization"), db:Session=Depends(get_db)):
     cred=_auth(db,authorization)
-    if payload.get("user_approved") is not True: raise HTTPException(400,"Explicit user approval is required before saving a direct experience")
+    if payload.get("user_approved") is not True:
+        raise HTTPException(400,"Explicit user approval is required before saving a direct experience")
     try:
-        key=payload["idempotency_key"]; relevant={k:v for k,v in payload.items() if k!="idempotency_key"}; client_id=f"capability:{cred.id}:v2"
+        key=payload["idempotency_key"]
+        relevant={k:v for k,v in payload.items() if k!="idempotency_key"}
+        client_id=f"capability:{cred.id}:v2"
         payload_hash,prior=begin_idempotent_write(db,client_id=client_id,key=f"experience:{key}",payload=relevant)
-        if prior is not None: return JSONResponse(prior,status_code=201,headers=_headers())
-        proposals=[FieldProposal.model_validate(x) for x in payload.get("proposed_fields",[])]
-        c=ensure_concept(db,ConceptEnsure(path=payload["concept_path"],description=payload.get("concept_description"),proposed_fields=proposals,created_by=client_id))
-        s=ensure_subject(db,SubjectEnsure(concept_path=c.path,name=payload["subject_name"],canonical_key=payload["canonical_key"],identifiers=payload.get("identifiers",{}),attributes=payload.get("subject_attributes",{})),client_id)
-        e=create_experience(db,ExperienceCreate(owner_id=cred.user_id,subject_id=s.id,headline=payload["headline"],summary=payload["summary"],raw_text=payload.get("raw_text"),structured_data=payload.get("structured_data",{}),proposed_fields=proposals,visibility=payload.get("visibility","private"),user_approved=True,source_client=payload.get("source_client","chatgpt-action-v2")),client_id)
-        body={"saved":True,"experience_id":str(e.id),"subject_id":str(s.id),"concept_path":c.path,"canonical_data":e.structured_data,"normalization_log":e.normalization_log,"alias_candidates":list_alias_candidates(db,c),"read_back":f"{_base()}/actions-v2/experiences/{e.id}"}
+        if prior is not None:
+            return JSONResponse(prior,status_code=201,headers=_headers())
+        path=normalise_path(payload["concept_path"])
+        concept=db.scalar(select(Concept).where(Concept.path==path,Concept.status=="active"))
+        if not concept:
+            raise ValueError("Concept does not exist; propose and approve its fields before saving")
+        subject=ensure_subject(
+            db,
+            SubjectEnsure(
+                concept_path=concept.path,
+                name=payload["subject_name"],
+                canonical_key=payload["canonical_key"],
+                identifiers=payload.get("identifiers",{}),
+                attributes=payload.get("subject_attributes",{}),
+                create_concept_if_missing=False,
+            ),
+            client_id,
+        )
+        experience=create_experience(
+            db,
+            ExperienceCreate(
+                owner_id=cred.user_id,
+                subject_id=subject.id,
+                headline=payload["headline"],
+                summary=payload["summary"],
+                raw_text=payload["raw_text"],
+                structured_data=payload.get("structured_data",{}),
+                visibility=payload.get("visibility","private"),
+                user_approved=True,
+                source_client=client_id,
+            ),
+            client_id,
+        )
+        body={"saved":True,"experience_id":str(experience.id),"subject_id":str(subject.id),"concept_path":concept.path,"canonical_data":experience.structured_data,"normalization_log":experience.normalization_log,"alias_candidates":list_alias_candidates(db,concept),"read_back":f"{_base()}/actions-v2/experiences/{experience.id}"}
         finish_idempotent_write(db,client_id=client_id,key=f"experience:{key}",payload_hash=payload_hash,response_body=body)
     except (KeyError,ValueError) as exc:
-        db.rollback(); raise HTTPException(422,exc.args[0] if exc.args else str(exc))
+        db.rollback()
+        raise HTTPException(422,exc.args[0] if exc.args else str(exc))
     return JSONResponse(body,status_code=201,headers=_headers())
 
 
@@ -108,9 +140,8 @@ def assessment(payload:dict, authorization:str|None=Header(None,alias="Authoriza
 
 @router.get("/openapi.json", include_in_schema=False)
 def openapi():
-    proposal={"type":"object","additionalProperties":False,"required":["submitted_name","canonical_name"],"properties":{"submitted_name":{"type":"string"},"canonical_name":{"type":"string"},"data_type":{"type":"string"},"description":{"type":"string"},"unit":{"type":"string"},"aliases":{"type":"array","items":{"type":"string"}}}}
     alias_proposal={"type":"object","additionalProperties":False,"required":["concept_path","alias","canonical_name"],"properties":{"concept_path":{"type":"string"},"alias":{"type":"string"},"canonical_name":{"type":"string"},"confidence":{"type":"number","minimum":0,"maximum":1},"rationale":{"type":"string"}}}
     idem={"type":"string","minLength":8,"maxLength":200,"description":"Stable key reused only when retrying the same write."}
-    experience={"type":"object","additionalProperties":False,"required":["concept_path","subject_name","canonical_key","headline","summary","user_approved","idempotency_key"],"properties":{"concept_path":{"type":"string"},"concept_description":{"type":"string"},"subject_name":{"type":"string"},"canonical_key":{"type":"string"},"identifiers":{"type":"object","additionalProperties":True},"subject_attributes":{"type":"object","additionalProperties":True},"headline":{"type":"string"},"summary":{"type":"string"},"raw_text":{"type":"string"},"structured_data":{"type":"object","additionalProperties":True},"proposed_fields":{"type":"array","items":proposal,"description":"Only genuinely new canonical dimensions. Suggested aliases are proposals, not immediate accepted mappings."},"visibility":{"type":"string","enum":["private","unlisted","public","aggregate_only"]},"user_approved":{"type":"boolean"},"source_client":{"type":"string"},"idempotency_key":idem}}
+    experience={"type":"object","additionalProperties":False,"required":["concept_path","subject_name","canonical_key","headline","summary","raw_text","user_approved","idempotency_key"],"properties":{"concept_path":{"type":"string"},"subject_name":{"type":"string"},"canonical_key":{"type":"string"},"identifiers":{"type":"object","additionalProperties":True},"subject_attributes":{"type":"object","additionalProperties":True},"headline":{"type":"string"},"summary":{"type":"string"},"raw_text":{"type":"string","minLength":1},"structured_data":{"type":"object","additionalProperties":True},"visibility":{"type":"string","enum":["private","unlisted","public","aggregate_only"]},"user_approved":{"type":"boolean"},"idempotency_key":idem}}
     assessment={"type":"object","additionalProperties":False,"required":["subject_id","assessment_type","idempotency_key"],"properties":{"subject_id":{"type":"string","format":"uuid"},"assessment_type":{"type":"string"},"evidence":{"type":"object","additionalProperties":True},"analysis":{"type":"object","additionalProperties":True},"conclusion":{"type":"string"},"confidence":{"type":"number","minimum":0,"maximum":1},"source_model":{"type":"string"},"provenance":{"type":"object","additionalProperties":True},"idempotency_key":idem}}
     return {"openapi":"3.1.0","info":{"title":"TasteGraph v2 ChatGPT Action","version":"2.1.0-alpha","description":"Cross-AI experience memory. The calling AI performs semantic judgement; TasteGraph coordinates independent proposals, conflicts, consensus and canonical storage."},"servers":[{"url":_base()}],"components":{"securitySchemes":{"bearerAuth":{"type":"http","scheme":"bearer"}},"schemas":{"ExperienceCreate":experience,"AssessmentCreate":assessment,"AliasProposal":alias_proposal}},"security":[{"bearerAuth":[]}],"paths":{"/actions-v2/experiences":{"get":{"operationId":"searchTasteGraphV2Experiences","summary":"Search experiences","responses":{"200":{"description":"Results"}}},"post":{"operationId":"saveTasteGraphV2Experience","summary":"Save approved direct experience","x-openai-isConsequential":True,"requestBody":{"required":True,"content":{"application/json":{"schema":{"$ref":"#/components/schemas/ExperienceCreate"}}}},"responses":{"201":{"description":"Saved"}}}},"/actions-v2/experiences/{experience_id}":{"get":{"operationId":"fetchTasteGraphV2Experience","summary":"Fetch experience","parameters":[{"name":"experience_id","in":"path","required":True,"schema":{"type":"string","format":"uuid"}}],"responses":{"200":{"description":"Experience"}}}},"/actions-v2/concepts":{"get":{"operationId":"getTasteGraphV2Concept","summary":"Get canonical vocabulary, accepted aliases and semantic proposals","parameters":[{"name":"path","in":"query","required":True,"schema":{"type":"string"}}],"responses":{"200":{"description":"Concept"}}}},"/actions-v2/alias-proposals":{"post":{"operationId":"proposeTasteGraphV2Alias","summary":"Propose that a term means an existing canonical field","x-openai-isConsequential":False,"requestBody":{"required":True,"content":{"application/json":{"schema":{"$ref":"#/components/schemas/AliasProposal"}}}},"responses":{"201":{"description":"Proposal recorded or consensus alias accepted"}}}},"/actions-v2/assessments":{"post":{"operationId":"saveTasteGraphV2Assessment","summary":"Save AI-derived assessment","x-openai-isConsequential":True,"requestBody":{"required":True,"content":{"application/json":{"schema":{"$ref":"#/components/schemas/AssessmentCreate"}}}},"responses":{"201":{"description":"Saved"}}}}}}

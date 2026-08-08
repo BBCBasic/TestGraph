@@ -14,10 +14,8 @@ class StrictModel(BaseModel):
 class FieldProposal(StrictModel):
     submitted_name: str = Field(min_length=1, max_length=200)
     canonical_name: str = Field(min_length=1, max_length=200)
-    data_type: str = "any"
+    json_schema: dict[str, Any]
     description: str | None = None
-    unit: str | None = None
-    allowed_values: list[Any] = []
     aliases: list[str] = []
 
 
@@ -25,14 +23,12 @@ class ConceptEnsure(StrictModel):
     path: str = Field(min_length=1, max_length=300)
     description: str | None = None
     definition: dict[str, Any] = {}
-    proposed_fields: list[FieldProposal] = []
     created_by: str = "ai-client"
 
 
 class NormaliseRequest(StrictModel):
     concept_path: str
     data: dict[str, Any]
-    proposed_fields: list[FieldProposal] = []
     source: str = "ai-client"
 
 
@@ -61,9 +57,8 @@ class ExperienceCreate(StrictModel):
     subject_id: UUID
     headline: str = Field(min_length=1, max_length=240)
     summary: str = Field(min_length=1)
-    raw_text: str | None = None
+    raw_text: str = Field(min_length=1)
     structured_data: dict[str, Any] = {}
-    proposed_fields: list[FieldProposal] = []
     experienced_at: datetime | None = None
     visibility: Literal["private", "unlisted", "public", "aggregate_only"] = "private"
     user_approved: bool = False
@@ -116,7 +111,7 @@ class ExperienceRead(StrictModel):
     experienced_at: datetime | None
     headline: str
     summary: str
-    raw_text: str | None
+    raw_text: str
     structured_data: dict[str, Any]
     submitted_data: dict[str, Any]
     normalization_log: list[Any]
