@@ -96,7 +96,7 @@ def normalise(payload: NormaliseRequest, db: Session = Depends(get_db), principa
     if not concept:
         raise HTTPException(404, "Concept not found")
     try:
-        data, log = normalise_data(db, concept, payload.data, payload.proposed_fields, principal.client_id)
+        data, log = normalise_data(db, concept, payload.data)
         db.commit()
     except ValueError as exc:
         db.rollback(); raise HTTPException(422, exc.args[0] if exc.args else str(exc))
