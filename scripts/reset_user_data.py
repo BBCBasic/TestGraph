@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import uuid
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete
 
 from app.db.session import SessionLocal
 from app.models.entities import (
@@ -27,7 +28,6 @@ from app.models.v2 import (
 
 
 CONFIRMATION = "RESET-ALL-USER-DATA-2026-08-08"
-MARKER = "user-data-reset-2026-08-08-v1"
 
 # Child tables must be cleared before the parent tables they reference.
 CONTENT_MODELS = (
@@ -51,16 +51,8 @@ CONTENT_MODELS = (
 def reset_user_data() -> dict[str, int]:
     """Remove review/knowledge data while preserving accounts and authentication."""
     with SessionLocal() as db:
-        already_ran = db.scalar(
-            select(AuditEvent.id).where(
-                AuditEvent.action == "user_data_reset",
-                AuditEvent.object_id == MARKER,
-            )
-        )
-        if already_ran:
-            return {"already_reset": 1}
-
         counts: dict[str, int] = {}
+        reset_id = f"user-data-reset-{uuid.uuid4()}"
         try:
             for model in CONTENT_MODELS:
                 result = db.execute(delete(model))
@@ -72,8 +64,8 @@ def reset_user_data() -> dict[str, int]:
                     client_id="maintenance",
                     action="user_data_reset",
                     object_type="database",
-                    object_id=MARKER,
-                    request_id=MARKER,
+                    object_id=reset_id,
+                    request_id=reset_id,
                     details={
                         "preserved": [
                             "users",
