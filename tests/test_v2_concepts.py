@@ -1,14 +1,22 @@
 import pytest
+from pydantic import ValidationError as PydanticValidationError
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 
 from app.db.base import Base
 from app.models import semantic  # noqa: F401
 from app.models.entities import User
-from app.models.v2 import Concept, ConceptField, FieldAlias
+from app.models.v2 import Concept, ConceptField, ConceptFieldProposal, FieldAlias
 from app.schemas.v2 import ConceptEnsure, ExperienceCreate, FieldProposal, SubjectEnsure
 from app.services.semantic import alias_consensus_status, propose_alias
-from app.services.v2 import create_experience, ensure_concept, ensure_subject, normalise_data
+from app.services.v2 import (
+    approve_field_proposal,
+    create_experience,
+    ensure_concept,
+    ensure_subject,
+    normalise_data,
+    propose_concept_fields,
+)
 
 
 @pytest.fixture()
@@ -19,113 +27,171 @@ def db():
         yield session
 
 
-def af_field():
+def observations_field():
     return FieldProposal(
-        submitted_name="autofocus",
-        canonical_name="AF",
-        data_type="rating",
-        description="Overall autofocus performance",
-        aliases=["auto_focus", "focus performance"],
+        submitted_name="user_direct_observations",
+        canonical_name="user_direct_observations",
+        json_schema={
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "target_type": {"type": "string"},
+                    "target_name": {"type": "string"},
+                    "exact_words": {"type": "string"},
+                },
+                "required": ["target_type", "target_name", "exact_words"],
+                "additionalProperties": False,
+            },
+        },
+        description="The user's exact observations, attached to their targets.",
     )
 
 
-def tracking_field():
-    return FieldProposal(
-        submitted_name="subject_tracking",
-        canonical_name="AF.tracking",
-        data_type="rating",
-        description="Autofocus subject tracking",
-        aliases=["focus tracking", "tracking autofocus", "af tracking"],
-    )
-
-
-def test_first_camera_creates_hierarchy_and_canonical_vocabulary_without_auto_accepting_aliases(db: Session):
+def test_ensure_concept_creates_hierarchy_but_no_fields(db: Session):
     concept = ensure_concept(db, ConceptEnsure(
-        path="product.electronics.camera.action_camera",
-        description="Compact rugged action camera",
-        proposed_fields=[af_field(), tracking_field()],
-        created_by="chatgpt-client",
+        path="dining.restaurant_review",
+        description="A direct restaurant experience",
+        created_by="claude-client",
     ))
-    assert concept.path == "product.electronics.camera.action_camera"
-    assert db.scalar(select(Concept).where(Concept.path == "product")) is not None
-    assert db.scalar(select(Concept).where(Concept.path == "product.electronics.camera")) is not None
-    names = set(db.scalars(select(ConceptField.canonical_name).where(ConceptField.concept_id == concept.id)).all())
-    assert names == {"AF", "AF.tracking"}
-    assert db.scalar(select(FieldAlias).where(FieldAlias.concept_id == concept.id)) is None
+    assert concept.path == "dining.restaurant_review"
+    assert db.scalar(select(Concept).where(Concept.path == "dining")) is not None
+    assert db.scalar(select(ConceptField).where(ConceptField.concept_id == concept.id)) is None
 
 
-def test_new_field_use_records_first_ai_vote_but_does_not_accept_alias(db: Session):
-    concept = ensure_concept(db, ConceptEnsure(path="product.electronics.camera"))
-    data, log = normalise_data(db, concept, {"autofocus": 9}, [af_field()], "chatgpt-client")
-    assert data == {"AF": 9}
-    assert log == [{"submitted": "autofocus", "canonical": "AF", "method": "new_field_proposal"}]
-    status = alias_consensus_status(db, concept, "autofocus")
-    assert status["status"] == "proposed"
-    assert status["supporting_clients"] == 1
-    assert db.scalar(select(FieldAlias).where(FieldAlias.concept_id == concept.id)) is None
+def test_field_proposal_stays_pending_and_creates_no_experience_or_canonical_field(db: Session):
+    concept = ensure_concept(db, ConceptEnsure(path="dining.restaurant_review"))
+    rows = propose_concept_fields(
+        db,
+        concept=concept,
+        proposals=[observations_field()],
+        proposer_client_id="claude-client:v2",
+    )
+    assert rows[0].status == "pending"
+    assert db.scalar(select(ConceptField).where(ConceptField.concept_id == concept.id)) is None
+    assert db.scalar(select(ConceptFieldProposal).where(
+        ConceptFieldProposal.concept_id == concept.id
+    )) is not None
 
 
-def test_same_client_cannot_manufacture_consensus(db: Session):
-    concept = ensure_concept(db, ConceptEnsure(path="product.electronics.camera", proposed_fields=[af_field()]))
-    first = propose_alias(db, concept=concept, alias="autofocus", canonical_name="AF", proposer_client_id="chatgpt-client")
-    second = propose_alias(db, concept=concept, alias="autofocus", canonical_name="AF", proposer_client_id="chatgpt-client")
-    db.commit()
-    assert first["status"] == "proposed"
-    assert second["status"] == "proposed"
-    assert second["supporting_clients"] == 1
-    assert db.scalar(select(FieldAlias).where(FieldAlias.concept_id == concept.id)) is None
+def test_manual_approval_promotes_full_json_schema(db: Session):
+    concept = ensure_concept(db, ConceptEnsure(path="dining.restaurant_review"))
+    proposal = propose_concept_fields(
+        db,
+        concept=concept,
+        proposals=[observations_field()],
+        proposer_client_id="claude-client:v2",
+    )[0]
+    field = approve_field_proposal(db, proposal.id)
+    assert field.canonical_name == "user_direct_observations"
+    assert field.metadata_json["json_schema"]["items"]["type"] == "object"
+    assert db.get(ConceptFieldProposal, proposal.id).status == "approved"
 
 
-def test_second_independent_ai_promotes_alias_then_future_writes_normalise_automatically(db: Session):
-    concept = ensure_concept(db, ConceptEnsure(path="product.electronics.camera", proposed_fields=[af_field()]))
-    propose_alias(db, concept=concept, alias="autofocus", canonical_name="AF", proposer_client_id="chatgpt-client")
-    status = propose_alias(db, concept=concept, alias="autofocus", canonical_name="AF", proposer_client_id="claude-client")
-    db.commit()
-    assert status["status"] == "accepted"
-    assert status["promoted_by_consensus"] is True
+def test_approved_json_schema_is_enforced(db: Session):
+    concept = ensure_concept(db, ConceptEnsure(path="dining.restaurant_review"))
+    proposal = propose_concept_fields(
+        db, concept=concept, proposals=[observations_field()], proposer_client_id="claude-client:v2"
+    )[0]
+    approve_field_proposal(db, proposal.id)
 
-    data, log = normalise_data(db, concept, {"autofocus": 9}, [], "third-ai")
-    assert data == {"AF": 9}
-    assert log == [{"submitted": "autofocus", "canonical": "AF", "method": "accepted_alias"}]
+    valid = [{
+        "target_type": "dish",
+        "target_name": "Beef carpaccio",
+        "exact_words": "very good",
+    }]
+    data, log = normalise_data(db, concept, {"user_direct_observations": valid})
+    assert data == {"user_direct_observations": valid}
+    assert log[0]["method"] == "canonical"
 
-
-def test_conflicting_ai_semantics_block_promotion(db: Session):
-    concept = ensure_concept(db, ConceptEnsure(path="product.electronics.camera", proposed_fields=[af_field(), tracking_field()]))
-    first = propose_alias(db, concept=concept, alias="tracking", canonical_name="AF.tracking", proposer_client_id="chatgpt-client")
-    second = propose_alias(db, concept=concept, alias="tracking", canonical_name="AF", proposer_client_id="claude-client")
-    third = propose_alias(db, concept=concept, alias="tracking", canonical_name="AF.tracking", proposer_client_id="gemini-client")
-    db.commit()
-    assert first["status"] == "proposed"
-    assert second["status"] == "conflict"
-    assert third["status"] == "conflict"
-    assert db.scalar(select(FieldAlias).where(FieldAlias.concept_id == concept.id, FieldAlias.alias_normalized == "tracking")) is None
+    with pytest.raises(ValueError, match="exact_words"):
+        normalise_data(db, concept, {
+            "user_direct_observations": [{"target_type": "dish", "target_name": "Salad"}]
+        })
 
 
-def test_unknown_field_is_rejected_when_ai_does_not_propose_new_field_or_existing_mapping(db: Session):
-    concept = ensure_concept(db, ConceptEnsure(path="product.electronics.camera", proposed_fields=[af_field()]))
+def test_unknown_field_requires_separate_proposal_and_approval(db: Session):
+    concept = ensure_concept(db, ConceptEnsure(path="dining.restaurant_review"))
     with pytest.raises(ValueError) as exc:
-        normalise_data(db, concept, {"weather sealing": 8}, [], "other-ai")
-    assert "unknown_fields" in str(exc.value)
+        normalise_data(db, concept, {"would_return_if_local": True})
+    assert "propose_concept_fields" in str(exc.value)
 
 
-def test_direct_experience_preserves_original_and_canonical_data(db: Session):
+def test_alias_consensus_still_operates_after_field_approval(db: Session):
+    concept = ensure_concept(db, ConceptEnsure(path="dining.restaurant_review"))
+    proposal = propose_concept_fields(
+        db, concept=concept, proposals=[observations_field()], proposer_client_id="schema-client"
+    )[0]
+    approve_field_proposal(db, proposal.id)
+    first = propose_alias(
+        db,
+        concept=concept,
+        alias="direct_comments",
+        canonical_name="user_direct_observations",
+        proposer_client_id="chatgpt-client",
+    )
+    second = propose_alias(
+        db,
+        concept=concept,
+        alias="direct_comments",
+        canonical_name="user_direct_observations",
+        proposer_client_id="claude-client",
+    )
+    db.commit()
+    assert first["status"] == "proposed"
+    assert second["status"] == "accepted"
+    assert db.scalar(select(FieldAlias).where(
+        FieldAlias.concept_id == concept.id,
+        FieldAlias.alias_normalized == "direct_comments",
+    )) is not None
+    assert alias_consensus_status(db, concept, "direct_comments")["status"] == "accepted"
+
+
+def test_direct_experience_requires_original_text_and_approved_fields(db: Session):
     user = User(display_name="Test user", profile_data={})
     db.add(user); db.commit(); db.refresh(user)
-    concept = ensure_concept(db, ConceptEnsure(path="product.electronics.camera"))
-    subject = ensure_subject(db, SubjectEnsure(concept_path=concept.path, name="Example Camera", canonical_key="example-camera"))
+    concept = ensure_concept(db, ConceptEnsure(path="dining.restaurant_review"))
+    proposal = propose_concept_fields(
+        db, concept=concept, proposals=[observations_field()], proposer_client_id="schema-client"
+    )[0]
+    approve_field_proposal(db, proposal.id)
+    subject = ensure_subject(
+        db,
+        SubjectEnsure(
+            concept_path=concept.path,
+            name="Gustave",
+            canonical_key="restaurant-gustave-neuilly.fr",
+        ),
+    )
+    value = [{
+        "target_type": "dish",
+        "target_name": "Beef carpaccio",
+        "exact_words": "very good",
+    }]
     exp = create_experience(db, ExperienceCreate(
         owner_id=user.id,
         subject_id=subject.id,
-        headline="Excellent autofocus",
-        summary="Autofocus is excellent.",
-        raw_text="The autofocus is astonishingly good on birds.",
-        structured_data={"autofocus": 9},
-        proposed_fields=[af_field()],
+        headline="Gustave",
+        summary="The carpaccio was very good.",
+        raw_text="I had beef carpaccio, that was very good.",
+        structured_data={"user_direct_observations": value},
         user_approved=True,
-        source_client="chatgpt",
-    ), "chatgpt-authenticated-client")
-    assert exp.submitted_data == {"autofocus": 9}
-    assert exp.structured_data == {"AF": 9}
-    assert exp.raw_text.startswith("The autofocus")
-    assert exp.provenance["kind"] == "direct_user_experience"
-    assert alias_consensus_status(db, concept, "autofocus")["supporting_clients"] == 1
+        source_client="claude-authenticated-client",
+    ), "claude-authenticated-client")
+    assert exp.submitted_data == {"user_direct_observations": value}
+    assert exp.structured_data == {"user_direct_observations": value}
+    assert exp.raw_text.startswith("I had beef carpaccio")
+    assert exp.provenance == {
+        "kind": "direct_user_experience",
+        "source_client": "claude-authenticated-client",
+    }
+
+    with pytest.raises(PydanticValidationError):
+        ExperienceCreate(
+            owner_id=user.id,
+            subject_id=subject.id,
+            headline="Missing original",
+            summary="No raw evidence",
+            raw_text="",
+            user_approved=True,
+        )
