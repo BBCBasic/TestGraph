@@ -10,9 +10,17 @@ from app.api.capability import _credential, _headers
 from app.core.config import get_settings
 from app.db.session import get_db
 from app.models.v2 import Assessment, Concept, V2Experience, V2Subject
-from app.schemas.v2 import AssessmentCreate, ExperienceCreate, SubjectEnsure
+from app.schemas.v2 import AssessmentCreate, ConceptEnsure, ExperienceCreate, FieldProposal, SubjectEnsure
 from app.services.semantic import list_alias_candidates, propose_alias
-from app.services.v2 import create_assessment, create_experience, ensure_subject, normalise_path, vocabulary
+from app.services.v2 import (
+    create_assessment,
+    create_experience,
+    ensure_concept,
+    ensure_subject,
+    normalise_path,
+    propose_concept_fields,
+    vocabulary,
+)
 from app.services.write_safety import begin_idempotent_write, finish_idempotent_write
 
 router = APIRouter(prefix="/actions-v2", tags=["ChatGPT Actions v2"])
@@ -87,7 +95,7 @@ def concept(path: str | None = None, authorization: str | None = Header(None, al
             "path": canonical,
             "canonical_route": _concept_route(canonical),
             "root_route": _concept_route(),
-            "instruction": "Concept not found. Browse from root rather than inventing a competing path.",
+            "instruction": "Concept not found. Browse from root, then use the concept field proposal operation when a genuinely new path is needed.",
         },headers=_headers())
 
     parent = db.get(Concept, obj.parent_id) if obj.parent_id else None
@@ -111,8 +119,50 @@ def concept(path: str | None = None, authorization: str | None = Header(None, al
         "fields":[{"canonical_name":f.canonical_name,"data_type":f.data_type,"description":f.description,"unit":f.unit,"origin":vocab["origins"].get(f.canonical_name)} for f in unique.values()],
         "accepted_aliases":vocab["aliases"],
         "alias_candidates":list_alias_candidates(db,obj),
-        "semantic_policy":"The calling AI judges language meaning. TasteGraph owns canonical concept identity and tree navigation; clients should browse existing children before proposing a new concept path. TasteGraph records field alias proposals, detects conflicts, and promotes an alias only after independent client consensus.",
+        "semantic_policy":"The calling AI judges language meaning. TasteGraph owns canonical concept identity and tree navigation; clients should browse existing children before proposing a new concept path. New fields remain pending until explicit approval. TasteGraph records field alias proposals, detects conflicts, and promotes an alias only after independent client consensus.",
     },headers=_headers())
+
+
+@router.post("/concept-field-proposals", operation_id="proposeTasteGraphV2ConceptFields", status_code=201)
+def concept_field_proposal(payload:dict, authorization:str|None=Header(None,alias="Authorization"), db:Session=Depends(get_db)):
+    cred=_auth(db,authorization)
+    try:
+        proposals=[FieldProposal.model_validate(item) for item in payload.get("fields",[])]
+        if not proposals:
+            raise ValueError("At least one field proposal is required")
+        client_id=f"capability:{cred.id}:v2"
+        concept=ensure_concept(
+            db,
+            ConceptEnsure(
+                path=payload["concept_path"],
+                description=payload.get("concept_description"),
+                created_by=client_id,
+            ),
+        )
+        rows=propose_concept_fields(
+            db,
+            concept=concept,
+            proposals=proposals,
+            proposer_client_id=client_id,
+        )
+        body={
+            "concept_path":concept.path,
+            "concept_version":concept.version,
+            "proposals":[{
+                "id":str(row.id),
+                "canonical_name":row.canonical_name,
+                "json_schema":row.json_schema,
+                "status":row.status,
+            } for row in rows],
+            "approval_url":f"{_base()}/development/concept-fields",
+            "experience_created":False,
+        }
+        db.commit()
+    except KeyError as exc:
+        db.rollback(); raise HTTPException(422,f"Missing field: {exc.args[0]}")
+    except ValueError as exc:
+        db.rollback(); raise HTTPException(422,str(exc))
+    return JSONResponse(body,status_code=201,headers=_headers())
 
 
 @router.post("/alias-proposals", operation_id="proposeTasteGraphV2Alias", status_code=201)
@@ -199,8 +249,10 @@ def assessment(payload:dict, authorization:str|None=Header(None,alias="Authoriza
 
 @router.get("/openapi.json", include_in_schema=False)
 def openapi():
+    field={"type":"object","additionalProperties":False,"required":["submitted_name","canonical_name","json_schema"],"properties":{"submitted_name":{"type":"string"},"canonical_name":{"type":"string"},"json_schema":{"type":"object","additionalProperties":True,"description":"Complete JSON Schema for the proposed field, including object properties and array items."},"description":{"type":"string"},"aliases":{"type":"array","items":{"type":"string"}}}}
+    concept_field_proposal={"type":"object","additionalProperties":False,"required":["concept_path","fields"],"properties":{"concept_path":{"type":"string","description":"Canonical dotted path after browsing the existing concept tree."},"concept_description":{"type":"string"},"fields":{"type":"array","minItems":1,"items":field}}}
     alias_proposal={"type":"object","additionalProperties":False,"required":["concept_path","alias","canonical_name"],"properties":{"concept_path":{"type":"string"},"alias":{"type":"string"},"canonical_name":{"type":"string"},"confidence":{"type":"number","minimum":0,"maximum":1},"rationale":{"type":"string"}}}
     idem={"type":"string","minLength":8,"maxLength":200,"description":"Stable key reused only when retrying the same write."}
     experience={"type":"object","additionalProperties":False,"required":["concept_path","subject_name","canonical_key","headline","summary","raw_text","user_approved","idempotency_key"],"properties":{"concept_path":{"type":"string"},"subject_name":{"type":"string"},"canonical_key":{"type":"string"},"identifiers":{"type":"object","additionalProperties":True},"subject_attributes":{"type":"object","additionalProperties":True},"headline":{"type":"string"},"summary":{"type":"string"},"raw_text":{"type":"string","minLength":1},"structured_data":{"type":"object","additionalProperties":True},"visibility":{"type":"string","enum":["private","unlisted","public","aggregate_only"]},"user_approved":{"type":"boolean"},"idempotency_key":idem}}
     assessment={"type":"object","additionalProperties":False,"required":["experience_id","assessment_type","idempotency_key"],"properties":{"experience_id":{"type":"string","format":"uuid","description":"Exact experience evaluated. Subject, owner and authenticated provenance are derived by TasteGraph."},"assessment_type":{"type":"string"},"evidence":{"type":"object","additionalProperties":True},"analysis":{"type":"object","additionalProperties":True},"conclusion":{"type":"string"},"confidence":{"type":"number","minimum":0,"maximum":1},"source_model":{"type":"string"},"provenance":{"type":"object","additionalProperties":True},"idempotency_key":idem}}
-    return {"openapi":"3.1.0","info":{"title":"TasteGraph v2 ChatGPT Action","version":"2.2.0-alpha","description":"Cross-AI experience memory with a discoverable DNS-style canonical concept tree. Clients can start at the concept root and navigate parent/child routes before reading or writing domain data."},"servers":[{"url":_base()}],"components":{"securitySchemes":{"bearerAuth":{"type":"http","scheme":"bearer"}},"schemas":{"ExperienceCreate":experience,"AssessmentCreate":assessment,"AliasProposal":alias_proposal}},"security":[{"bearerAuth":[]}],"paths":{"/actions-v2/experiences":{"get":{"operationId":"searchTasteGraphV2Experiences","summary":"Search experiences","responses":{"200":{"description":"Results"}}},"post":{"operationId":"saveTasteGraphV2Experience","summary":"Save approved direct experience","x-openai-isConsequential":True,"requestBody":{"required":True,"content":{"application/json":{"schema":{"$ref":"#/components/schemas/ExperienceCreate"}}}},"responses":{"201":{"description":"Saved"}}}},"/actions-v2/experiences/{experience_id}":{"get":{"operationId":"fetchTasteGraphV2Experience","summary":"Fetch experience with its AI-derived assessments","parameters":[{"name":"experience_id","in":"path","required":True,"schema":{"type":"string","format":"uuid"}}],"responses":{"200":{"description":"Experience and linked assessments"}}}},"/actions-v2/concepts":{"get":{"operationId":"getTasteGraphV2Concept","summary":"Browse the canonical concept tree or fetch one concept with its parent, children and vocabulary","parameters":[{"name":"path","in":"query","required":False,"description":"Omit to browse root concepts; otherwise use a canonical dotted path such as dining.restaurant_review.","schema":{"type":"string"}}],"responses":{"200":{"description":"Concept root or concept node"}}}},"/actions-v2/alias-proposals":{"post":{"operationId":"proposeTasteGraphV2Alias","summary":"Propose that a term means an existing canonical field","x-openai-isConsequential":False,"requestBody":{"required":True,"content":{"application/json":{"schema":{"$ref":"#/components/schemas/AliasProposal"}}}},"responses":{"201":{"description":"Proposal recorded or consensus alias accepted"}}}},"/actions-v2/assessments":{"post":{"operationId":"saveTasteGraphV2Assessment","summary":"Save routine AI-derived analysis against an exact experience; linkage and provenance are automatic","x-openai-isConsequential":False,"requestBody":{"required":True,"content":{"application/json":{"schema":{"$ref":"#/components/schemas/AssessmentCreate"}}}},"responses":{"201":{"description":"Saved and automatically linked"}}}}}}
+    return {"openapi":"3.1.0","info":{"title":"TasteGraph v2 ChatGPT Action","version":"2.3.0-alpha","description":"Cross-AI experience memory with a discoverable DNS-style canonical concept tree. Clients browse existing concepts first and can submit governed concept-field proposals when a genuinely new concept is required; proposals remain pending until approval."},"servers":[{"url":_base()}],"components":{"securitySchemes":{"bearerAuth":{"type":"http","scheme":"bearer"}},"schemas":{"ExperienceCreate":experience,"AssessmentCreate":assessment,"AliasProposal":alias_proposal,"ConceptFieldProposal":concept_field_proposal}},"security":[{"bearerAuth":[]}],"paths":{"/actions-v2/experiences":{"get":{"operationId":"searchTasteGraphV2Experiences","summary":"Search experiences","responses":{"200":{"description":"Results"}}},"post":{"operationId":"saveTasteGraphV2Experience","summary":"Save approved direct experience","x-openai-isConsequential":True,"requestBody":{"required":True,"content":{"application/json":{"schema":{"$ref":"#/components/schemas/ExperienceCreate"}}}},"responses":{"201":{"description":"Saved"}}}},"/actions-v2/experiences/{experience_id}":{"get":{"operationId":"fetchTasteGraphV2Experience","summary":"Fetch experience with its AI-derived assessments","parameters":[{"name":"experience_id","in":"path","required":True,"schema":{"type":"string","format":"uuid"}}],"responses":{"200":{"description":"Experience and linked assessments"}}}},"/actions-v2/concepts":{"get":{"operationId":"getTasteGraphV2Concept","summary":"Browse the canonical concept tree or fetch one concept with its parent, children and vocabulary","parameters":[{"name":"path","in":"query","required":False,"description":"Omit to browse root concepts; otherwise use a canonical dotted path such as dining.restaurant_review.","schema":{"type":"string"}}],"responses":{"200":{"description":"Concept root or concept node"}}}},"/actions-v2/concept-field-proposals":{"post":{"operationId":"proposeTasteGraphV2ConceptFields","summary":"Propose fields for a genuinely new or existing concept; proposals remain pending until approval","x-openai-isConsequential":False,"requestBody":{"required":True,"content":{"application/json":{"schema":{"$ref":"#/components/schemas/ConceptFieldProposal"}}}},"responses":{"201":{"description":"Concept located or created and field proposals recorded for approval"}}}},"/actions-v2/alias-proposals":{"post":{"operationId":"proposeTasteGraphV2Alias","summary":"Propose that a term means an existing canonical field","x-openai-isConsequential":False,"requestBody":{"required":True,"content":{"application/json":{"schema":{"$ref":"#/components/schemas/AliasProposal"}}}},"responses":{"201":{"description":"Proposal recorded or consensus alias accepted"}}}},"/actions-v2/assessments":{"post":{"operationId":"saveTasteGraphV2Assessment","summary":"Save routine AI-derived analysis against an exact experience; linkage and provenance are automatic","x-openai-isConsequential":False,"requestBody":{"required":True,"content":{"application/json":{"schema":{"$ref":"#/components/schemas/AssessmentCreate"}}}},"responses":{"201":{"description":"Saved and automatically linked"}}}}}}
