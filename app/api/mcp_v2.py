@@ -11,7 +11,7 @@ from sqlalchemy.orm import Session
 from app.core.config import get_settings
 from app.core.security import Principal, TokenError, principal_from_authorization
 from app.db.session import get_db
-from app.models.v2 import Assessment, Concept, V2Experience, V2Subject
+from app.models.v2 import Assessment, Concept, ConceptFieldProposal, V2Experience, V2Subject
 from app.schemas.v2 import AssessmentCreate, ConceptEnsure, ExperienceCreate, FieldProposal, SubjectEnsure
 from app.services.semantic import list_alias_candidates, propose_alias
 from app.services.v2 import (
@@ -24,11 +24,12 @@ from app.services.v2 import (
     propose_concept_fields,
     vocabulary,
 )
+from app.services.vocabulary_governance import verify_field_proposal, vocabulary_index
 from app.services.write_safety import begin_idempotent_write, finish_idempotent_write
 
 router = APIRouter()
 PROTOCOL_VERSION = "2025-06-18"
-SERVER_VERSION = "2.1.0-alpha"
+SERVER_VERSION = "2.2.0-alpha"
 READ_SECURITY = [{"type": "oauth2", "scopes": ["reviews:read"]}]
 WRITE_SECURITY = [{"type": "oauth2", "scopes": ["reviews:write"]}]
 
@@ -82,9 +83,17 @@ TOOLS = [
         "annotations": {"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
     },
     {
+        "name": "vocabulary_index",
+        "title": "Search the global DNS vocabulary index",
+        "description": "Find every canonical or pending position where a word occurs in the DNS-style concept structure. Omit word to return the complete word index. Pending proposals are included so another AI can discover and verify them.",
+        "inputSchema": {"type": "object", "properties": {"word": {"type": "string"}}, "additionalProperties": False},
+        **_security(READ_SECURITY),
+        "annotations": {"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
+    },
+    {
         "name": "propose_concept_fields",
         "title": "Propose canonical concept fields",
-        "description": "Propose fully specified JSON Schema fields without creating an experience. Proposals remain pending until the user approves them on the development concept-fields page.",
+        "description": "Propose fully specified JSON Schema fields without creating an experience. The proposal is immediately visible in the global vocabulary index. A different authenticated AI can verify and commit it; the proposing client cannot approve itself.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -93,6 +102,22 @@ TOOLS = [
                 "fields": {"type": "array", "minItems": 1, "items": _proposal_schema()},
             },
             "required": ["concept_path", "fields"],
+            "additionalProperties": False,
+        },
+        **_security(WRITE_SECURITY),
+        "annotations": {"readOnlyHint": False, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
+    },
+    {
+        "name": "verify_concept_field_proposal",
+        "title": "Verify and commit another AI's field proposal",
+        "description": "Independently inspect a pending proposal and, when it is semantically correct, promote it to the canonical concept vocabulary. The authenticated client cannot verify its own proposal. Repeating verification of an already approved proposal is safe.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "proposal_id": {"type": "string", "format": "uuid"},
+                "rationale": {"type": "string"},
+            },
+            "required": ["proposal_id"],
             "additionalProperties": False,
         },
         **_security(WRITE_SECURITY),
@@ -186,41 +211,31 @@ def _fetch(db, principal, args):
     row = db.execute(select(V2Experience, V2Subject, Concept).join(V2Subject, V2Experience.subject_id == V2Subject.id).join(Concept, V2Subject.concept_id == Concept.id).where(V2Experience.id == exp_id, V2Experience.owner_id == principal.user_id, V2Experience.deleted_at.is_(None))).first()
     if not row: return _error("Experience not found")
     e,s,c = row
-    assessments = list(db.scalars(
-        select(Assessment)
-        .where(Assessment.experience_id == e.id)
-        .order_by(Assessment.created_at)
-    ).all())
+    assessments = list(db.scalars(select(Assessment).where(Assessment.experience_id == e.id).order_by(Assessment.created_at)).all())
     return _result({"id": str(e.id), "subject": {"id": str(s.id), "name": s.name, "canonical_key": s.canonical_key, "concept_path": c.path, "identifiers": s.identifiers_json, "attributes": s.attributes_json}, "headline": e.headline, "summary": e.summary, "raw_text": e.raw_text, "structured_data": e.structured_data, "submitted_data": e.submitted_data, "normalization_log": e.normalization_log, "provenance": e.provenance, "assessments": [{"id": str(a.id), "experience_id": str(a.experience_id), "assessment_type": a.assessment_type, "evidence": a.evidence_json, "analysis": a.analysis_json, "conclusion": a.conclusion, "confidence": a.confidence, "source_model": a.source_model, "provenance": a.provenance, "created_by_client": a.created_by_client, "created_at": a.created_at.isoformat()} for a in assessments], "created_at": e.created_at.isoformat()})
 
 
 def _get_concept(db, args):
-    from app.services.v2 import normalise_path
     try: path = normalise_path(str(args.get("path", "")))
     except ValueError as exc: return _error(str(exc))
     concept = db.scalar(select(Concept).where(Concept.path == path, Concept.status == "active"))
     if not concept:
-        return _error("Concept not found", {"path": path, "instruction": "A new concept may be created during save. Do not invent a new field when an existing canonical field already expresses the meaning."})
+        return _error("Concept not found", {"path": path, "instruction": "Search vocabulary_index and browse the tree before proposing a genuinely new concept or field."})
     vocab = vocabulary(db, concept); unique = {f.id: f for f in vocab["fields"].values()}
     return _result({
         "path": concept.path,
         "version": concept.version,
         "description": concept.description,
         "fields": [{"canonical_name": f.canonical_name, "json_schema": (f.metadata_json or {}).get("json_schema", {"type": f.data_type}), "description": f.description, "origin": vocab["origins"].get(f.canonical_name)} for f in unique.values()],
-        "pending_field_proposals": [{
-            "id": str(p.id),
-            "submitted_name": p.submitted_name,
-            "canonical_name": p.canonical_name,
-            "json_schema": p.json_schema,
-            "description": p.description,
-            "aliases": p.aliases_json,
-            "proposed_by": p.proposer_client_id,
-            "status": p.status,
-        } for p in list_field_proposals(db, concept, status="pending")],
+        "pending_field_proposals": [{"id": str(p.id), "submitted_name": p.submitted_name, "canonical_name": p.canonical_name, "json_schema": p.json_schema, "description": p.description, "aliases": p.aliases_json, "proposed_by": p.proposer_client_id, "status": p.status} for p in list_field_proposals(db, concept, status="pending")],
         "accepted_aliases": vocab["aliases"],
         "alias_candidates": list_alias_candidates(db, concept),
-        "semantic_policy": "New fields remain pending until explicit user approval. Experience writes never change the concept schema.",
+        "semantic_policy": "Pending fields are globally discoverable. A different authenticated AI may verify and commit a proposal; the proposer cannot verify its own change. Experience writes never change the concept schema.",
     })
+
+
+def _vocabulary_index(db, args):
+    return _result(vocabulary_index(db, args.get("word")))
 
 
 def _propose_concept_fields(db, principal, args):
@@ -228,48 +243,43 @@ def _propose_concept_fields(db, principal, args):
     if not proposals:
         return _error("At least one field proposal is required")
     client_id = f"{principal.client_id}:v2"
-    concept = ensure_concept(
-        db,
-        ConceptEnsure(
-            path=args["concept_path"],
-            description=args.get("concept_description"),
-            created_by=client_id,
-        ),
-    )
-    rows = propose_concept_fields(
-        db,
-        concept=concept,
-        proposals=proposals,
-        proposer_client_id=client_id,
-    )
+    concept = ensure_concept(db, ConceptEnsure(path=args["concept_path"], description=args.get("concept_description"), created_by=client_id))
+    rows = propose_concept_fields(db, concept=concept, proposals=proposals, proposer_client_id=client_id)
     return _result({
         "concept_path": concept.path,
         "concept_version": concept.version,
-        "proposals": [{
-            "id": str(row.id),
-            "canonical_name": row.canonical_name,
-            "json_schema": row.json_schema,
-            "status": row.status,
-        } for row in rows],
-        "approval_url": f"{_base()}/development/concept-fields",
+        "proposals": [{"id": str(row.id), "canonical_name": row.canonical_name, "json_schema": row.json_schema, "status": row.status} for row in rows],
+        "verification_required": True,
+        "instruction": "A different authenticated AI should discover this pending proposal through vocabulary_index, inspect it, then call verify_concept_field_proposal if it agrees. The proposing client cannot self-verify.",
+        "manual_approval_url": f"{_base()}/development/concept-fields",
         "experience_created": False,
     })
 
 
+def _verify_concept_field_proposal(db, principal, args):
+    try: proposal_id = uuid.UUID(str(args.get("proposal_id", "")))
+    except ValueError: return _error("Invalid proposal_id")
+    client_id = f"{principal.client_id}:v2"
+    proposal, field = verify_field_proposal(db, proposal_id, verifier_client_id=client_id, reason=args.get("rationale"))
+    concept = db.get(Concept, proposal.concept_id)
+    return _result({
+        "committed": True,
+        "proposal_id": str(proposal.id),
+        "status": proposal.status,
+        "concept_path": concept.path if concept else None,
+        "field_id": str(field.id),
+        "canonical_name": field.canonical_name,
+        "proposed_by": proposal.proposer_client_id,
+        "verified_by": proposal.decision_by,
+        "verification_reason": proposal.decision_reason,
+    })
+
+
 def _propose_alias(db, principal, args):
-    from app.services.v2 import normalise_path
     path = normalise_path(str(args.get("concept_path", "")))
     concept = db.scalar(select(Concept).where(Concept.path == path, Concept.status == "active"))
     if not concept: return _error("Concept not found", {"path": path})
-    status = propose_alias(
-        db,
-        concept=concept,
-        alias=str(args.get("alias", "")),
-        canonical_name=str(args.get("canonical_name", "")),
-        proposer_client_id=f"{principal.client_id}:v2",
-        confidence=args.get("confidence"),
-        rationale=args.get("rationale"),
-    )
+    status = propose_alias(db, concept=concept, alias=str(args.get("alias", "")), canonical_name=str(args.get("canonical_name", "")), proposer_client_id=f"{principal.client_id}:v2", confidence=args.get("confidence"), rationale=args.get("rationale"))
     db.commit()
     return _result(status)
 
@@ -279,66 +289,19 @@ def _save_experience(db, principal, args):
         return _error("Explicit user approval is required before saving a direct experience")
     relevant = {k: v for k, v in args.items() if k != "idempotency_key"}
     client_id = f"{principal.client_id}:v2"
-    payload_hash, prior = begin_idempotent_write(
-        db,
-        client_id=client_id,
-        key=f"experience:{args['idempotency_key']}",
-        payload=relevant,
-    )
-    if prior is not None:
-        return _result(prior)
-
+    payload_hash, prior = begin_idempotent_write(db, client_id=client_id, key=f"experience:{args['idempotency_key']}", payload=relevant)
+    if prior is not None: return _result(prior)
     path = normalise_path(str(args["concept_path"]))
     concept = db.scalar(select(Concept).where(Concept.path == path, Concept.status == "active"))
     if not concept:
-        return _error(
-            "Concept does not exist",
-            {"concept_path": path, "instruction": "Use propose_concept_fields and approve its fields before saving."},
-        )
-    subject = ensure_subject(
-        db,
-        SubjectEnsure(
-            concept_path=concept.path,
-            name=args["subject_name"],
-            canonical_key=args["canonical_key"],
-            identifiers=args.get("identifiers", {}),
-            attributes=args.get("subject_attributes", {}),
-            create_concept_if_missing=False,
-        ),
-        client_id,
-    )
-    exp = create_experience(
-        db,
-        ExperienceCreate(
-            owner_id=principal.user_id,
-            subject_id=subject.id,
-            headline=args["headline"],
-            summary=args["summary"],
-            raw_text=args["raw_text"],
-            structured_data=args.get("structured_data", {}),
-            visibility=args.get("visibility", "private"),
-            user_approved=True,
-            source_client=client_id,
-        ),
-        client_id,
-    )
-    body = {
-        "saved": True,
-        "experience_id": str(exp.id),
-        "subject_id": str(subject.id),
-        "concept_path": concept.path,
-        "canonical_data": exp.structured_data,
-        "normalization_log": exp.normalization_log,
-        "alias_candidates": list_alias_candidates(db, concept),
-    }
-    finish_idempotent_write(
-        db,
-        client_id=client_id,
-        key=f"experience:{args['idempotency_key']}",
-        payload_hash=payload_hash,
-        response_body=body,
-    )
+        return _error("Concept does not exist", {"concept_path": path, "instruction": "Use vocabulary_index, then propose_concept_fields; another AI must verify the proposal before saving."})
+    subject = ensure_subject(db, SubjectEnsure(concept_path=concept.path, name=args["subject_name"], canonical_key=args["canonical_key"], identifiers=args.get("identifiers", {}), attributes=args.get("subject_attributes", {}), create_concept_if_missing=False), client_id)
+    exp = create_experience(db, ExperienceCreate(owner_id=principal.user_id, subject_id=subject.id, headline=args["headline"], summary=args["summary"], raw_text=args["raw_text"], structured_data=args.get("structured_data", {}), visibility=args.get("visibility", "private"), user_approved=True, source_client=client_id), client_id)
+    body = {"saved": True, "experience_id": str(exp.id), "subject_id": str(subject.id), "concept_path": concept.path, "canonical_data": exp.structured_data, "normalization_log": exp.normalization_log, "alias_candidates": list_alias_candidates(db, concept)}
+    finish_idempotent_write(db, client_id=client_id, key=f"experience:{args['idempotency_key']}", payload_hash=payload_hash, response_body=body)
     return _result(body)
+
+
 def _save_assessment(db, principal, args):
     try: experience_id = uuid.UUID(str(args["experience_id"]))
     except (ValueError, KeyError): return _error("Invalid experience_id")
@@ -346,12 +309,7 @@ def _save_assessment(db, principal, args):
     client_id = f"{principal.client_id}:v2"
     payload_hash, prior = begin_idempotent_write(db, client_id=client_id, key=f"assessment:{args['idempotency_key']}", payload=relevant)
     if prior is not None: return _result(prior)
-    obj = create_assessment(
-        db,
-        AssessmentCreate(experience_id=experience_id, assessment_type=args["assessment_type"], evidence=args.get("evidence", {}), analysis=args.get("analysis", {}), conclusion=args.get("conclusion"), confidence=args.get("confidence"), source_model=args.get("source_model"), provenance=args.get("provenance", {})),
-        client_id=client_id,
-        user_id=principal.user_id,
-    )
+    obj = create_assessment(db, AssessmentCreate(experience_id=experience_id, assessment_type=args["assessment_type"], evidence=args.get("evidence", {}), analysis=args.get("analysis", {}), conclusion=args.get("conclusion"), confidence=args.get("confidence"), source_model=args.get("source_model"), provenance=args.get("provenance", {})), client_id=client_id, user_id=principal.user_id)
     body = {"saved": True, "assessment_id": str(obj.id), "experience_id": str(obj.experience_id), "subject_id": str(obj.subject_id), "provenance": obj.provenance, "created_by_client": obj.created_by_client}
     finish_idempotent_write(db, client_id=client_id, key=f"assessment:{args['idempotency_key']}", payload_hash=payload_hash, response_body=body)
     return _result(body)
@@ -362,12 +320,12 @@ async def mcp_v2(request: Request, db: Session = Depends(get_db)):
     body = await request.json(); rpc_id = body.get("id"); method = body.get("method")
     if method and method.startswith("notifications/"): return Response(status_code=202)
     if method == "initialize":
-        result = {"protocolVersion": PROTOCOL_VERSION, "capabilities": {"tools": {"listChanged": False}}, "serverInfo": {"name": "TasteGraph v2", "version": SERVER_VERSION}, "instructions": "Before writing, inspect the concept vocabulary. New fields must be proposed separately and remain pending for occasional user governance; do not make schema administration part of a normal review conversation. save_experience never changes a concept schema. Preserve the user's exact words in raw_text. Save routine AI-derived interpretation against the exact experience with save_assessment; the server supplies its subject, owner and authenticated provenance automatically."}
+        result = {"protocolVersion": PROTOCOL_VERSION, "capabilities": {"tools": {"listChanged": False}}, "serverInfo": {"name": "TasteGraph v2", "version": SERVER_VERSION}, "instructions": "Use vocabulary_index to locate existing words and pending proposals across the DNS-style concept tree. New fields are proposed by one authenticated AI and may be committed only after verification by a different authenticated AI; a client cannot verify its own proposal. save_experience never changes a concept schema. Preserve the user's exact words in raw_text and keep AI-derived interpretation in save_assessment."}
     elif method == "ping": result = {}
     elif method == "tools/list": result = {"tools": TOOLS}
     elif method == "tools/call":
         params = body.get("params") or {}; name = params.get("name"); args = params.get("arguments") or {}
-        scope = "reviews:write" if name in {"propose_concept_fields", "propose_alias", "save_experience", "save_assessment"} else "reviews:read"
+        scope = "reviews:write" if name in {"propose_concept_fields", "verify_concept_field_proposal", "propose_alias", "save_experience", "save_assessment"} else "reviews:read"
         try: principal = _principal(request, scope)
         except TokenError as exc: result = _auth_error(str(exc))
         else:
@@ -375,7 +333,9 @@ async def mcp_v2(request: Request, db: Session = Depends(get_db)):
                 if name == "search": result = _search(db, principal, args)
                 elif name == "fetch": result = _fetch(db, principal, args)
                 elif name == "get_concept": result = _get_concept(db, args)
+                elif name == "vocabulary_index": result = _vocabulary_index(db, args)
                 elif name == "propose_concept_fields": result = _propose_concept_fields(db, principal, args)
+                elif name == "verify_concept_field_proposal": result = _verify_concept_field_proposal(db, principal, args)
                 elif name == "propose_alias": result = _propose_alias(db, principal, args)
                 elif name == "save_experience": result = _save_experience(db, principal, args)
                 elif name == "save_assessment": result = _save_assessment(db, principal, args)
