@@ -77,6 +77,7 @@ def test_oauth_mcp_v2_resource_flow(client, auth, monkeypatch):
         "fetch",
         "get_concept",
         "vocabulary_index",
+        "pending_vocabulary_proposals",
         "propose_concept_fields",
         "verify_concept_field_proposal",
         "propose_alias",
