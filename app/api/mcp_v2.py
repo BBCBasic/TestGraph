@@ -20,7 +20,7 @@ from app.services.write_safety import begin_idempotent_write, finish_idempotent_
 
 router = APIRouter()
 PROTOCOL_VERSION = "2025-06-18"
-SERVER_VERSION = "2.2.1-alpha"
+SERVER_VERSION = "2.2.2-alpha"
 READ_SECURITY = [{"type": "oauth2", "scopes": ["reviews:read"]}]
 WRITE_SECURITY = [{"type": "oauth2", "scopes": ["reviews:write"]}]
 
@@ -53,6 +53,7 @@ TOOLS = [
     {"name":"fetch","title":"Fetch a TasteGraph v2 experience","description":"Fetch one complete direct experience, including submitted and canonical structured data.","inputSchema":{"type":"object","properties":{"id":{"type":"string"}},"required":["id"],"additionalProperties":False},**_security(READ_SECURITY),"annotations":{"readOnlyHint":True,"destructiveHint":False,"idempotentHint":True,"openWorldHint":False}},
     {"name":"get_concept","title":"Get canonical concept vocabulary","description":"Check canonical fields, accepted aliases, and unresolved client proposals before writing.","inputSchema":{"type":"object","properties":{"path":{"type":"string"}},"required":["path"],"additionalProperties":False},**_security(READ_SECURITY),"annotations":{"readOnlyHint":True,"destructiveHint":False,"idempotentHint":True,"openWorldHint":False}},
     {"name":"vocabulary_index","title":"Search the global DNS vocabulary index","description":"Find every canonical or pending position where a word occurs in the DNS-style concept structure. Omit word for the complete index. Pending proposals are included so another AI can discover and verify them.","inputSchema":{"type":"object","properties":{"word":{"type":"string"}},"additionalProperties":False},**_security(READ_SECURITY),"annotations":{"readOnlyHint":True,"destructiveHint":False,"idempotentHint":True,"openWorldHint":False}},
+    {"name":"pending_vocabulary_proposals","title":"Review pending vocabulary proposals from other AIs","description":"Use during vocabulary or schema work to list unresolved concept/field proposals made by other authenticated AI clients. Independently inspect each proposal and call verify_concept_field_proposal only when you agree with its meaning and schema; do not approve merely because it is pending.","inputSchema":{"type":"object","properties":{"limit":{"type":"integer","minimum":1,"maximum":50,"default":20}},"additionalProperties":False},**_security(READ_SECURITY),"annotations":{"readOnlyHint":True,"destructiveHint":False,"idempotentHint":True,"openWorldHint":False}},
     {"name":"propose_concept_fields","title":"Propose a canonical concept path and fields","description":"Propose fully specified fields. Genuinely new path segments and fields remain pending and immediately appear in the global vocabulary index. A different authenticated AI must verify them before they become canonical.","inputSchema":{"type":"object","properties":{"concept_path":{"type":"string"},"concept_description":{"type":"string"},"fields":{"type":"array","minItems":1,"items":_proposal_schema()}},"required":["concept_path","fields"],"additionalProperties":False},**_security(WRITE_SECURITY),"annotations":{"readOnlyHint":False,"destructiveHint":False,"idempotentHint":True,"openWorldHint":False}},
     {"name":"verify_concept_field_proposal","title":"Verify and commit another AI's concept/field proposal","description":"Independently inspect a pending proposal and promote its pending path and field to canonical vocabulary. The authenticated client cannot verify its own proposal; repeated verification after approval is safe.","inputSchema":{"type":"object","properties":{"proposal_id":{"type":"string","format":"uuid"},"rationale":{"type":"string"}},"required":["proposal_id"],"additionalProperties":False},**_security(WRITE_SECURITY),"annotations":{"readOnlyHint":False,"destructiveHint":False,"idempotentHint":True,"openWorldHint":False}},
     {"name":"propose_alias","title":"Propose a semantic alias mapping","description":"Propose that an unfamiliar term means an existing canonical field. TasteGraph promotes an alias only after independent client consensus.","inputSchema":{"type":"object","properties":{"concept_path":{"type":"string"},"alias":{"type":"string"},"canonical_name":{"type":"string"},"confidence":{"type":"number","minimum":0,"maximum":1},"rationale":{"type":"string"}},"required":["concept_path","alias","canonical_name"],"additionalProperties":False},**_security(WRITE_SECURITY),"annotations":{"readOnlyHint":False,"destructiveHint":False,"idempotentHint":True,"openWorldHint":False}},
@@ -91,13 +92,36 @@ def _get_concept(db, args):
     return _result({"path":concept.path,"version":concept.version,"description":concept.description,"fields":[{"canonical_name":f.canonical_name,"json_schema":(f.metadata_json or {}).get("json_schema",{"type":f.data_type}),"description":f.description,"origin":vocab["origins"].get(f.canonical_name)} for f in unique.values()],"pending_field_proposals":[{"id":str(p.id),"submitted_name":p.submitted_name,"canonical_name":p.canonical_name,"json_schema":p.json_schema,"description":p.description,"aliases":p.aliases_json,"proposed_by":p.proposer_client_id,"status":p.status} for p in list_field_proposals(db,concept,status="pending")],"accepted_aliases":vocab["aliases"],"alias_candidates":list_alias_candidates(db,concept),"semantic_policy":"One authenticated AI proposes; a different authenticated AI verifies and commits. Self-verification is blocked."})
 
 
+def _pending_vocabulary_proposals(db, principal, args):
+    client_id=f"{principal.client_id}:v2"
+    limit=max(1,min(int(args.get("limit",20)),50))
+    rows=[proposal for proposal in list_field_proposals(db,status="pending") if proposal.proposer_client_id != client_id][:limit]
+    proposals=[]
+    for proposal in rows:
+        concept=db.get(Concept,proposal.concept_id)
+        proposals.append({
+            "proposal_id":str(proposal.id),
+            "concept_path":concept.path if concept else None,
+            "concept_status":concept.status if concept else None,
+            "submitted_name":proposal.submitted_name,
+            "canonical_name":proposal.canonical_name,
+            "json_schema":proposal.json_schema,
+            "description":proposal.description,
+            "aliases":proposal.aliases_json,
+            "proposed_by":proposal.proposer_client_id,
+            "status":proposal.status,
+            "instruction":"Independently compare this proposal with the canonical vocabulary and intended meaning. If correct, call verify_concept_field_proposal with this proposal_id and your rationale.",
+        })
+    return _result({"count":len(proposals),"proposals":proposals,"reviewer_client":client_id})
+
+
 def _propose_concept_fields(db, principal, args):
     proposals=[FieldProposal.model_validate(item) for item in args.get("fields",[])]
     if not proposals: return _error("At least one field proposal is required")
     client_id=f"{principal.client_id}:v2"
     concept=ensure_proposed_concept(db,ConceptEnsure(path=args["concept_path"],description=args.get("concept_description"),created_by=client_id))
     rows=propose_concept_fields(db,concept=concept,proposals=proposals,proposer_client_id=client_id)
-    return _result({"concept_path":concept.path,"concept_status":concept.status,"concept_version":concept.version,"proposals":[{"id":str(row.id),"canonical_name":row.canonical_name,"json_schema":row.json_schema,"status":row.status} for row in rows],"verification_required":True,"instruction":"A different authenticated AI should locate this proposal via vocabulary_index and call verify_concept_field_proposal if it agrees. The proposer cannot self-verify.","manual_approval_url":f"{_base()}/development/concept-fields","experience_created":False})
+    return _result({"concept_path":concept.path,"concept_status":concept.status,"concept_version":concept.version,"proposals":[{"id":str(row.id),"canonical_name":row.canonical_name,"json_schema":row.json_schema,"status":row.status} for row in rows],"verification_required":True,"instruction":"A different authenticated AI should locate this proposal via pending_vocabulary_proposals or vocabulary_index and call verify_concept_field_proposal if it agrees. The proposer cannot self-verify.","manual_approval_url":f"{_base()}/development/concept-fields","experience_created":False})
 
 
 def _verify_concept_field_proposal(db, principal, args):
@@ -119,7 +143,7 @@ def _save_experience(db, principal, args):
     payload_hash,prior=begin_idempotent_write(db,client_id=client_id,key=f"experience:{args['idempotency_key']}",payload=relevant)
     if prior is not None: return _result(prior)
     path=normalise_path(str(args["concept_path"])); concept=db.scalar(select(Concept).where(Concept.path==path,Concept.status=="active"))
-    if not concept: return _error("Concept is not canonical yet",{"concept_path":path,"instruction":"Use vocabulary_index and have a different AI verify any pending proposal before saving."})
+    if not concept: return _error("Concept is not canonical yet",{"concept_path":path,"instruction":"Use pending_vocabulary_proposals or vocabulary_index and have a different AI verify any pending proposal before saving."})
     subject=ensure_subject(db,SubjectEnsure(concept_path=concept.path,name=args["subject_name"],canonical_key=args["canonical_key"],identifiers=args.get("identifiers",{}),attributes=args.get("subject_attributes",{}),create_concept_if_missing=False),client_id)
     exp=create_experience(db,ExperienceCreate(owner_id=principal.user_id,subject_id=subject.id,headline=args["headline"],summary=args["summary"],raw_text=args["raw_text"],structured_data=args.get("structured_data",{}),visibility=args.get("visibility","private"),user_approved=True,source_client=client_id),client_id)
     body={"saved":True,"experience_id":str(exp.id),"subject_id":str(subject.id),"concept_path":concept.path,"canonical_data":exp.structured_data,"normalization_log":exp.normalization_log,"alias_candidates":list_alias_candidates(db,concept)}
@@ -141,7 +165,7 @@ def _save_assessment(db, principal, args):
 async def mcp_v2(request: Request, db: Session = Depends(get_db)):
     body=await request.json(); rpc_id=body.get("id"); method=body.get("method")
     if method and method.startswith("notifications/"): return Response(status_code=202)
-    if method=="initialize": result={"protocolVersion":PROTOCOL_VERSION,"capabilities":{"tools":{"listChanged":False}},"serverInfo":{"name":"TasteGraph v2","version":SERVER_VERSION},"instructions":"Use vocabulary_index before adding vocabulary. New concept paths and fields stay pending when AI A proposes them; only a different authenticated AI may verify and promote them. Self-verification is blocked. save_experience only accepts canonical concepts/fields. Preserve exact user words in raw_text and AI interpretation in save_assessment."}
+    if method=="initialize": result={"protocolVersion":PROTOCOL_VERSION,"capabilities":{"tools":{"listChanged":False}},"serverInfo":{"name":"TasteGraph v2","version":SERVER_VERSION},"instructions":"For any vocabulary or schema work, first call pending_vocabulary_proposals to see whether another AI has left changes awaiting independent review, then use vocabulary_index to check existing meanings and locations. Independently verify a pending proposal only when its concept placement, field meaning and JSON schema are correct; call verify_concept_field_proposal to commit it. Never verify your own proposal and never approve merely because another AI proposed it. New concept paths and fields remain pending until a different authenticated AI verifies them. save_experience only accepts canonical concepts/fields. Preserve exact user words in raw_text and AI interpretation in save_assessment."}
     elif method=="ping": result={}
     elif method=="tools/list": result={"tools":TOOLS}
     elif method=="tools/call":
@@ -155,6 +179,7 @@ async def mcp_v2(request: Request, db: Session = Depends(get_db)):
                 elif name=="fetch": result=_fetch(db,principal,args)
                 elif name=="get_concept": result=_get_concept(db,args)
                 elif name=="vocabulary_index": result=_result(vocabulary_index(db,args.get("word")))
+                elif name=="pending_vocabulary_proposals": result=_pending_vocabulary_proposals(db,principal,args)
                 elif name=="propose_concept_fields": result=_propose_concept_fields(db,principal,args)
                 elif name=="verify_concept_field_proposal": result=_verify_concept_field_proposal(db,principal,args)
                 elif name=="propose_alias": result=_propose_alias(db,principal,args)
