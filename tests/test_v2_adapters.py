@@ -12,8 +12,13 @@ def test_mcp_v2_write_tools_are_retry_safe_and_expose_semantic_proposals():
         schema = tools[name]["inputSchema"]
         assert "idempotency_key" in schema["required"]
         assert tools[name]["annotations"]["idempotentHint"] is True
+    assert "vocabulary_index" in tools
+    assert tools["vocabulary_index"]["annotations"]["readOnlyHint"] is True
     assert "propose_concept_fields" in tools
     assert tools["propose_concept_fields"]["inputSchema"]["required"] == ["concept_path", "fields"]
+    assert "verify_concept_field_proposal" in tools
+    assert tools["verify_concept_field_proposal"]["inputSchema"]["required"] == ["proposal_id"]
+    assert tools["verify_concept_field_proposal"]["annotations"]["idempotentHint"] is True
     assert "propose_alias" in tools
     assert tools["propose_alias"]["inputSchema"]["required"] == ["concept_path", "alias", "canonical_name"]
     assert tools["propose_alias"]["annotations"]["idempotentHint"] is True
@@ -23,7 +28,9 @@ def test_action_v2_openapi_matches_mcp_concept_governance_capability():
     spec = actions_v2.openapi()
     assert "/actions-v2/experiences" in spec["paths"]
     assert "/actions-v2/assessments" in spec["paths"]
+    assert "/actions-v2/vocabulary-index" in spec["paths"]
     assert "/actions-v2/concept-field-proposals" in spec["paths"]
+    assert "/actions-v2/concept-field-proposals/{proposal_id}/verify" in spec["paths"]
     assert "/actions-v2/alias-proposals" in spec["paths"]
     experience = spec["components"]["schemas"]["ExperienceCreate"]
     assert experience["properties"]["structured_data"]["additionalProperties"] is True
@@ -37,7 +44,8 @@ def test_action_v2_openapi_matches_mcp_concept_governance_capability():
     alias = spec["components"]["schemas"]["AliasProposal"]
     assert alias["required"] == ["concept_path", "alias", "canonical_name"]
     assert "DNS-style canonical concept tree" in spec["info"]["description"]
-    assert "concept-field proposals" in spec["info"]["description"]
+    assert "global word-to-position vocabulary index" in spec["info"]["description"]
+    assert "independent verification" in spec["info"]["description"]
 
 
 def test_idempotency_replays_same_write_and_rejects_changed_content():
