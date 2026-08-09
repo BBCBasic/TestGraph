@@ -13,6 +13,23 @@ branch_labels = None
 depends_on = None
 
 
+def _ensure_alembic_version_capacity() -> None:
+    """Allow revision identifiers longer than Alembic's historical 32 chars.
+
+    PostgreSQL enforces VARCHAR length, unlike SQLite. Railway therefore needs
+    this widened before Alembic records this migration's revision identifier.
+    """
+    bind = op.get_bind()
+    if bind.dialect.name == "postgresql":
+        op.alter_column(
+            "alembic_version",
+            "version_num",
+            existing_type=sa.String(length=32),
+            type_=sa.String(length=255),
+            existing_nullable=False,
+        )
+
+
 def _state():
     inspector = sa.inspect(op.get_bind())
     columns = {column["name"] for column in inspector.get_columns("assessments")}
@@ -26,6 +43,10 @@ def _state():
 
 
 def upgrade() -> None:
+    # Alembic records this revision after upgrade() returns. Widen its version
+    # column first so PostgreSQL can store this migration's long revision ID.
+    _ensure_alembic_version_capacity()
+
     # This migration may be retried after a failed Railway pre-deploy. Inspect
     # the current schema and only create pieces that are still missing.
     columns, indexes, foreign_keys = _state()
