@@ -9,7 +9,8 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.models.v2 import Concept, ConceptField, ConceptFieldProposal, FieldAlias
-from app.services.v2 import approve_field_proposal, normalise_token
+from app.schemas.v2 import ConceptEnsure
+from app.services.v2 import approve_field_proposal, normalise_path, normalise_token
 
 
 def _words(value: str) -> list[str]:
@@ -24,13 +25,55 @@ def _add(index: dict[str, list[dict[str, Any]]], value: str, location: dict[str,
             index[word].append(item)
 
 
-def vocabulary_index(db: Session, word: str | None = None) -> dict[str, Any]:
-    """Build a derived word -> canonical-tree-location index.
+def ensure_proposed_concept(db: Session, payload: ConceptEnsure) -> Concept:
+    """Locate a concept path, creating missing path nodes as pending.
 
-    The index is intentionally derived from the authoritative tables rather than
-    persisted separately, so a newly proposed or approved vocabulary item is
-    immediately discoverable and cannot leave a stale secondary index behind.
+    Proposal-time path creation must not make AI A's new vocabulary canonical.
+    Existing active nodes remain active; only genuinely new nodes are pending.
     """
+    path = normalise_path(payload.path)
+    parent = None
+    built: list[str] = []
+    for part in path.split("."):
+        built.append(part)
+        current_path = ".".join(built)
+        current = db.scalar(select(Concept).where(Concept.path == current_path))
+        if not current:
+            current = Concept(
+                path=current_path,
+                name=part,
+                parent_id=parent.id if parent else None,
+                description=payload.description if current_path == path else None,
+                definition_json=payload.definition if current_path == path else {},
+                created_by=payload.created_by,
+                status="pending",
+            )
+            db.add(current)
+            db.flush()
+        elif current.status not in {"active", "pending"}:
+            raise ValueError(f"Concept path '{current_path}' is not available for proposal")
+        elif current_path == path:
+            if payload.description and not current.description:
+                current.description = payload.description
+            if payload.definition:
+                merged = dict(current.definition_json or {})
+                merged.update(payload.definition)
+                current.definition_json = merged
+        parent = current
+    db.commit(); db.refresh(parent)
+    return parent
+
+
+def _activate_concept_chain(db: Session, concept: Concept) -> None:
+    current = concept
+    while current:
+        if current.status == "pending":
+            current.status = "active"
+        current = db.get(Concept, current.parent_id) if current.parent_id else None
+
+
+def vocabulary_index(db: Session, word: str | None = None) -> dict[str, Any]:
+    """Build a live word -> DNS-tree-position index from authoritative rows."""
     index: dict[str, list[dict[str, Any]]] = defaultdict(list)
 
     concepts = list(db.scalars(
@@ -46,6 +89,7 @@ def vocabulary_index(db: Session, word: str | None = None) -> dict[str, Any]:
                 "concept_path": concept.path,
                 "segment_index": segment_index,
                 "surface": segment,
+                "status": "active",
                 "position": f"concept:{concept.id}:path:{segment_index}",
             })
 
@@ -55,7 +99,7 @@ def vocabulary_index(db: Session, word: str | None = None) -> dict[str, Any]:
     field_by_id = {field.id: field for field in fields}
     for field in fields:
         concept = concept_by_id.get(field.concept_id) or db.get(Concept, field.concept_id)
-        if not concept:
+        if not concept or concept.status != "active":
             continue
         _add(index, field.canonical_name, {
             "kind": "canonical_field",
@@ -64,6 +108,7 @@ def vocabulary_index(db: Session, word: str | None = None) -> dict[str, Any]:
             "field_id": str(field.id),
             "canonical_name": field.canonical_name,
             "surface": field.canonical_name,
+            "status": "active",
             "position": f"concept:{concept.id}:field:{field.id}",
         })
 
@@ -71,7 +116,7 @@ def vocabulary_index(db: Session, word: str | None = None) -> dict[str, Any]:
     for alias in aliases:
         concept = concept_by_id.get(alias.concept_id) or db.get(Concept, alias.concept_id)
         field = field_by_id.get(alias.field_id) or db.get(ConceptField, alias.field_id)
-        if not concept or not field:
+        if not concept or concept.status != "active" or not field:
             continue
         _add(index, alias.alias, {
             "kind": "accepted_alias",
@@ -81,6 +126,7 @@ def vocabulary_index(db: Session, word: str | None = None) -> dict[str, Any]:
             "canonical_name": field.canonical_name,
             "alias": alias.alias,
             "surface": alias.alias,
+            "status": "active",
             "position": f"concept:{concept.id}:alias:{alias.id}",
         })
 
@@ -89,8 +135,9 @@ def vocabulary_index(db: Session, word: str | None = None) -> dict[str, Any]:
         .where(ConceptFieldProposal.status == "pending")
         .order_by(ConceptFieldProposal.created_at)
     ).all())
+    indexed_pending_concepts: set[uuid.UUID] = set()
     for proposal in proposals:
-        concept = concept_by_id.get(proposal.concept_id) or db.get(Concept, proposal.concept_id)
+        concept = db.get(Concept, proposal.concept_id)
         if not concept:
             continue
         base = {
@@ -102,6 +149,20 @@ def vocabulary_index(db: Session, word: str | None = None) -> dict[str, Any]:
             "proposed_by": proposal.proposer_client_id,
             "status": proposal.status,
         }
+        if concept.status == "pending" and concept.id not in indexed_pending_concepts:
+            for segment_index, segment in enumerate(concept.path.split(".")):
+                _add(index, segment, {
+                    "kind": "pending_concept_path",
+                    "concept_id": str(concept.id),
+                    "concept_path": concept.path,
+                    "proposal_id": str(proposal.id),
+                    "proposed_by": proposal.proposer_client_id,
+                    "segment_index": segment_index,
+                    "surface": segment,
+                    "status": "pending",
+                    "position": f"proposal:{proposal.id}:concept_path:{segment_index}",
+                })
+            indexed_pending_concepts.add(concept.id)
         _add(index, proposal.submitted_name, {
             **base,
             "proposal_part": "submitted_name",
@@ -127,26 +188,13 @@ def vocabulary_index(db: Session, word: str | None = None) -> dict[str, Any]:
         query_words = _words(word)
         if not query_words:
             return {"query": word, "words": [], "match_count": 0, "matches": []}
-        # A phrase query is an AND across its component words. Preserve every
-        # matching location so the caller can see all canonical positions.
         selected: list[dict[str, Any]] = []
         for query_word in query_words:
             selected.extend(index.get(query_word, []))
-        return {
-            "query": word,
-            "words": query_words,
-            "match_count": len(selected),
-            "matches": selected,
-        }
+        return {"query": word, "words": query_words, "match_count": len(selected), "matches": selected}
 
-    rows = [
-        {"word": key, "locations": locations}
-        for key, locations in sorted(index.items())
-    ]
-    return {
-        "word_count": len(rows),
-        "index": rows,
-    }
+    rows = [{"word": key, "locations": locations} for key, locations in sorted(index.items())]
+    return {"word_count": len(rows), "index": rows}
 
 
 def verify_field_proposal(
@@ -156,7 +204,7 @@ def verify_field_proposal(
     verifier_client_id: str,
     reason: str | None = None,
 ) -> tuple[ConceptFieldProposal, ConceptField]:
-    """Promote a pending field only after independent AI verification."""
+    """Promote a pending concept/field only after independent AI verification."""
     proposal = db.get(ConceptFieldProposal, proposal_id)
     if not proposal:
         raise ValueError("Field proposal not found")
@@ -174,18 +222,16 @@ def verify_field_proposal(
             ConceptField.concept_id == concept.id,
             ConceptField.status == "active",
         )).all())
-        matches = [
-            field for field in fields
-            if normalise_token(field.canonical_name) == proposal.canonical_name_normalized
-        ]
+        matches = [field for field in fields if normalise_token(field.canonical_name) == proposal.canonical_name_normalized]
         if len(matches) != 1:
             raise ValueError("Approved proposal does not resolve to exactly one canonical field")
         return proposal, matches[0]
 
+    _activate_concept_chain(db, concept)
+    db.flush()
     field = approve_field_proposal(db, proposal.id, decided_by=verifier_client_id)
     proposal = db.get(ConceptFieldProposal, proposal.id)
     if reason:
         proposal.decision_reason = reason
-        db.commit()
-        db.refresh(proposal)
+        db.commit(); db.refresh(proposal)
     return proposal, field
