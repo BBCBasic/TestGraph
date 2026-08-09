@@ -29,7 +29,7 @@ def test_action_v2_openapi_is_generic_separates_assessments_and_exposes_alias_pr
     assert "idempotency_key" in assessment["required"]
     alias = spec["components"]["schemas"]["AliasProposal"]
     assert alias["required"] == ["concept_path", "alias", "canonical_name"]
-    assert "calling AI" in spec["info"]["description"]
+    assert "DNS-style canonical concept tree" in spec["info"]["description"]
 
 
 def test_idempotency_replays_same_write_and_rejects_changed_content():
