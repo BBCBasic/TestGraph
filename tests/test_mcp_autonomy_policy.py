@@ -10,7 +10,7 @@ from app.services.mcp_autonomy_policy import apply_mcp_v2_autonomy_policy
 def test_mcp_vocabulary_governance_is_autonomous_by_default():
     apply_mcp_v2_autonomy_policy()
 
-    assert mcp_v2.SERVER_VERSION == "2.3.4-alpha"
+    assert mcp_v2.SERVER_VERSION == "2.3.5-alpha"
     tools = {tool["name"]: tool for tool in mcp_v2.TOOLS}
 
     pending = tools["pending_vocabulary_proposals"]["description"]
@@ -18,21 +18,78 @@ def test_mcp_vocabulary_governance_is_autonomous_by_default():
     verify = tools["verify_concept_field_proposal"]["description"]
     reject = tools["reject_concept_field_proposal"]["description"]
     save = tools["save_experience"]["description"]
+    search = tools["search"]["description"]
 
-    assert "do not wait for the user" in pending
-    assert "without pausing for user confirmation between fields" in pending
-    assert "do not ask the user for routine permission" in propose
+    assert "Mandatory DNS governance check" in pending
+    assert "always check for unresolved DNS vocabulary" in search
+    assert "always check for unresolved DNS vocabulary" in save
     assert "independent second-AI" in propose
-    assert "Never resubmit an unchanged proposal" in propose
-    assert "all clearly needed fields together" in propose
     assert "terminal" in reject
-    assert "without requesting separate user confirmation" in verify
-    assert "without requesting separate user confirmation" in reject
-    assert "genuinely ambiguous" in pending
+    assert "without separate user confirmation" in verify
     assert "explicit user approval" in save
-    assert "automatically inspect the pending vocabulary" in save
     assert "without asking the user to repeat an approval already given" in save
-    assert "content materially changes" in save
+
+
+def test_normal_interaction_is_blocked_until_foreign_dns_proposals_are_reviewed():
+    apply_mcp_v2_autonomy_policy()
+
+    pending = SimpleNamespace(
+        id=uuid.uuid4(),
+        proposer_client_id="other-ai:v2",
+        status="pending",
+    )
+
+    class ScalarRows:
+        def all(self):
+            return [pending]
+
+    class FakeDb:
+        def scalars(self, _statement):
+            return ScalarRows()
+
+        def execute(self, _statement):
+            raise AssertionError("normal search must not execute before DNS governance")
+
+    principal = SimpleNamespace(client_id="reviewer-ai", user_id=uuid.uuid4())
+    result = mcp_v2._search(FakeDb(), principal, {"query": "Star Anise"})
+
+    assert result["isError"] is True
+    payload = result["structuredContent"]
+    assert payload["error"] == "DNS governance review required before continuing"
+    assert payload["details"]["dns_governance_required"] is True
+    assert payload["details"]["pending_count"] == 1
+    assert payload["details"]["proposal_ids"] == [str(pending.id)]
+
+
+def test_own_pending_proposal_does_not_deadlock_proposing_ai():
+    apply_mcp_v2_autonomy_policy()
+
+    own_pending = SimpleNamespace(
+        id=uuid.uuid4(),
+        proposer_client_id="reviewer-ai:v2",
+        status="pending",
+    )
+
+    class ScalarRows:
+        def all(self):
+            # SQL would filter this row out in the real DB; model that result here.
+            return []
+
+    class EmptyResult:
+        def all(self):
+            return []
+
+    class FakeDb:
+        def scalars(self, _statement):
+            return ScalarRows()
+
+        def execute(self, _statement):
+            return EmptyResult()
+
+    principal = SimpleNamespace(client_id="reviewer-ai", user_id=uuid.uuid4())
+    result = mcp_v2._search(FakeDb(), principal, {"query": ""})
+
+    assert result["structuredContent"]["count"] == 0
 
 
 def test_identical_rejected_mcp_proposal_is_not_reopened():
