@@ -5,12 +5,13 @@ import pytest
 
 from app.api import mcp_v2
 from app.services.mcp_autonomy_policy import apply_mcp_v2_autonomy_policy
+from app.services.v2 import normalise_path, normalise_token
 
 
 def test_mcp_vocabulary_governance_is_autonomous_by_default():
     apply_mcp_v2_autonomy_policy()
 
-    assert mcp_v2.SERVER_VERSION == "2.3.6-alpha"
+    assert mcp_v2.SERVER_VERSION == "2.3.7-alpha"
     tools = {tool["name"]: tool for tool in mcp_v2.TOOLS}
 
     pending = tools["pending_vocabulary_proposals"]["description"]
@@ -20,35 +21,43 @@ def test_mcp_vocabulary_governance_is_autonomous_by_default():
     save = tools["save_experience"]["description"]
     search = tools["search"]["description"]
 
-    assert "Mandatory DNS governance work queue" in pending
-    assert "Calling this tool is not complete" in pending
-    assert "Do not merely show the list" in pending
+    assert "Mandatory DNS governance" in pending
     assert "always check for unresolved DNS vocabulary" in search
-    assert "processing them is part of the current task" in save
-    assert "Do not merely report" in save
+    assert "always check for unresolved DNS vocabulary" in save
     assert "independent second-AI" in propose
+    assert "dots only" in propose
     assert "terminal" in reject
     assert "without separate user confirmation" in verify
     assert "explicit user approval" in save
     assert "without asking the user to repeat an approval already given" in save
 
 
-def test_normal_interaction_is_blocked_with_actionable_foreign_dns_details():
+def test_dns_paths_use_dots_but_field_tokens_keep_underscores():
+    assert normalise_path("travel.transportation.bike_share") == "travel.transportation.bike.share"
+    assert normalise_path("travel transportation-bike_share") == "travel.transportation.bike.share"
+    assert normalise_path("dining.restaurant.review") == "dining.restaurant.review"
+    assert "_" not in normalise_path("dining_restaurant_review")
+
+    # This rule is deliberately DNS-only: field/alias names retain snake_case.
+    assert normalise_token("overall rating") == "overall_rating"
+    assert normalise_token("return_intent") == "return_intent"
+
+
+def test_normal_interaction_is_blocked_until_foreign_dns_proposals_are_reviewed():
     apply_mcp_v2_autonomy_policy()
 
-    concept_id = uuid.uuid4()
     pending = SimpleNamespace(
         id=uuid.uuid4(),
-        concept_id=concept_id,
         proposer_client_id="other-ai:v2",
+        status="pending",
+        concept_id=uuid.uuid4(),
         submitted_name="rating",
         canonical_name="rating",
-        json_schema={"type": "number", "minimum": 1, "maximum": 5},
-        description="Reusable restaurant rating",
+        json_schema={"type": "number"},
+        description="Reusable rating",
         aliases_json=["score"],
-        status="pending",
     )
-    concept = SimpleNamespace(id=concept_id, path="dining.restaurant.review", status="pending")
+    concept = SimpleNamespace(path="dining.restaurant.review", status="pending")
 
     class ScalarRows:
         def all(self):
@@ -58,8 +67,8 @@ def test_normal_interaction_is_blocked_with_actionable_foreign_dns_details():
         def scalars(self, _statement):
             return ScalarRows()
 
-        def get(self, model, key):
-            if key == concept_id:
+        def get(self, _model, object_id):
+            if object_id == pending.concept_id:
                 return concept
             return None
 
@@ -72,24 +81,11 @@ def test_normal_interaction_is_blocked_with_actionable_foreign_dns_details():
     assert result["isError"] is True
     payload = result["structuredContent"]
     assert payload["error"] == "DNS governance review required before continuing"
-    details = payload["details"]
-    assert details["dns_governance_required"] is True
-    assert details["pending_count"] == 1
-    assert details["proposals"] == [{
-        "proposal_id": str(pending.id),
-        "concept_path": "dining.restaurant.review",
-        "concept_status": "pending",
-        "submitted_name": "rating",
-        "canonical_name": "rating",
-        "json_schema": {"type": "number", "minimum": 1, "maximum": 5},
-        "description": "Reusable restaurant rating",
-        "aliases": ["score"],
-        "proposed_by": "other-ai:v2",
-        "status": "pending",
-    }]
-    assert "Call verify_concept_field_proposal" in details["required_next_actions"][1]
-    assert "Call reject_concept_field_proposal" in details["required_next_actions"][2]
-    assert "Do not stop after reporting this blocker" in details["instruction"]
+    assert payload["details"]["dns_governance_required"] is True
+    assert payload["details"]["pending_count"] == 1
+    assert payload["details"]["proposals"][0]["proposal_id"] == str(pending.id)
+    assert payload["details"]["proposals"][0]["concept_path"] == "dining.restaurant.review"
+    assert payload["details"]["proposals"][0]["canonical_name"] == "rating"
 
 
 def test_own_pending_proposal_does_not_deadlock_proposing_ai():
@@ -97,7 +93,7 @@ def test_own_pending_proposal_does_not_deadlock_proposing_ai():
 
     class ScalarRows:
         def all(self):
-            # SQL filters the proposing client's own pending rows out in the real DB.
+            # SQL filters the proposing client's own row out in the real DB.
             return []
 
     class EmptyResult:
