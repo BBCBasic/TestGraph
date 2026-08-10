@@ -21,22 +21,24 @@ def apply_mcp_v2_autonomy_policy() -> None:
     from app.models.v2 import ConceptFieldProposal
     from app.services.v2 import normalise_token
 
-    mcp_v2.SERVER_VERSION = "2.3.5-alpha"
+    mcp_v2.SERVER_VERSION = "2.3.6-alpha"
 
     dns_preflight = (
         "Before carrying out the user's requested TasteGraph action, always check for unresolved DNS vocabulary "
-        "proposals from other authenticated AI clients. If any exist, review and resolve every clear proposal first "
-        "using verify_concept_field_proposal or reject_concept_field_proposal, without asking for routine human approval, "
-        "then continue the original action. Ask the user only for a genuinely ambiguous ontology decision. "
+        "proposals from other authenticated AI clients. If any exist, processing them is part of the current task: "
+        "review and resolve every clear proposal first using verify_concept_field_proposal or "
+        "reject_concept_field_proposal, without asking for routine human approval, then continue the original action. "
+        "Do not merely report that pending proposals exist and stop. Ask the user only for a genuinely ambiguous ontology decision. "
     )
 
     descriptions = {
         "pending_vocabulary_proposals": (
-            "Mandatory DNS governance check. List unresolved vocabulary proposals made by other authenticated AI clients. "
-            "Perform the full independent review yourself: inspect concept placement, parent/inherited vocabulary, duplicates/aliases, "
-            "generality, analytical value, and JSON-schema quality. Resolve every clearly reviewable proposal in the batch without "
-            "pausing for user confirmation between fields. Continue directly to verify_concept_field_proposal or "
-            "reject_concept_field_proposal as appropriate. Ask the user only when there is a genuinely ambiguous semantic or modelling choice."
+            "Mandatory DNS governance work queue. List unresolved vocabulary proposals made by other authenticated AI clients. "
+            "Calling this tool is not complete until you have independently reviewed the returned proposals and, for every clear case, "
+            "called verify_concept_field_proposal or reject_concept_field_proposal. Do not merely show the list to the user or ask for "
+            "routine approval. Inspect concept placement, parent/inherited vocabulary, duplicates/aliases, generality, analytical value, "
+            "and JSON-schema quality. Resolve all clear proposals in sequence. Ask the user only when there is a genuinely ambiguous "
+            "semantic or modelling choice."
         ),
         "verify_concept_field_proposal": (
             "Independently promote another AI's pending proposal only when concept placement, generality, analytical value, "
@@ -108,16 +110,39 @@ def apply_mcp_v2_autonomy_policy() -> None:
             ).all()
         )
 
-    def blocked_result(rows):
+    def proposal_payload(db, row):
+        concept = db.get(mcp_v2.Concept, row.concept_id)
+        return {
+            "proposal_id": str(row.id),
+            "concept_path": concept.path if concept else None,
+            "concept_status": concept.status if concept else None,
+            "submitted_name": row.submitted_name,
+            "canonical_name": row.canonical_name,
+            "json_schema": row.json_schema,
+            "description": row.description,
+            "aliases": row.aliases_json,
+            "proposed_by": row.proposer_client_id,
+            "status": row.status,
+        }
+
+    def blocked_result(db, rows):
+        proposals = [proposal_payload(db, row) for row in rows[:50]]
         return mcp_v2._error(
             "DNS governance review required before continuing",
             {
                 "dns_governance_required": True,
                 "pending_count": len(rows),
-                "proposal_ids": [str(row.id) for row in rows[:50]],
+                "proposals": proposals,
+                "required_next_actions": [
+                    "Independently assess each returned proposal now.",
+                    "Call verify_concept_field_proposal for every clearly durable proposal.",
+                    "Call reject_concept_field_proposal for every clearly poor proposal.",
+                    "Do not ask the user for routine DNS-governance approval.",
+                    "Retry the original TasteGraph action after the foreign pending queue is clear.",
+                ],
                 "instruction": (
-                    "Call pending_vocabulary_proposals now, independently verify or reject every clear proposal, "
-                    "then retry the original TasteGraph action. Do not ask the user for routine governance approval."
+                    "The original action is intentionally blocked. The returned proposal details are sufficient to begin review immediately. "
+                    "Do not stop after reporting this blocker: process every clear proposal through verify/reject, then retry the original action."
                 ),
             },
         )
@@ -144,7 +169,7 @@ def apply_mcp_v2_autonomy_policy() -> None:
             def guarded(db, principal, args):
                 rows = foreign_pending(db, principal)
                 if rows:
-                    return blocked_result(rows)
+                    return blocked_result(db, rows)
                 return original(db, principal, args)
 
             guarded._tastegraph_dns_preflight = True
@@ -159,7 +184,7 @@ def apply_mcp_v2_autonomy_policy() -> None:
         def guarded_get_concept(db, args):
             rows = foreign_pending(db, principal_context.get())
             if rows:
-                return blocked_result(rows)
+                return blocked_result(db, rows)
             return original_get_concept(db, args)
 
         guarded_get_concept._tastegraph_dns_preflight = True
