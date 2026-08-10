@@ -22,7 +22,16 @@ def normalise_token(value: str) -> str:
 
 
 def normalise_path(path: str) -> str:
-    parts = [normalise_token(part) for part in path.strip().split(".") if part.strip()]
+    """Canonicalise DNS concept paths using dots as the only separator.
+
+    Underscores, whitespace, hyphens and other punctuation in a concept path are
+    treated as hierarchy separators. Field/alias normalisation is intentionally
+    unchanged and may still use underscores.
+    """
+    value = path.strip().lower()
+    value = re.sub(r"[^a-z0-9.]+", ".", value)
+    value = re.sub(r"\.+", ".", value).strip(".")
+    parts = value.split(".") if value else []
     if not parts or any(not part for part in parts):
         raise ValueError("Invalid concept path")
     return ".".join(parts)
