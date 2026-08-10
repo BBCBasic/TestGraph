@@ -3,9 +3,10 @@ from __future__ import annotations
 """Runtime policy tuning for TasteGraph MCP vocabulary governance.
 
 The MCP server deliberately keeps schema writes separate from direct user-experience
-writes. Vocabulary verification/rejection is AI governance work: a reviewing AI should
-make the routine decision itself after an independent check, and involve the user only
-when the semantic choice is genuinely ambiguous or consequential.
+writes. Vocabulary proposal/verification/rejection is AI governance work: an AI should
+make routine, clear schema decisions itself after checking the shared vocabulary, and
+involve the user only when the semantic choice is genuinely ambiguous. Saving a direct
+user experience remains separate and still requires explicit user approval.
 """
 
 
@@ -13,7 +14,7 @@ def apply_mcp_v2_autonomy_policy() -> None:
     # Import lazily to avoid creating an import cycle while app.api.mcp_v2 is loaded.
     from app.api import mcp_v2
 
-    mcp_v2.SERVER_VERSION = "2.3.1-alpha"
+    mcp_v2.SERVER_VERSION = "2.3.2-alpha"
 
     descriptions = {
         "pending_vocabulary_proposals": (
@@ -38,10 +39,19 @@ def apply_mcp_v2_autonomy_policy() -> None:
         ),
         "propose_concept_fields": (
             "Schema design, not review extraction. Before proposing, inspect pending proposals, the vocabulary index, "
-            "the concept path and its ancestors. Propose only the smallest set of broadly reusable fields that materially "
-            "improve future search/comparison/personalisation. Prefer raw_text for one-off or uncertain detail. Measurements "
-            "and money must be machine-readable. Routine proposal housekeeping should be handled by the AI; involve the user "
-            "only for genuinely ambiguous conceptual choices."
+            "the intended concept path and its ancestors. If no suitable canonical concept exists and the domain placement "
+            "is clear, propose a sensible new domain concept path and the smallest durable reusable field set directly; do "
+            "not ask the user for routine permission merely because the concept path is new. The independent second-AI "
+            "verification step is the safeguard before anything becomes canonical. Propose only fields that materially "
+            "improve future search/comparison/personalisation, prefer raw_text for one-off or uncertain detail, and use "
+            "machine-readable schemas for measurements and money. Ask the user only when the ontology or semantic modelling "
+            "choice is genuinely ambiguous."
+        ),
+        "save_experience": (
+            "Save a direct user experience only after explicit user approval. Vocabulary housekeeping is separate: AI clients "
+            "may propose, verify and reject clear schema changes autonomously, but must not treat that autonomy as approval to "
+            "store the user's personal experience or opinion. The concept and every structured field must already be canonical. "
+            "This tool never changes the schema. Reuse idempotency_key on retry."
         ),
     }
 
