@@ -10,7 +10,7 @@ from app.services.mcp_autonomy_policy import apply_mcp_v2_autonomy_policy
 def test_mcp_vocabulary_governance_is_autonomous_by_default():
     apply_mcp_v2_autonomy_policy()
 
-    assert mcp_v2.SERVER_VERSION == "2.3.3-alpha"
+    assert mcp_v2.SERVER_VERSION == "2.3.4-alpha"
     tools = {tool["name"]: tool for tool in mcp_v2.TOOLS}
 
     pending = tools["pending_vocabulary_proposals"]["description"]
@@ -19,16 +19,20 @@ def test_mcp_vocabulary_governance_is_autonomous_by_default():
     reject = tools["reject_concept_field_proposal"]["description"]
     save = tools["save_experience"]["description"]
 
-    assert "without asking the user" in pending
+    assert "do not wait for the user" in pending
+    assert "without pausing for user confirmation between fields" in pending
     assert "do not ask the user for routine permission" in propose
     assert "independent second-AI" in propose
     assert "Never resubmit an unchanged proposal" in propose
+    assert "all clearly needed fields together" in propose
     assert "terminal" in reject
     assert "without requesting separate user confirmation" in verify
     assert "without requesting separate user confirmation" in reject
     assert "genuinely ambiguous" in pending
     assert "explicit user approval" in save
-    assert "personal experience or opinion" in save
+    assert "automatically inspect the pending vocabulary" in save
+    assert "without asking the user to repeat an approval already given" in save
+    assert "content materially changes" in save
 
 
 def test_identical_rejected_mcp_proposal_is_not_reopened():
