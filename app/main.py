@@ -55,6 +55,7 @@ def home():
     development_link = (
         '<li><a href="/development/reset">Development: empty user data</a></li>'
         '<li><a href="/development/concept-fields">Development: concept field proposals</a></li>'
+        '<li><a href="/development/vocabulary">Development: interactive DNS vocabulary</a></li>'
         if settings.enable_development_reset
         else ""
     )
