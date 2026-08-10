@@ -18,7 +18,9 @@ from app.api.actions import router as actions_router
 from app.api.actions_v2 import router as actions_v2_router
 from app.api.development import router as development_router
 from app.core.config import get_settings
+from app.services.mcp_autonomy_policy import apply_mcp_v2_autonomy_policy
 
+apply_mcp_v2_autonomy_policy()
 settings=get_settings()
 REVIEWS_HTML = Path(__file__).parent / "static" / "reviews.html"
 app=FastAPI(title="TasteGraph",version="2.0.0-alpha",description="AI-native structured experience storage with a self-organising concept registry.")
