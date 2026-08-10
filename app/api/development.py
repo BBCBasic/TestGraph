@@ -230,7 +230,7 @@ def _vocabulary_payload(db: Session) -> dict:
 def vocabulary_browser(db: Session = Depends(get_db)) -> HTMLResponse:
     _require_enabled()
     payload = json.dumps(_vocabulary_payload(db), separators=(",", ":")).replace("</", "<\\/")
-    response = HTMLResponse(f"""<!doctype html>
+    template = """<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -259,7 +259,7 @@ h1{{margin:.2rem 0;font:700 clamp(1.8rem,4vw,3rem)/1.05 Georgia,serif}}.muted{{c
 <section class="panel"><h2>Concept tree</h2><div id="tree"></div><div id="details" aria-live="polite"><span class="muted">Select a concept to inspect it.</span></div></section>
 <aside class="panel"><h2>Words <span id="word-count" class="muted"></span></h2><div id="words" class="word-list"></div></aside>
 </div>
-<script id="vocabulary-data" type="application/json">{payload}</script>
+<script id="vocabulary-data" type="application/json">__VOCABULARY_PAYLOAD__</script>
 <script>
 const DATA=JSON.parse(document.getElementById('vocabulary-data').textContent);
 const byId=new Map(DATA.concepts.map(c=>[c.id,c]));
@@ -278,7 +278,9 @@ function esc(v){{return String(v??'').replace(/[&<>\"']/g,ch=>({{'&':'&amp;','<'
 search.addEventListener('input',()=>{{renderTree();renderWords();}});document.getElementById('expand').addEventListener('click',()=>document.querySelectorAll('.node').forEach(n=>n.classList.remove('collapsed')));document.getElementById('collapse').addEventListener('click',()=>document.querySelectorAll('.node').forEach(n=>n.classList.add('collapsed')));
 renderTree();renderWords();
 </script>
-</main></body></html>""")
+</main></body></html>"""
+    html = template.replace("{{", "{").replace("}}", "}").replace("__VOCABULARY_PAYLOAD__", payload)
+    response = HTMLResponse(html)
     response.headers["Cache-Control"] = "no-store"
     response.headers["X-Robots-Tag"] = "noindex, nofollow"
     return response
