@@ -21,7 +21,7 @@ def apply_mcp_v2_autonomy_policy() -> None:
     from app.models.v2 import ConceptFieldProposal
     from app.services.v2 import normalise_token
 
-    mcp_v2.SERVER_VERSION = "2.3.6-alpha"
+    mcp_v2.SERVER_VERSION = "2.3.7-alpha"
 
     dns_preflight = (
         "Before carrying out the user's requested TasteGraph action, always check for unresolved DNS vocabulary "
@@ -29,6 +29,9 @@ def apply_mcp_v2_autonomy_policy() -> None:
         "review and resolve every clear proposal first using verify_concept_field_proposal or "
         "reject_concept_field_proposal, without asking for routine human approval, then continue the original action. "
         "Do not merely report that pending proposals exist and stop. Ask the user only for a genuinely ambiguous ontology decision. "
+        "DNS concept hierarchy uses dots only: hierarchy boundaries must be represented with '.', never '_'. "
+        "Underscores, spaces, hyphens and similar separators in a concept path are canonicalised to dots. "
+        "This dot-only rule applies only to DNS concept paths; ordinary canonical field names and aliases may still use underscores. "
     )
 
     descriptions = {
@@ -37,27 +40,29 @@ def apply_mcp_v2_autonomy_policy() -> None:
             "Calling this tool is not complete until you have independently reviewed the returned proposals and, for every clear case, "
             "called verify_concept_field_proposal or reject_concept_field_proposal. Do not merely show the list to the user or ask for "
             "routine approval. Inspect concept placement, parent/inherited vocabulary, duplicates/aliases, generality, analytical value, "
-            "and JSON-schema quality. Resolve all clear proposals in sequence. Ask the user only when there is a genuinely ambiguous "
-            "semantic or modelling choice."
+            "and JSON-schema quality. DNS concept paths must use dots only for hierarchy; underscores are not valid hierarchy separators. "
+            "Resolve all clear proposals in sequence. Ask the user only when there is a genuinely ambiguous semantic or modelling choice."
         ),
         "verify_concept_field_proposal": (
             "Independently promote another AI's pending proposal only when concept placement, generality, analytical value, "
-            "inheritance/duplication checks and JSON schema are durable. This is internal AI vocabulary governance, not a statement "
-            "of the user's opinion. When clearly positive, verify without separate user confirmation. If several proposals are clear, "
-            "verify them all in sequence. The authenticated client cannot verify its own proposal."
+            "inheritance/duplication checks and JSON schema are durable. DNS hierarchy must use dots only. This is internal AI vocabulary "
+            "governance, not a statement of the user's opinion. When clearly positive, verify without separate user confirmation. If several "
+            "proposals are clear, verify them all in sequence. The authenticated client cannot verify its own proposal."
         ),
         "reject_concept_field_proposal": (
             "Reject another AI's pending vocabulary proposal when it is duplicate, over-specific, analytically weak, poorly typed, "
-            "wrongly placed, or better left in raw_text. A rejected proposal is terminal and must not be silently reopened by "
-            "resubmitting the same concept/field/schema. This is internal AI vocabulary governance; when clearly negative, reject "
-            "without separate user confirmation. If several proposals are clearly rejectable, reject them all in sequence."
+            "wrongly placed, uses invalid DNS hierarchy naming, or is better left in raw_text. DNS concept hierarchy uses dots only, never "
+            "underscores. A rejected proposal is terminal and must not be silently reopened by resubmitting the same concept/field/schema. "
+            "This is internal AI vocabulary governance; when clearly negative, reject without separate user confirmation. If several proposals "
+            "are clearly rejectable, reject them all in sequence."
         ),
         "propose_concept_fields": (
             dns_preflight
             + "Schema design, not review extraction. Inspect rejected proposals where relevant, the vocabulary index, the intended concept "
             "path and its ancestors. If no suitable canonical concept exists and placement is clear, propose a sensible new domain concept "
-            "path and the smallest durable reusable field set directly. The independent second-AI verification step is the safeguard before "
-            "anything becomes canonical. Never resubmit an unchanged rejected proposal. Propose all clearly needed fields together."
+            "path and the smallest durable reusable field set directly. Concept paths must use dots only for hierarchy; do not create DNS "
+            "segments containing underscores. The independent second-AI verification step is the safeguard before anything becomes canonical. "
+            "Never resubmit an unchanged rejected proposal. Propose all clearly needed fields together."
         ),
         "save_experience": (
             dns_preflight
@@ -71,7 +76,8 @@ def apply_mcp_v2_autonomy_policy() -> None:
         "propose_alias": dns_preflight + "Propose a semantic alias mapping only after mandatory pending-DNS governance has been cleared.",
         "save_assessment": dns_preflight + "Save AI-derived analysis only after mandatory pending-DNS governance has been cleared.",
         "vocabulary_index": (
-            "Inspect the global DNS vocabulary index. This is a governance/preflight tool and may be used while pending proposals exist."
+            "Inspect the global DNS vocabulary index. This is a governance/preflight tool and may be used while pending proposals exist. "
+            "DNS concept hierarchy is dot-separated only; underscores remain valid in ordinary field names and aliases."
         ),
     }
 
