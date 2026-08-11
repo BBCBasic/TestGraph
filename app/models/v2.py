@@ -3,7 +3,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import DateTime, ForeignKey, Integer, String, Text, UniqueConstraint
+from sqlalchemy import DateTime, ForeignKey, String, Text, UniqueConstraint
 from sqlalchemy.dialects.postgresql import JSONB, UUID as PGUUID
 from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy.types import JSON, Uuid
@@ -22,81 +22,76 @@ def new_uuid():
     return uuid.uuid4()
 
 
-class Concept(Base):
-    __tablename__ = "concepts"
+class SubjectType(Base):
+    __tablename__ = "subject_types"
     id: Mapped[uuid.UUID] = mapped_column(UuidType, primary_key=True, default=new_uuid)
-    path: Mapped[str] = mapped_column(String(300), unique=True, index=True)
-    name: Mapped[str] = mapped_column(String(120), index=True)
-    parent_id: Mapped[uuid.UUID | None] = mapped_column(UuidType, ForeignKey("concepts.id"), index=True)
+    canonical_name: Mapped[str] = mapped_column(String(120), nullable=False)
+    normalized_name: Mapped[str] = mapped_column(String(120), unique=True, index=True)
     description: Mapped[str | None] = mapped_column(Text)
-    version: Mapped[int] = mapped_column(Integer, default=1)
-    status: Mapped[str] = mapped_column(String(20), default="active", index=True)
-    definition_json: Mapped[dict] = mapped_column(JsonType, default=dict)
-    created_by: Mapped[str] = mapped_column(String(120), default="system")
+    status: Mapped[str] = mapped_column(String(20), default="provisional", index=True)
+    created_by: Mapped[str] = mapped_column(String(200), default="system")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc, onupdate=now_utc)
 
 
-class ConceptField(Base):
-    __tablename__ = "concept_fields"
-    __table_args__ = (UniqueConstraint("concept_id", "canonical_name", name="uq_concept_field_name"),)
+class SubjectTypeAlias(Base):
+    __tablename__ = "subject_type_aliases"
     id: Mapped[uuid.UUID] = mapped_column(UuidType, primary_key=True, default=new_uuid)
-    concept_id: Mapped[uuid.UUID] = mapped_column(UuidType, ForeignKey("concepts.id"), index=True)
-    canonical_name: Mapped[str] = mapped_column(String(200), index=True)
-    data_type: Mapped[str] = mapped_column(String(30), default="any")
+    subject_type_id: Mapped[uuid.UUID] = mapped_column(UuidType, ForeignKey("subject_types.id"), index=True)
+    alias: Mapped[str] = mapped_column(String(160), nullable=False)
+    normalized_alias: Mapped[str] = mapped_column(String(160), unique=True, index=True)
+    source: Mapped[str] = mapped_column(String(200), default="system")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
+
+
+class TypeRelationship(Base):
+    __tablename__ = "subject_type_relationships"
+    __table_args__ = (UniqueConstraint("source_type_id", "relationship", "target_type_id", name="uq_type_relationship"),)
+    id: Mapped[uuid.UUID] = mapped_column(UuidType, primary_key=True, default=new_uuid)
+    source_type_id: Mapped[uuid.UUID] = mapped_column(UuidType, ForeignKey("subject_types.id"), index=True)
+    relationship: Mapped[str] = mapped_column(String(60), default="belongs_to", index=True)
+    target_type_id: Mapped[uuid.UUID] = mapped_column(UuidType, ForeignKey("subject_types.id"), index=True)
+    source: Mapped[str] = mapped_column(String(200), default="system")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
+
+
+class FieldDefinition(Base):
+    __tablename__ = "field_definitions"
+    id: Mapped[uuid.UUID] = mapped_column(UuidType, primary_key=True, default=new_uuid)
+    canonical_name: Mapped[str] = mapped_column(String(160), nullable=False)
+    normalized_name: Mapped[str] = mapped_column(String(160), unique=True, index=True)
+    json_schema: Mapped[dict] = mapped_column(JsonType, default=dict)
     description: Mapped[str | None] = mapped_column(Text)
-    unit: Mapped[str | None] = mapped_column(String(50))
-    allowed_values: Mapped[list] = mapped_column(JsonType, default=list)
-    metadata_json: Mapped[dict] = mapped_column(JsonType, default=dict)
-    introduced_version: Mapped[int] = mapped_column(Integer, default=1)
     status: Mapped[str] = mapped_column(String(20), default="active", index=True)
-    created_by: Mapped[str] = mapped_column(String(120), default="system")
+    created_by: Mapped[str] = mapped_column(String(200), default="system")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
-
-
-class ConceptFieldProposal(Base):
-    __tablename__ = "concept_field_proposals"
-    __table_args__ = (
-        UniqueConstraint(
-            "concept_id", "canonical_name_normalized",
-            name="uq_concept_field_proposal_name",
-        ),
-    )
-    id: Mapped[uuid.UUID] = mapped_column(UuidType, primary_key=True, default=new_uuid)
-    concept_id: Mapped[uuid.UUID] = mapped_column(UuidType, ForeignKey("concepts.id"), index=True)
-    submitted_name: Mapped[str] = mapped_column(String(200))
-    canonical_name: Mapped[str] = mapped_column(String(200))
-    canonical_name_normalized: Mapped[str] = mapped_column(String(200), index=True)
-    json_schema: Mapped[dict] = mapped_column(JsonType)
-    description: Mapped[str | None] = mapped_column(Text)
-    aliases_json: Mapped[list] = mapped_column(JsonType, default=list)
-    proposer_client_id: Mapped[str] = mapped_column(String(200), index=True)
-    status: Mapped[str] = mapped_column(String(20), default="pending", index=True)
-    decision_by: Mapped[str | None] = mapped_column(String(120))
-    decision_reason: Mapped[str | None] = mapped_column(Text)
-    decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
-    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc, onupdate=now_utc)
 
 
 class FieldAlias(Base):
     __tablename__ = "field_aliases"
-    __table_args__ = (UniqueConstraint("concept_id", "alias_normalized", name="uq_concept_alias"),)
     id: Mapped[uuid.UUID] = mapped_column(UuidType, primary_key=True, default=new_uuid)
-    concept_id: Mapped[uuid.UUID] = mapped_column(UuidType, ForeignKey("concepts.id"), index=True)
-    field_id: Mapped[uuid.UUID] = mapped_column(UuidType, ForeignKey("concept_fields.id"), index=True)
-    alias: Mapped[str] = mapped_column(String(200))
-    alias_normalized: Mapped[str] = mapped_column(String(200), index=True)
-    confidence: Mapped[float] = mapped_column(default=1.0)
-    source: Mapped[str] = mapped_column(String(120), default="system")
+    field_id: Mapped[uuid.UUID] = mapped_column(UuidType, ForeignKey("field_definitions.id"), index=True)
+    alias: Mapped[str] = mapped_column(String(160), nullable=False)
+    normalized_alias: Mapped[str] = mapped_column(String(160), unique=True, index=True)
+    source: Mapped[str] = mapped_column(String(200), default="system")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
+
+
+class SubjectTypeField(Base):
+    __tablename__ = "subject_type_fields"
+    __table_args__ = (UniqueConstraint("subject_type_id", "field_id", name="uq_subject_type_field"),)
+    id: Mapped[uuid.UUID] = mapped_column(UuidType, primary_key=True, default=new_uuid)
+    subject_type_id: Mapped[uuid.UUID] = mapped_column(UuidType, ForeignKey("subject_types.id"), index=True)
+    field_id: Mapped[uuid.UUID] = mapped_column(UuidType, ForeignKey("field_definitions.id"), index=True)
+    source: Mapped[str] = mapped_column(String(200), default="system")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
 
 
 class V2Subject(Base):
     __tablename__ = "v2_subjects"
-    __table_args__ = (UniqueConstraint("concept_id", "canonical_key", name="uq_v2_subject_concept_key"),)
+    __table_args__ = (UniqueConstraint("subject_type_id", "canonical_key", name="uq_v2_subject_type_key"),)
     id: Mapped[uuid.UUID] = mapped_column(UuidType, primary_key=True, default=new_uuid)
-    concept_id: Mapped[uuid.UUID] = mapped_column(UuidType, ForeignKey("concepts.id"), index=True)
+    subject_type_id: Mapped[uuid.UUID] = mapped_column(UuidType, ForeignKey("subject_types.id"), index=True)
     name: Mapped[str] = mapped_column(String(240), index=True)
     canonical_key: Mapped[str] = mapped_column(String(300), index=True)
     identifiers_json: Mapped[dict] = mapped_column(JsonType, default=dict)
@@ -127,18 +122,18 @@ class V2Experience(Base):
     owner_id: Mapped[uuid.UUID] = mapped_column(UuidType, ForeignKey("users.id"), index=True)
     subject_id: Mapped[uuid.UUID] = mapped_column(UuidType, ForeignKey("v2_subjects.id"), index=True)
     source_id: Mapped[uuid.UUID | None] = mapped_column(UuidType, ForeignKey("sources.id"), index=True)
+    record_type: Mapped[str] = mapped_column(String(30), default="review", index=True)
     experienced_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
     headline: Mapped[str] = mapped_column(String(240))
     summary: Mapped[str] = mapped_column(Text)
-    raw_text: Mapped[str | None] = mapped_column(Text)
+    raw_text: Mapped[str] = mapped_column(Text)
     structured_data: Mapped[dict] = mapped_column(JsonType, default=dict)
     submitted_data: Mapped[dict] = mapped_column(JsonType, default=dict)
     normalization_log: Mapped[list] = mapped_column(JsonType, default=list)
     visibility: Mapped[str] = mapped_column(String(20), default="private", index=True)
     publication_status: Mapped[str] = mapped_column(String(20), default="published", index=True)
-    version: Mapped[int] = mapped_column(Integer, default=1)
     provenance: Mapped[dict] = mapped_column(JsonType, default=dict)
-    created_by_client: Mapped[str] = mapped_column(String(120), default="unknown")
+    created_by_client: Mapped[str] = mapped_column(String(200), default="unknown")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc, onupdate=now_utc)
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
@@ -148,11 +143,7 @@ class Assessment(Base):
     __tablename__ = "assessments"
     id: Mapped[uuid.UUID] = mapped_column(UuidType, primary_key=True, default=new_uuid)
     subject_id: Mapped[uuid.UUID] = mapped_column(UuidType, ForeignKey("v2_subjects.id"), index=True)
-    experience_id: Mapped[uuid.UUID | None] = mapped_column(
-        UuidType,
-        ForeignKey("v2_experiences.id"),
-        index=True,
-    )
+    experience_id: Mapped[uuid.UUID] = mapped_column(UuidType, ForeignKey("v2_experiences.id"), index=True)
     user_id: Mapped[uuid.UUID | None] = mapped_column(UuidType, ForeignKey("users.id"), index=True)
     assessment_type: Mapped[str] = mapped_column(String(80), index=True)
     evidence_json: Mapped[dict] = mapped_column(JsonType, default=dict)

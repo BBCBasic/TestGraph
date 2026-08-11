@@ -11,34 +11,18 @@ class StrictModel(BaseModel):
     model_config = ConfigDict(extra="forbid", from_attributes=True)
 
 
-class FieldProposal(StrictModel):
-    submitted_name: str = Field(min_length=1, max_length=200)
-    canonical_name: str = Field(min_length=1, max_length=200)
-    json_schema: dict[str, Any]
+class SubjectTypeEnsure(StrictModel):
+    term: str = Field(min_length=1, max_length=160)
     description: str | None = None
-    aliases: list[str] = []
-
-
-class ConceptEnsure(StrictModel):
-    path: str = Field(min_length=1, max_length=300)
-    description: str | None = None
-    definition: dict[str, Any] = {}
-    created_by: str = "ai-client"
-
-
-class NormaliseRequest(StrictModel):
-    concept_path: str
-    data: dict[str, Any]
-    source: str = "ai-client"
+    create_if_missing: bool = True
 
 
 class SubjectEnsure(StrictModel):
-    concept_path: str
+    subject_type: str
     name: str = Field(min_length=1, max_length=240)
     canonical_key: str = Field(min_length=1, max_length=300)
     identifiers: dict[str, Any] = {}
     attributes: dict[str, Any] = {}
-    create_concept_if_missing: bool = True
 
 
 class SourceCreate(StrictModel):
@@ -77,23 +61,23 @@ class AssessmentCreate(StrictModel):
     provenance: dict[str, Any] = {}
 
 
-class ConceptRead(StrictModel):
-    id: UUID
-    path: str
-    name: str
-    parent_id: UUID | None
-    description: str | None
-    version: int
-    status: str
-    definition_json: dict[str, Any]
-    created_by: str
-    created_at: datetime
-    updated_at: datetime
+class FieldEnsure(StrictModel):
+    canonical_name: str = Field(min_length=1, max_length=160)
+    json_schema: dict[str, Any]
+    description: str | None = None
+    aliases: list[str] = []
+    subject_types: list[str] = []
+
+
+class RelationshipEnsure(StrictModel):
+    source_type: str
+    relationship: str = "belongs_to"
+    target_type: str
 
 
 class SubjectRead(StrictModel):
     id: UUID
-    concept_id: UUID
+    subject_type_id: UUID
     name: str
     canonical_key: str
     identifiers_json: dict[str, Any]
@@ -107,6 +91,7 @@ class ExperienceRead(StrictModel):
     owner_id: UUID
     subject_id: UUID
     source_id: UUID | None
+    record_type: str
     experienced_at: datetime | None
     headline: str
     summary: str
@@ -116,7 +101,6 @@ class ExperienceRead(StrictModel):
     normalization_log: list[Any]
     visibility: str
     publication_status: str
-    version: int
     provenance: dict[str, Any]
     created_by_client: str
     created_at: datetime
