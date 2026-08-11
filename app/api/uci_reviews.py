@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import csv
 import gzip
-import io
 import json
 from functools import lru_cache
 from pathlib import Path
@@ -25,7 +24,6 @@ def _normalise_row(row: dict[str, str]) -> dict[str, str]:
 
 @lru_cache(maxsize=1)
 def _full_rows() -> tuple[dict[str, str], ...]:
-    """Read the vendored UCI CSV from the Railway deployment; never call UCI at request time."""
     if not FULL_DATASET.exists():
         return ()
     with gzip.open(FULL_DATASET, "rt", encoding="utf-8-sig", newline="") as handle:
@@ -65,6 +63,36 @@ def _rows() -> tuple[tuple[dict[str, str], ...], str]:
     if fallback:
         return fallback, "bundled-fallback"
     raise RuntimeError("No local UCI recipe review data is installed")
+
+
+@router.get("/api/status")
+def status():
+    result = {
+        "full_dataset_path": str(FULL_DATASET),
+        "full_dataset_exists": FULL_DATASET.exists(),
+        "full_dataset_bytes": FULL_DATASET.stat().st_size if FULL_DATASET.exists() else 0,
+        "fallback_exists": BUNDLED.exists(),
+    }
+    if FULL_DATASET.exists():
+        try:
+            with gzip.open(FULL_DATASET, "rt", encoding="utf-8-sig", newline="") as handle:
+                reader = csv.DictReader(handle)
+                first = next(reader, None)
+                result["gzip_ok"] = True
+                result["headers"] = reader.fieldnames
+                result["first_recipe_name"] = first.get("recipe_name") if first else None
+        except Exception as exc:
+            result["gzip_ok"] = False
+            result["gzip_error"] = f"{type(exc).__name__}: {exc}"
+    try:
+        rows, source = _rows()
+        result["load_ok"] = True
+        result["source"] = source
+        result["row_count"] = len(rows)
+    except Exception as exc:
+        result["load_ok"] = False
+        result["load_error"] = f"{type(exc).__name__}: {exc}"
+    return result
 
 
 @router.get("/api/recipes")
