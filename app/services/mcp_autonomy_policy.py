@@ -22,10 +22,11 @@ def apply_mcp_v2_autonomy_policy() -> None:
     from app.api import mcp_v2
     from app.models.v2 import Concept, ConceptFieldProposal
     from app.schemas.v2 import ConceptEnsure
+    from app.services.concept_placement import resolve_concept_path
     from app.services.v2 import normalise_path, normalise_token, vocabulary
     from app.services.vocabulary_governance import ensure_proposed_concept, verify_field_proposal
 
-    mcp_v2.SERVER_VERSION = "2.5.0-alpha"
+    mcp_v2.SERVER_VERSION = "2.6.0-alpha"
 
     governance_policy = (
         "AI clients propose vocabulary; TasteGraph governs it with deterministic server-side rules. "
@@ -37,8 +38,6 @@ def apply_mcp_v2_autonomy_policy() -> None:
         "DNS concept hierarchy uses dots only; hierarchy boundaries must never use underscores. "
     )
 
-    # Peer-governance mutation tools are no longer advertised to AI clients. Their old
-    # handlers remain below only for backwards-compatible deployments and are disabled.
     hidden_peer_tools = {"verify_concept_field_proposal", "reject_concept_field_proposal"}
     mcp_v2.TOOLS[:] = [tool for tool in mcp_v2.TOOLS if tool.get("name") not in hidden_peer_tools]
 
@@ -50,7 +49,10 @@ def apply_mcp_v2_autonomy_policy() -> None:
         ),
         "propose_concept_fields": (
             governance_policy
-            + "Propose the smallest broadly reusable field set that materially improves future search, comparison, recommendation or personalisation. "
+            + "Before creating any concept node, inspect the canonical vocabulary index for the proposed words. "
+            "Reuse an established compatible word position and extend beneath it instead of creating a parallel branch. "
+            "A new review concept must be domain rooted, for example food.recipe.review rather than recipe.review. "
+            "Propose the smallest broadly reusable field set that materially improves future search, comparison, recommendation or personalisation. "
             "Check existing canonical fields, aliases and ancestors first. Preserve one-off or narrative detail in raw_text. "
             "Measurements and money must be machine-readable. Review concepts must not introduce generic rating, score, stars, sentiment or satisfaction fields. "
             "If TasteGraph returns revise, correct every listed issue and resubmit the materially improved proposal before any human escalation."
@@ -98,7 +100,20 @@ def apply_mcp_v2_autonomy_policy() -> None:
             if not raw_fields:
                 return mcp_v2._error("At least one field proposal is required")
 
-            path = normalise_path(str(args["concept_path"]))
+            submitted_path = normalise_path(str(args["concept_path"]))
+            placement = resolve_concept_path(db, submitted_path)
+            if placement["status"] == "revise":
+                return mcp_v2._result({
+                    "concept_path": submitted_path,
+                    "status": "revise",
+                    "decisions": [],
+                    "peer_review_required": False,
+                    "experience_created": False,
+                    "placement": placement,
+                    "instruction": "Revise the concept path using the vocabulary guidance and resubmit. Do not create a new parallel root or ask for routine human approval.",
+                })
+
+            path = placement["path"]
             existing_context = mcp_v2._existing_vocabulary_for_path(db, path)
             existing_vocab = vocabulary(db, existing_context) if existing_context else {"fields": {}, "aliases": {}}
             existing_field_names = set(existing_vocab["fields"].keys())
@@ -142,8 +157,6 @@ def apply_mcp_v2_autonomy_policy() -> None:
                         "review concepts must not add generic rating, score, stars, sentiment or satisfaction fields; preserve direct user evidence in the experience and AI interpretation in assessments"
                     )
 
-                # Existing canonical vocabulary is authoritative. A new proposal that
-                # duplicates it is not something to revise into existence.
                 if canonical_key in existing_field_names:
                     hard_reasons.append("an existing canonical field already covers this field name/meaning")
                 if canonical_key in existing_aliases:
@@ -258,9 +271,6 @@ def apply_mcp_v2_autonomy_policy() -> None:
                     decisions.append(decision)
                     continue
 
-                # Clear proposal: persist it and let the existing canonicalisation path do
-                # the schema validation/field creation, but identify the decision as a
-                # server policy decision rather than an AI peer decision.
                 if existing:
                     existing.submitted_name = str(raw.get("submitted_name", ""))
                     existing.canonical_name = canonical_name
@@ -336,10 +346,12 @@ def apply_mcp_v2_autonomy_policy() -> None:
             overall = "accepted" if statuses == {"accepted"} else "rejected" if statuses == {"rejected"} else "review" if "review" in statuses else "revise" if "revise" in statuses else "accepted"
             return mcp_v2._result({
                 "concept_path": path,
+                "submitted_concept_path": submitted_path,
                 "status": overall,
                 "decisions": decisions,
                 "peer_review_required": False,
                 "experience_created": False,
+                "placement": placement,
                 "instruction": "For revise decisions, correct every returned reason and resubmit the materially improved field. Do not send a revise decision to the user for routine approval. review is reserved for exceptional human/admin escalation.",
             })
 
