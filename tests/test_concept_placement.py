@@ -5,7 +5,7 @@ from sqlalchemy.orm import Session
 from app.db.base import Base
 from app.models import semantic  # noqa: F401
 from app.models.v2 import Concept
-from app.services.concept_placement import resolve_concept_path
+from app.services.concept_placement import resolve_concept_path, validate_review_save_path
 
 
 @pytest.fixture()
@@ -113,3 +113,32 @@ def test_unknown_direct_subject_under_other_root_requires_revision(db: Session):
     assert placement["status"] == "revise"
     assert placement["path"] is None
     assert placement["candidates"] == ["transportation.station.review"]
+
+
+def test_ferry_root_is_stable_before_any_ferry_concept_exists(db: Session):
+    placement = resolve_concept_path(db, "travel.ferry.review")
+    assert placement["status"] == "reuse"
+    assert placement["path"] == "transportation.ferry.review"
+
+
+def test_save_rejects_broad_transportation_ancestor(db: Session):
+    add_concept(db, "transportation")
+    placement = validate_review_save_path(db, "transportation")
+    assert placement["status"] == "revise"
+    assert placement["path"] is None
+    assert "transportation.ferry.review" in placement["reason"]
+
+
+def test_save_accepts_canonical_ferry_review_leaf(db: Session):
+    add_concept(db, "transportation.ferry.review")
+    placement = validate_review_save_path(db, "transportation.ferry.review")
+    assert placement["status"] == "existing"
+    assert placement["path"] == "transportation.ferry.review"
+
+
+def test_save_rejects_active_ferry_review_under_wrong_root(db: Session):
+    add_concept(db, "travel.ferry.review")
+    placement = validate_review_save_path(db, "travel.ferry.review")
+    assert placement["status"] == "revise"
+    assert placement["path"] is None
+    assert placement["candidates"] == ["transportation.ferry.review"]
