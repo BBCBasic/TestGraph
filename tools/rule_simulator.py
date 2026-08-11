@@ -10,12 +10,6 @@ from typing import Callable, Iterable
 
 @dataclass(frozen=True)
 class Submission:
-    """One synthetic AI concept proposal.
-
-    semantic_key groups proposals that mean the same thing even when clients choose
-    different roots. expected_path is the desired eventual canonical location.
-    """
-
     name: str
     proposed_path: str
     semantic_key: str
@@ -41,19 +35,35 @@ class SimState:
             self.active_paths.add(".".join(segments[:index]))
         self.semantic_paths[semantic_key].add(path)
 
-    def locations_for_word(self, word: str) -> set[str]:
-        locations: set[str] = set()
+    def occurrences(self, word: str) -> list[tuple[list[str], int]]:
+        found: list[tuple[list[str], int]] = []
         for path in self.active_paths:
-            if word in path.split("."):
-                locations.add(path)
-        return locations
+            parts = path.split(".")
+            for index, part in enumerate(parts):
+                if part == word:
+                    found.append((parts, index))
+        return found
 
 
 Rule = Callable[[SimState, Submission], Decision]
 
+CANONICAL_ROOT_BY_SUBJECT: dict[str, str] = {
+    "recipe": "food",
+    "restaurant": "dining",
+    "gym": "fitness",
+    "hotel": "hospitality",
+    "park": "leisure",
+    "bookshop": "retail",
+    "dentist": "healthcare",
+}
+
 
 def _normalise(path: str) -> str:
-    return ".".join(part.strip().lower() for part in path.replace("_", ".").replace("-", ".").split(".") if part.strip())
+    return ".".join(
+        part.strip().lower()
+        for part in path.replace("_", ".").replace("-", ".").split(".")
+        if part.strip()
+    )
 
 
 def naive_rule(state: SimState, submission: Submission) -> Decision:
@@ -64,7 +74,6 @@ def naive_rule(state: SimState, submission: Submission) -> Decision:
 
 
 def word_first_rule(state: SimState, submission: Submission) -> Decision:
-    """Vocabulary-first placement without the domain-root requirement."""
     path = _normalise(submission.proposed_path)
     segments = path.split(".")
     if path in state.active_paths:
@@ -73,24 +82,18 @@ def word_first_rule(state: SimState, submission: Submission) -> Decision:
     for anchor_index in range(max(len(segments) - 2, 0), 0, -1):
         anchor = segments[anchor_index]
         candidates: set[str] = set()
-        for location in state.locations_for_word(anchor):
-            parts = location.split(".")
-            try:
-                location_index = parts.index(anchor)
-            except ValueError:
-                continue
+        for parts, location_index in state.occurrences(anchor):
             candidates.add(".".join(parts[: location_index + 1] + segments[anchor_index + 1 :]))
         if len(candidates) == 1:
             resolved = next(iter(candidates))
             return Decision("reuse", path, resolved, f"Reuse established word '{anchor}'.")
         if len(candidates) > 1:
-            return Decision("review", path, None, f"Word '{anchor}' exists in multiple locations: {sorted(candidates)}")
+            return Decision("review", path, None, f"Word '{anchor}' exists in multiple locations.")
 
     return Decision("new", path, path, "No existing vocabulary word can anchor the path.")
 
 
 def rooted_word_first_rule(state: SimState, submission: Submission) -> Decision:
-    """Current intended policy: vocabulary first plus meaningful domain roots."""
     path = _normalise(submission.proposed_path)
     segments = path.split(".")
     if path in state.active_paths:
@@ -100,10 +103,63 @@ def rooted_word_first_rule(state: SimState, submission: Submission) -> Decision:
     return word_first_rule(state, Submission(submission.name, path, submission.semantic_key, submission.expected_path))
 
 
+def context_aware_rule(state: SimState, submission: Submission) -> Decision:
+    """Stable root rules plus parent-context matching for repeated deeper words."""
+    submitted = _normalise(submission.proposed_path)
+    segments = submitted.split(".")
+    if segments and segments[-1] == "review" and len(segments) < 3:
+        return Decision("revise", submitted, None, "Review paths require a broad domain root.")
+
+    path = submitted
+    if len(segments) == 3 and segments[-1] == "review":
+        subject = segments[1]
+        canonical_root = CANONICAL_ROOT_BY_SUBJECT.get(subject)
+        if canonical_root:
+            path = f"{canonical_root}.{subject}.review"
+            segments = path.split(".")
+
+    if path in state.active_paths:
+        return Decision("existing" if path == submitted else "reuse", submitted, path, "Use stable canonical placement.")
+
+    if path != submitted:
+        return Decision("reuse", submitted, path, "Use the subject's stable canonical domain.")
+
+    # Deeper repeated words only match when the immediate parent also matches.
+    for anchor_index in range(len(segments) - 2, 1, -1):
+        anchor = segments[anchor_index]
+        parent = segments[anchor_index - 1]
+        candidates: set[str] = set()
+        for parts, location_index in state.occurrences(anchor):
+            if location_index < 1 or parts[location_index - 1] != parent:
+                continue
+            candidates.add(".".join(parts[: location_index + 1] + segments[anchor_index + 1 :]))
+        if len(candidates) == 1:
+            resolved = next(iter(candidates))
+            return Decision("reuse", submitted, resolved, f"Reuse matching context '{parent}.{anchor}'.")
+        if len(candidates) > 1:
+            return Decision("review", submitted, None, f"Context '{parent}.{anchor}' is genuinely ambiguous.")
+
+    # Unknown direct subjects that already exist under another root should be revised,
+    # not silently duplicated or redirected by first-writer wins.
+    if len(segments) == 3 and segments[-1] == "review":
+        subject = segments[1]
+        alternatives: set[str] = set()
+        for parts, location_index in state.occurrences(subject):
+            if location_index == 1:
+                candidate = ".".join(parts[:2] + ["review"])
+                if candidate != path:
+                    alternatives.add(candidate)
+        if alternatives:
+            return Decision("revise", submitted, None, f"Subject '{subject}' already exists under another root.")
+
+    return Decision("new", submitted, path, "No compatible canonical placement exists.")
+
+
 RULES: dict[str, Rule] = {
     "naive": naive_rule,
     "word_first": word_first_rule,
     "rooted_word_first": rooted_word_first_rule,
+    "context_aware": context_aware_rule,
 }
 
 
@@ -116,8 +172,15 @@ DEFAULT_SCENARIOS: list[Submission] = [
     Submission("hotel", "hospitality.hotel.review", "hotel_review", "hospitality.hotel.review"),
     Submission("park", "leisure.park.review", "park_review", "leisure.park.review"),
     Submission("bookshop", "retail.bookshop.review", "bookshop_review", "retail.bookshop.review"),
+    Submission("dentist", "healthcare.dentist.review", "dentist_review", "healthcare.dentist.review"),
+    Submission("dentist alternate root", "services.dentist.review", "dentist_review", "healthcare.dentist.review"),
     Submission("train station", "transportation.train.station.review", "train_station_review", "transportation.train.station.review"),
     Submission("radio station", "media.radio.station.review", "radio_station_review", "media.radio.station.review"),
+    Submission("car park", "transportation.car.park.review", "car_park_review", "transportation.car.park.review"),
+    Submission("airport terminal", "transportation.airport.terminal.review", "airport_terminal_review", "transportation.airport.terminal.review"),
+    Submission("computer terminal", "computing.terminal.review", "computer_terminal_review", "computing.terminal.review"),
+    Submission("school gym", "education.school.gym.review", "school_gym_review", "education.school.gym.review"),
+    Submission("hotel restaurant", "hospitality.hotel.restaurant.review", "hotel_restaurant_review", "hospitality.hotel.restaurant.review"),
 ]
 
 
@@ -130,13 +193,10 @@ def run_sequence(rule: Rule, submissions: Iterable[Submission]) -> dict:
 
     for submission in submissions:
         decision = rule(state, submission)
-        if decision.status == "review":
-            reviews += 1
-        if decision.status == "revise":
-            revisions += 1
+        reviews += decision.status == "review"
+        revisions += decision.status == "revise"
         if decision.resolved_path is not None:
-            if decision.resolved_path != submission.expected_path:
-                wrong += 1
+            wrong += decision.resolved_path != submission.expected_path
             state.add(submission.semantic_key, decision.resolved_path)
         decisions.append({
             "name": submission.name,
@@ -164,11 +224,11 @@ def run_sequence(rule: Rule, submissions: Iterable[Submission]) -> dict:
 
 
 def compare_rules(submissions: list[Submission], runs: int, seed: int) -> dict:
-    rng = random.Random(seed)
     aggregate: dict[str, dict[str, float]] = {}
     signatures: dict[str, set[tuple[str, ...]]] = defaultdict(set)
 
-    for name, rule in RULES.items():
+    for rule_index, (name, rule) in enumerate(RULES.items()):
+        rng = random.Random(seed + rule_index)
         totals = defaultdict(float)
         for _ in range(runs):
             shuffled = list(submissions)
@@ -177,10 +237,7 @@ def compare_rules(submissions: list[Submission], runs: int, seed: int) -> dict:
             for metric in ("wrong_placements", "duplicate_semantic_paths", "human_reviews", "revision_requests", "root_count", "leaf_count"):
                 totals[metric] += result[metric]
             signatures[name].add(tuple(result["leaf_paths"]))
-        aggregate[name] = {
-            metric: round(value / runs, 3)
-            for metric, value in totals.items()
-        }
+        aggregate[name] = {metric: round(value / runs, 3) for metric, value in totals.items()}
         aggregate[name]["order_variants"] = len(signatures[name])
         aggregate[name]["score"] = round(
             100
@@ -205,15 +262,7 @@ def _load_scenarios(path: str | None) -> list[Submission]:
 
 
 def _print_comparison(comparison: dict) -> None:
-    metrics = [
-        "score",
-        "wrong_placements",
-        "duplicate_semantic_paths",
-        "human_reviews",
-        "revision_requests",
-        "root_count",
-        "order_variants",
-    ]
+    metrics = ["score", "wrong_placements", "duplicate_semantic_paths", "human_reviews", "revision_requests", "root_count", "order_variants"]
     print(f"Rule simulation: {comparison['runs']} shuffled runs, seed={comparison['seed']}")
     print(f"Winner: {comparison['winner']}\n")
     header = ["strategy", *metrics]
@@ -229,17 +278,15 @@ def _print_comparison(comparison: dict) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(description="Compare TasteGraph concept-placement rule versions against synthetic submissions.")
     parser.add_argument("--strategy", choices=[*RULES, "all"], default="all")
-    parser.add_argument("--runs", type=int, default=500, help="Number of shuffled-order runs when comparing strategies.")
+    parser.add_argument("--runs", type=int, default=500)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--scenarios", help="Optional JSON file containing Submission objects.")
-    parser.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
+    parser.add_argument("--json", action="store_true")
     args = parser.parse_args()
 
     submissions = _load_scenarios(args.scenarios)
-    if args.strategy == "all":
-        output = compare_rules(submissions, max(args.runs, 1), args.seed)
-    else:
-        output = run_sequence(RULES[args.strategy], submissions)
+    output = compare_rules(submissions, max(args.runs, 1), args.seed) if args.strategy == "all" else run_sequence(RULES[args.strategy], submissions)
+    if args.strategy != "all":
         output["strategy"] = args.strategy
 
     if args.json:
