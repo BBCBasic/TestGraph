@@ -1,6 +1,14 @@
-# TasteGraph 1.1
+# TasteGraph 3.0
 
-AI-native structured experience storage and personalised review interpretation.
+AI-native structured review storage with a controlled vocabulary and personalised interpretation.
+
+## Standard vocabulary model
+
+Reviews are stored against stable `subject_type_id` values, not DNS-style concept paths. Flexible input is resolved through canonical subject types and globally unique aliases; case, punctuation, possessives and ordinary plurals are normalised mechanically. Unknown types may be created as provisional entries after dictionary lookup.
+
+Classification is separate metadata. For example, `ferry belongs_to transportation` improves broad transportation searches but never changes where a ferry review is stored. `review` is the record type, not a vocabulary node. Reusable structured fields have their own stable IDs and aliases and may be attached to multiple subject types.
+
+Migration `0009_flat_standard_vocabulary` deliberately discards the old v2 concept/review data while preserving users, OAuth state, capability credentials and other authentication data.
 
 ## Local setup in PyCharm
 
@@ -120,7 +128,9 @@ After the first deployment, run `python -m scripts.seed` from a Railway shell or
 
 ## Architecture implemented
 
-- Generic Subject model for recipe, restaurant and future domains
+- Stable flat subject-type IDs for every review domain
+- Globally standardised canonical terms and aliases
+- Editable type relationships used for search, never storage addresses
 - Versioned schema registry
 - Domain-specific Pydantic validation stored as JSON/JSONB
 - Draft-first publication with explicit approval/version
