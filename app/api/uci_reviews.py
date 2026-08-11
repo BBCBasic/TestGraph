@@ -5,7 +5,6 @@ import io
 import json
 import urllib.request
 import zipfile
-from collections import defaultdict
 from functools import lru_cache
 from pathlib import Path
 
@@ -13,7 +12,7 @@ from fastapi import APIRouter, HTTPException, Query
 
 router = APIRouter(prefix="/tools/recipe-reviews", tags=["UCI recipe reviews"])
 
-DOWNLOAD_URL = "https://archive.ics.uci.edu/static/public/911/recipe%2Breviews%2Band%2Buser%2Bfeedback%2Bdataset.zip"
+DOWNLOAD_URL = "https://cdn.uci-ics-mlr-prod.aws.uci.edu/911/recipe%2Breviews%2Band%2Buser%2Bfeedback%2Bdataset.zip"
 BUNDLED = Path(__file__).parents[2] / "data" / "uci_recipe_reviews_100.json"
 
 
@@ -28,7 +27,7 @@ def _normalise_row(row: dict[str, str]) -> dict[str, str]:
 @lru_cache(maxsize=1)
 def _full_rows() -> tuple[dict[str, str], ...]:
     request = urllib.request.Request(DOWNLOAD_URL, headers={"User-Agent": "TasteGraph/2.5 recipe browser"})
-    with urllib.request.urlopen(request, timeout=60) as response:
+    with urllib.request.urlopen(request, timeout=5) as response:
         archive_bytes = response.read()
     with zipfile.ZipFile(io.BytesIO(archive_bytes)) as archive:
         csv_names = [name for name in archive.namelist() if name.lower().endswith(".csv")]
@@ -52,7 +51,7 @@ def _bundled_rows() -> tuple[dict[str, str], ...]:
             "recipe_code": str((subject.get("canonical_identifiers") or {}).get("uci_recipe_code", "")),
             "recipe_number": str((subject.get("metadata_json") or {}).get("recipe_number", "")),
             "recipe_name": subject.get("name", "Unknown recipe"),
-            "comment_id": str(metadata.get("source_record_id") or (exp.get("provenance") or {}).get("source_record_id") or exp.get("id", "")),
+            "comment_id": str((exp.get("provenance") or {}).get("source_record_id") or exp.get("id", "")),
             "user_name": "UCI reviewer",
             "stars": str(metadata.get("source_stars") or ""),
             "text": metadata.get("original_review_text") or exp.get("summary", ""),
