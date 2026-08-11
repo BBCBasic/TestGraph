@@ -17,12 +17,14 @@ from app.api.integrations import router as integrations_router
 from app.api.actions import router as actions_router
 from app.api.actions_v2 import router as actions_v2_router
 from app.api.development import router as development_router
+from app.api.uci_reviews import router as uci_reviews_router
 from app.core.config import get_settings
 from app.services.mcp_autonomy_policy import apply_mcp_v2_autonomy_policy
 
 apply_mcp_v2_autonomy_policy()
 settings=get_settings()
 REVIEWS_HTML = Path(__file__).parent / "static" / "reviews.html"
+RECIPE_REVIEWS_HTML = Path(__file__).parent / "static" / "recipe_reviews.html"
 app=FastAPI(title="TasteGraph",version="2.0.0-alpha",description="AI-native structured experience storage with a self-organising concept registry.")
 
 railway_public_domain=os.getenv("RAILWAY_PUBLIC_DOMAIN")
@@ -61,11 +63,15 @@ def home():
         if settings.enable_development_reset
         else ""
     )
-    return f"""<!doctype html><html><head><title>TasteGraph</title><style>body{{font-family:system-ui;max-width:860px;margin:40px auto;padding:0 20px}}code{{background:#eee;padding:2px 5px}}</style></head><body><h1>TasteGraph</h1><p>AI-native structured experience storage.</p><ul>{development_link}<li><a href="/api/v2/concepts">V2 concept registry</a></li><li><a href="/actions-v2/openapi.json">V2 ChatGPT Action schema</a></li><li><a href="/mcp-v2">V2 MCP endpoint</a></li><li><a href="/docs">API documentation</a></li><li><a href="/integrations">Existing MCP / AI integration record</a></li><li><a href="/actions/openapi.json">Existing ChatGPT Action schema</a></li><li><a href="/capability/new">Create a private TasteGraph capability URL</a></li><li><a href="/reviews">Legacy review browser</a></li><li><a href="/schemas">Legacy schema registry</a></li><li><a href="/.well-known/review-service.json">AI discovery record</a></li><li><a href="/.well-known/oauth-protected-resource">OAuth protected-resource metadata</a></li><li><a href="/health/ready">Health</a></li></ul><p>V2 adds hierarchical concepts, inherited canonical fields, aliases, flexible structured experiences, sources and AI-derived assessments. Existing /mcp and /actions integrations remain unchanged while v2 is tested separately.</p></body></html>"""
+    return f"""<!doctype html><html><head><title>TasteGraph</title><style>body{{font-family:system-ui;max-width:860px;margin:40px auto;padding:0 20px}}code{{background:#eee;padding:2px 5px}}</style></head><body><h1>TasteGraph</h1><p>AI-native structured experience storage.</p><ul>{development_link}<li><a href="/tools/recipe-reviews">UCI recipe review browser</a></li><li><a href="/api/v2/concepts">V2 concept registry</a></li><li><a href="/actions-v2/openapi.json">V2 ChatGPT Action schema</a></li><li><a href="/mcp-v2">V2 MCP endpoint</a></li><li><a href="/docs">API documentation</a></li><li><a href="/integrations">Existing MCP / AI integration record</a></li><li><a href="/actions/openapi.json">Existing ChatGPT Action schema</a></li><li><a href="/capability/new">Create a private TasteGraph capability URL</a></li><li><a href="/reviews">Legacy review browser</a></li><li><a href="/schemas">Legacy schema registry</a></li><li><a href="/.well-known/review-service.json">AI discovery record</a></li><li><a href="/.well-known/oauth-protected-resource">OAuth protected-resource metadata</a></li><li><a href="/health/ready">Health</a></li></ul><p>V2 adds hierarchical concepts, inherited canonical fields, aliases, flexible structured experiences, sources and AI-derived assessments. Existing /mcp and /actions integrations remain unchanged while v2 is tested separately.</p></body></html>"""
 
 @app.get("/reviews", response_class=FileResponse, include_in_schema=False)
 def review_browser():
     return FileResponse(REVIEWS_HTML)
+
+@app.get("/tools/recipe-reviews", response_class=FileResponse, include_in_schema=False)
+def recipe_review_browser():
+    return FileResponse(RECIPE_REVIEWS_HTML)
 
 app.include_router(router)
 app.include_router(v2_router)
@@ -77,3 +83,4 @@ app.include_router(mcp_v2_router)
 app.include_router(actions_router)
 app.include_router(actions_v2_router)
 app.include_router(development_router)
+app.include_router(uci_reviews_router)
