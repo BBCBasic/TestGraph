@@ -1,15 +1,11 @@
 from __future__ import annotations
 
-from collections import defaultdict
 from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.models.semantic import SemanticAliasProposal
 from app.models.v2 import Concept, ConceptField, FieldAlias
-
-ALIAS_PROMOTION_MIN_CLIENTS = 2
 
 
 def normalise_token(value: str) -> str:
@@ -45,7 +41,21 @@ def _field_by_canonical(db: Session, concept: Concept, canonical_name: str) -> C
     return matches[0] if matches else None
 
 
+def _canonical_collision(db: Session, concept: Concept, alias_key: str, target_field: ConceptField) -> ConceptField | None:
+    """Return another canonical field whose normalised name would collide with an alias."""
+    for node in _concept_chain(db, concept):
+        fields = list(db.scalars(select(ConceptField).where(
+            ConceptField.concept_id == node.id,
+            ConceptField.status == "active",
+        )).all())
+        for field in fields:
+            if field.id != target_field.id and normalise_token(field.canonical_name) == alias_key:
+                return field
+    return None
+
+
 def alias_consensus_status(db: Session, concept: Concept, alias: str) -> dict[str, Any]:
+    """Compatibility name: alias status is now determined by server rules, not consensus."""
     alias_key = normalise_token(alias)
     accepted = db.scalar(select(FieldAlias).where(
         FieldAlias.concept_id == concept.id,
@@ -58,46 +68,14 @@ def alias_consensus_status(db: Session, concept: Concept, alias: str) -> dict[st
             "alias_normalized": alias_key,
             "status": "accepted",
             "canonical_name": field.canonical_name if field else None,
-            "supporting_clients": None,
-            "targets": [],
+            "governance": "server",
         }
-
-    proposals = list(db.scalars(select(SemanticAliasProposal).where(
-        SemanticAliasProposal.concept_id == concept.id,
-        SemanticAliasProposal.alias_normalized == alias_key,
-    )).all())
-    by_target: dict[Any, set[str]] = defaultdict(set)
-    target_names: dict[Any, str] = {}
-    for proposal in proposals:
-        by_target[proposal.target_field_id].add(proposal.proposer_client_id)
-        field = db.get(ConceptField, proposal.target_field_id)
-        if field:
-            target_names[proposal.target_field_id] = field.canonical_name
-
-    targets = [
-        {
-            "canonical_name": target_names.get(field_id),
-            "supporting_clients": len(clients),
-        }
-        for field_id, clients in by_target.items()
-    ]
-    targets.sort(key=lambda x: (-x["supporting_clients"], x["canonical_name"] or ""))
-
-    if len(by_target) > 1:
-        status = "conflict"
-    elif len(by_target) == 1:
-        support = len(next(iter(by_target.values())))
-        status = "supported" if support >= ALIAS_PROMOTION_MIN_CLIENTS else "proposed"
-    else:
-        status = "unseen"
-
     return {
         "alias": alias,
         "alias_normalized": alias_key,
-        "status": status,
-        "canonical_name": targets[0]["canonical_name"] if len(targets) == 1 else None,
-        "supporting_clients": targets[0]["supporting_clients"] if len(targets) == 1 else 0,
-        "targets": targets,
+        "status": "unseen",
+        "canonical_name": None,
+        "governance": "server",
     }
 
 
@@ -111,9 +89,11 @@ def propose_alias(
     confidence: float | None = None,
     rationale: str | None = None,
 ) -> dict[str, Any]:
+    """Apply deterministic alias rules; no second-AI vote is required."""
     alias_key = normalise_token(alias)
     if not alias_key:
         raise ValueError("Alias must contain at least one alphanumeric character")
+
     field = _field_by_canonical(db, concept, canonical_name)
     if not field:
         raise ValueError(f"Canonical field '{canonical_name}' does not exist in concept hierarchy '{concept.path}'")
@@ -122,10 +102,10 @@ def propose_alias(
         return {
             "alias": alias,
             "alias_normalized": alias_key,
-            "status": "canonical",
+            "status": "accepted",
             "canonical_name": field.canonical_name,
-            "supporting_clients": None,
-            "targets": [],
+            "governance": "server",
+            "reason": "Alias normalises to the canonical field name.",
         }
 
     accepted = db.scalar(select(FieldAlias).where(
@@ -135,54 +115,86 @@ def propose_alias(
     if accepted:
         accepted_field = db.get(ConceptField, accepted.field_id)
         if accepted.field_id != field.id:
-            raise ValueError(
-                f"Alias '{alias}' is already accepted for canonical field "
-                f"'{accepted_field.canonical_name if accepted_field else accepted.field_id}'"
-            )
+            return {
+                "alias": alias,
+                "alias_normalized": alias_key,
+                "status": "rejected",
+                "canonical_name": canonical_name,
+                "governance": "server",
+                "reason": f"Alias is already accepted for canonical field '{accepted_field.canonical_name if accepted_field else accepted.field_id}'.",
+                "resubmit": False,
+            }
         return alias_consensus_status(db, concept, alias)
 
-    vote = db.scalar(select(SemanticAliasProposal).where(
-        SemanticAliasProposal.concept_id == concept.id,
-        SemanticAliasProposal.alias_normalized == alias_key,
-        SemanticAliasProposal.proposer_client_id == proposer_client_id,
-    ))
-    if vote:
-        vote.alias = alias
-        vote.target_field_id = field.id
-        vote.confidence = confidence
-        vote.rationale = rationale
-    else:
-        db.add(SemanticAliasProposal(
-            concept_id=concept.id,
-            alias=alias,
-            alias_normalized=alias_key,
-            target_field_id=field.id,
-            proposer_client_id=proposer_client_id,
-            confidence=confidence,
-            rationale=rationale,
-        ))
-    db.flush()
+    collision = _canonical_collision(db, concept, alias_key, field)
+    if collision:
+        return {
+            "alias": alias,
+            "alias_normalized": alias_key,
+            "status": "rejected",
+            "canonical_name": canonical_name,
+            "governance": "server",
+            "reason": f"Alias collides with canonical field '{collision.canonical_name}'.",
+            "resubmit": False,
+        }
 
-    status = alias_consensus_status(db, concept, alias)
-    if status["status"] == "supported" and len(status["targets"]) == 1:
-        db.add(FieldAlias(
-            concept_id=concept.id,
-            field_id=field.id,
-            alias=alias,
-            alias_normalized=alias_key,
-            confidence=1.0,
-            source=f"client_consensus:{status['supporting_clients']}",
-        ))
-        db.flush()
-        status = alias_consensus_status(db, concept, alias)
-        status["promoted_by_consensus"] = True
-    else:
-        status["promoted_by_consensus"] = False
-    return status
+    rationale_text = (rationale or "").strip()
+    if len(rationale_text) < 20:
+        return {
+            "alias": alias,
+            "alias_normalized": alias_key,
+            "status": "revise",
+            "canonical_name": field.canonical_name,
+            "governance": "server",
+            "reason": "Explain in at least 20 characters why the alias has the same durable meaning as the canonical field.",
+            "resubmit": True,
+            "instruction": "Add a concrete semantic rationale and resubmit. Human review is not required yet.",
+        }
+
+    if confidence is not None and confidence < 0.8:
+        return {
+            "alias": alias,
+            "alias_normalized": alias_key,
+            "status": "revise",
+            "canonical_name": field.canonical_name,
+            "governance": "server",
+            "reason": "Alias confidence is below the 0.8 deterministic acceptance threshold.",
+            "resubmit": True,
+            "instruction": "Only resubmit if stronger evidence supports the same meaning; otherwise leave the unfamiliar wording unaliased.",
+        }
+
+    db.add(FieldAlias(
+        concept_id=concept.id,
+        field_id=field.id,
+        alias=alias,
+        alias_normalized=alias_key,
+        confidence=confidence if confidence is not None else 1.0,
+        source=f"tastegraph-policy:{proposer_client_id}",
+    ))
+    db.flush()
+    return {
+        "alias": alias,
+        "alias_normalized": alias_key,
+        "status": "accepted",
+        "canonical_name": field.canonical_name,
+        "governance": "server",
+        "reason": "Alias passed deterministic collision, target and evidence rules.",
+        "resubmit": False,
+    }
 
 
 def list_alias_candidates(db: Session, concept: Concept) -> list[dict[str, Any]]:
-    keys = list(db.scalars(select(SemanticAliasProposal.alias_normalized).where(
-        SemanticAliasProposal.concept_id == concept.id,
-    ).distinct()).all())
-    return [alias_consensus_status(db, concept, key) for key in sorted(keys)]
+    aliases = list(db.scalars(select(FieldAlias).where(
+        FieldAlias.concept_id == concept.id,
+    ).order_by(FieldAlias.alias_normalized)).all())
+    result = []
+    for alias in aliases:
+        field = db.get(ConceptField, alias.field_id)
+        result.append({
+            "alias": alias.alias,
+            "alias_normalized": alias.alias_normalized,
+            "status": "accepted",
+            "canonical_name": field.canonical_name if field else None,
+            "governance": "server",
+        })
+    return result
