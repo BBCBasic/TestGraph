@@ -1,0 +1,60 @@
+name: Vendor UCI recipe dataset
+
+on:
+  push:
+    branches:
+      - master
+    paths:
+      - .github/workflows/vendor_uci_recipe_dataset.yml
+
+permissions:
+  contents: write
+
+jobs:
+  vendor:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: master
+
+      - name: Download UCI dataset
+        run: |
+          set -euo pipefail
+          mkdir -p data /tmp/uci911
+          curl --fail --location --retry 3 --retry-delay 2 --max-time 120 \
+            'https://archive.ics.uci.edu/static/public/911/recipe%2Breviews%2Band%2Buser%2Bfeedback%2Bdataset.zip' \
+            -o /tmp/uci911/dataset.zip
+          unzip -j /tmp/uci911/dataset.zip '*.csv' -d /tmp/uci911
+          CSV=$(find /tmp/uci911 -maxdepth 1 -type f -name '*.csv' | head -n 1)
+          test -n "$CSV"
+          python - "$CSV" <<'PY'
+          import csv, gzip, sys
+          from pathlib import Path
+
+          src = Path(sys.argv[1])
+          dst = Path('data/uci_recipe_reviews_full.csv.gz')
+          with src.open('r', encoding='utf-8-sig', newline='') as inp:
+              rows = list(csv.DictReader(inp))
+              if len(rows) != 18182:
+                  raise SystemExit(f'Expected 18182 rows, got {len(rows)}')
+              fields = list(rows[0])
+          with gzip.open(dst, 'wt', encoding='utf-8', newline='', compresslevel=9) as out:
+              writer = csv.DictWriter(out, fieldnames=fields)
+              writer.writeheader()
+              writer.writerows(rows)
+          print(f'Wrote {len(rows)} reviews to {dst}')
+          PY
+
+      - name: Commit vendored dataset
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add data/uci_recipe_reviews_full.csv.gz
+          if git diff --cached --quiet; then
+            echo 'Dataset already current'
+            exit 0
+          fi
+          git commit -m 'Vendor UCI recipe review dataset [skip ci]'
+          git push origin HEAD:master
