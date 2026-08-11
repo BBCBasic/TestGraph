@@ -6,7 +6,7 @@ from urllib.parse import urlsplit
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 from app.api.routes import router
 from app.api.v2 import router as v2_router
 from app.api.oauth import router as oauth_router
@@ -24,7 +24,6 @@ from app.services.mcp_autonomy_policy import apply_mcp_v2_autonomy_policy
 apply_mcp_v2_autonomy_policy()
 settings=get_settings()
 REVIEWS_HTML = Path(__file__).parent / "static" / "reviews.html"
-RECIPE_REVIEWS_HTML = Path(__file__).parent / "static" / "recipe_reviews.html"
 app=FastAPI(title="TasteGraph",version="2.0.0-alpha",description="AI-native structured experience storage with a self-organising concept registry.")
 
 railway_public_domain=os.getenv("RAILWAY_PUBLIC_DOMAIN")
@@ -69,9 +68,9 @@ def home():
 def review_browser():
     return FileResponse(REVIEWS_HTML)
 
-@app.get("/tools/recipe-reviews", response_class=FileResponse, include_in_schema=False)
+@app.get("/tools/recipe-reviews", include_in_schema=False)
 def recipe_review_browser():
-    return FileResponse(RECIPE_REVIEWS_HTML)
+    return RedirectResponse(url="/tools/recipe-reviews/view", status_code=307)
 
 app.include_router(router)
 app.include_router(v2_router)
