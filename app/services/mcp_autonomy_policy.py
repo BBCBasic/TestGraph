@@ -22,11 +22,11 @@ def apply_mcp_v2_autonomy_policy() -> None:
     from app.api import mcp_v2
     from app.models.v2 import Concept, ConceptFieldProposal
     from app.schemas.v2 import ConceptEnsure
-    from app.services.concept_placement import resolve_concept_path
+    from app.services.concept_placement import resolve_concept_path, validate_review_save_path
     from app.services.v2 import normalise_path, normalise_token, vocabulary
     from app.services.vocabulary_governance import ensure_proposed_concept, verify_field_proposal
 
-    mcp_v2.SERVER_VERSION = "2.6.0-alpha"
+    mcp_v2.SERVER_VERSION = "2.7.0-alpha"
 
     governance_policy = (
         "AI clients propose vocabulary; TasteGraph governs it with deterministic server-side rules. "
@@ -58,7 +58,7 @@ def apply_mcp_v2_autonomy_policy() -> None:
             "If TasteGraph returns revise, correct every listed issue and resubmit the materially improved proposal before any human escalation."
         ),
         "save_experience": (
-            "Save a direct user experience only after explicit user approval. The concept and every structured field used by this save must already be canonical. "
+            "Save a direct user experience only after explicit user approval. The concept must be a specific domain-rooted review leaf, never a broad ancestor, and every structured field used by this save must already be canonical. "
             "Unrelated vocabulary proposals must never block the save. If this exact save depends on non-canonical vocabulary, propose the required durable schema and follow TasteGraph's accepted/revise/rejected/review result. "
             "Do not ask the user to repeat approval while the review content and meaning are unchanged."
         ),
@@ -357,6 +357,33 @@ def apply_mcp_v2_autonomy_policy() -> None:
 
         governed_propose_concept_fields._tastegraph_server_governance = True
         mcp_v2._propose_concept_fields = governed_propose_concept_fields
+
+
+    current_save_handler = mcp_v2._save_experience
+    if not getattr(current_save_handler, "_tastegraph_review_path_governance", False):
+
+        def governed_save_experience(db, principal, args):
+            submitted_path = normalise_path(str(args.get("concept_path", "")))
+            placement = validate_review_save_path(db, submitted_path)
+            if placement["status"] == "revise":
+                return mcp_v2._error(
+                    "Review concept path must be revised before saving",
+                    {
+                        "status": "revise",
+                        "concept_path": submitted_path,
+                        "placement": placement,
+                        "experience_created": False,
+                        "instruction": (
+                            "Inspect vocabulary_index, choose or create the specific "
+                            "domain.subject.review leaf, then resubmit the unchanged "
+                            "approved review. Never fall back to a broad ancestor."
+                        ),
+                    },
+                )
+            return current_save_handler(db, principal, args)
+
+        governed_save_experience._tastegraph_review_path_governance = True
+        mcp_v2._save_experience = governed_save_experience
 
 
 __all__ = ["apply_mcp_v2_autonomy_policy"]
