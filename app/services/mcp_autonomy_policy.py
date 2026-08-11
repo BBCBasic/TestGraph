@@ -2,77 +2,74 @@ from __future__ import annotations
 
 """Runtime policy tuning for TasteGraph MCP vocabulary governance.
 
-Vocabulary proposal/verification/rejection is AI governance work. Routine, clear schema
-choices should be handled autonomously. Saving a direct user experience remains separate
-and still requires explicit user approval.
+AI clients may propose vocabulary, but they do not approve or reject one another's
+schema changes. TasteGraph applies deterministic server-side rules. The normal proposal
+outcomes are deliberately simple words: accepted, revise, rejected, review.
 
-Pending vocabulary proposals are a peer-review queue, not a global lock. Unrelated user
-work must continue normally. A proposal only matters to a write when that write actually
-depends on the proposed non-canonical concept or field.
+A proposal that can be repaired is returned as revise with concrete guidance and an
+explicit instruction to resubmit. Human/admin review is an escalation after a materially
+revised proposal still cannot satisfy the rules, not the first destination for ambiguity.
+Unrelated vocabulary work never blocks normal user work.
 """
 
 
 def apply_mcp_v2_autonomy_policy() -> None:
     # Import lazily to avoid creating an import cycle while app.api.mcp_v2 is loaded.
+    from datetime import datetime, timezone
+
     from sqlalchemy import select
 
     from app.api import mcp_v2
-    from app.models.v2 import ConceptFieldProposal
-    from app.services.v2 import normalise_token
+    from app.models.v2 import Concept, ConceptFieldProposal
+    from app.schemas.v2 import ConceptEnsure
+    from app.services.v2 import normalise_path, normalise_token, vocabulary
+    from app.services.vocabulary_governance import ensure_proposed_concept, verify_field_proposal
 
-    mcp_v2.SERVER_VERSION = "2.4.0-alpha"
+    mcp_v2.SERVER_VERSION = "2.5.0-alpha"
 
-    peer_review_policy = (
-        "DNS vocabulary governance uses independent AI peer review. A client may propose vocabulary but may not verify its own proposal. "
-        "A different authenticated AI may verify or reject a proposal by applying the published schema rules and recording an auditable rationale. "
-        "Routine clear peer-review decisions do not require separate user confirmation. Ask the user only for a genuinely ambiguous semantic or modelling choice. "
-        "Pending proposals never form a global lock and must not block unrelated search, fetch, save, assessment or concept work. "
-        "DNS concept hierarchy uses dots only: hierarchy boundaries must be represented with '.', never '_'. "
-        "Underscores, spaces, hyphens and similar separators in a concept path are canonicalised to dots. "
-        "This dot-only rule applies only to DNS concept paths; ordinary canonical field names and aliases may still use underscores. "
+    governance_policy = (
+        "AI clients propose vocabulary; TasteGraph governs it with deterministic server-side rules. "
+        "AI peer approval and peer rejection are not part of the governance model. "
+        "Proposal outcomes are accepted, revise, rejected or review. "
+        "revise means the idea may be sound but the submitted design is not acceptable yet: read every returned reason, materially improve the proposal and resubmit it. "
+        "rejected is terminal for substantially the same design. review is exceptional human/admin escalation and is reached only after a materially revised proposal still cannot satisfy the published rules. "
+        "Pending or unresolved vocabulary never forms a global lock and must not block unrelated user work. "
+        "DNS concept hierarchy uses dots only; hierarchy boundaries must never use underscores. "
     )
+
+    # Peer-governance mutation tools are no longer advertised to AI clients. Their old
+    # handlers remain below only for backwards-compatible deployments and are disabled.
+    hidden_peer_tools = {"verify_concept_field_proposal", "reject_concept_field_proposal"}
+    mcp_v2.TOOLS[:] = [tool for tool in mcp_v2.TOOLS if tool.get("name") not in hidden_peer_tools]
 
     descriptions = {
         "pending_vocabulary_proposals": (
-            peer_review_policy
-            + "Independent peer-review queue. List unresolved vocabulary proposals made by other authenticated AI clients. "
-            "Review concept placement, parent/inherited vocabulary, duplicates/aliases, generality, analytical value and JSON-schema quality. "
-            "Resolve clear proposals with verify_concept_field_proposal or reject_concept_field_proposal. The existence of this queue does not block unrelated user work."
-        ),
-        "verify_concept_field_proposal": (
-            peer_review_policy
-            + "Promote another AI's pending proposal only when concept placement, generality, analytical value, inheritance/duplication checks and JSON schema are durable. "
-            "Verification is a constrained schema-governance decision, not a statement of the user's opinion. Record a concrete rationale. "
-            "The authenticated client cannot verify its own proposal."
-        ),
-        "reject_concept_field_proposal": (
-            peer_review_policy
-            + "Reject another AI's pending vocabulary proposal when it is duplicate, over-specific, analytically weak, poorly typed, wrongly placed, "
-            "uses invalid DNS hierarchy naming, or is better left in raw_text. A rejected proposal is terminal and must not be silently reopened unchanged. "
-            "Record a concrete reason so a materially better replacement can be proposed later if warranted."
+            governance_policy
+            + "Inspect unresolved proposals for context only. Do not approve or reject another AI's proposal. "
+            "Use the returned reasons/status to avoid repeating a known bad design."
         ),
         "propose_concept_fields": (
-            peer_review_policy
-            + "Schema design, not review extraction. Inspect rejected proposals where relevant, the vocabulary index, the intended concept path and its ancestors. "
-            "If no suitable canonical concept exists and placement is clear, propose the smallest durable reusable field set directly. "
-            "Concept paths must use dots only for hierarchy; do not create DNS segments containing underscores. "
-            "The independent second-AI verification step is the safeguard before anything becomes canonical. Never resubmit an unchanged rejected proposal."
+            governance_policy
+            + "Propose the smallest broadly reusable field set that materially improves future search, comparison, recommendation or personalisation. "
+            "Check existing canonical fields, aliases and ancestors first. Preserve one-off or narrative detail in raw_text. "
+            "Measurements and money must be machine-readable. Review concepts must not introduce generic rating, score, stars, sentiment or satisfaction fields. "
+            "If TasteGraph returns revise, correct every listed issue and resubmit the materially improved proposal before any human escalation."
         ),
         "save_experience": (
             "Save a direct user experience only after explicit user approval. The concept and every structured field used by this save must already be canonical. "
-            "Unrelated pending vocabulary proposals must never block the save. If this exact save depends on a non-canonical concept or field, resolve that relevant schema dependency and retry without asking the user to repeat an approval already given. "
-            "Existing approval remains valid while the review content and meaning are unchanged."
+            "Unrelated vocabulary proposals must never block the save. If this exact save depends on non-canonical vocabulary, propose the required durable schema and follow TasteGraph's accepted/revise/rejected/review result. "
+            "Do not ask the user to repeat approval while the review content and meaning are unchanged."
         ),
-        "search": "Search the connected user's direct experiences across any domain. Pending vocabulary proposals do not block reads.",
-        "fetch": "Fetch one complete direct experience, including submitted and canonical structured data. Pending vocabulary proposals do not block reads.",
-        "get_concept": "Inspect canonical concept vocabulary and any relevant unresolved proposals. Unrelated pending proposals do not block this lookup.",
+        "search": "Search the connected user's direct experiences across any domain. Vocabulary governance does not block reads.",
+        "fetch": "Fetch one complete direct experience, including submitted and canonical structured data. Vocabulary governance does not block reads.",
+        "get_concept": "Inspect canonical concept vocabulary and relevant unresolved proposals. Unrelated proposals do not block this lookup.",
         "propose_alias": (
-            "Propose a semantic alias mapping to an existing canonical field. Independent consensus governs alias promotion; unrelated vocabulary proposals do not block this action."
+            governance_policy
+            + "Propose an alias only for an existing canonical field. TasteGraph validates collisions and promotes clear aliases deterministically; no second AI vote is required."
         ),
-        "save_assessment": "Save AI-derived analysis against an experience. Unrelated pending vocabulary proposals do not block this action.",
+        "save_assessment": "Save AI-derived analysis against an experience. Vocabulary governance does not block this action.",
         "vocabulary_index": (
-            "Inspect the global DNS vocabulary index, including pending proposals so another AI can discover work suitable for peer review. "
-            "DNS concept hierarchy is dot-separated only; underscores remain valid in ordinary field names and aliases."
+            "Inspect the global DNS vocabulary index and unresolved proposal positions. DNS concept hierarchy is dot-separated only; ordinary field names and aliases may retain their established token format."
         ),
     }
 
@@ -81,51 +78,273 @@ def apply_mcp_v2_autonomy_policy() -> None:
         if description:
             tool["description"] = description
 
-    # Deliberately do not wrap normal MCP handlers with a foreign-pending guard.
-    # The previous implementation turned the global peer-review queue into a mutex:
-    # a dentist proposal could block a train-station save. Relevant schema dependencies
-    # are already enforced by the underlying canonical vocabulary checks at write time.
+    def peer_review_disabled(db, principal, args):
+        return mcp_v2._error(
+            "AI peer vocabulary review is disabled",
+            {
+                "governance": "server",
+                "instruction": "Use propose_concept_fields. TasteGraph will return accepted, revise, rejected or review and will provide resubmission guidance when revision is possible.",
+            },
+        )
 
-    # The underlying v2 service historically revived an identical rejected proposal by
-    # changing it back to pending. Guard the MCP write path so rejection stays terminal.
-    current = mcp_v2.propose_concept_fields
-    if not getattr(current, "_tastegraph_rejection_guard", False):
-        original = current
+    mcp_v2._verify_concept_field_proposal = peer_review_disabled
+    mcp_v2._reject_concept_field_proposal = peer_review_disabled
 
-        def guarded_propose_concept_fields(db, *, concept, proposals, proposer_client_id):
-            for proposal in proposals:
-                canonical_key = normalise_token(proposal.canonical_name)
+    current_handler = mcp_v2._propose_concept_fields
+    if not getattr(current_handler, "_tastegraph_server_governance", False):
+
+        def governed_propose_concept_fields(db, principal, args):
+            raw_fields = args.get("fields", [])
+            if not raw_fields:
+                return mcp_v2._error("At least one field proposal is required")
+
+            path = normalise_path(str(args["concept_path"]))
+            existing_context = mcp_v2._existing_vocabulary_for_path(db, path)
+            existing_vocab = vocabulary(db, existing_context) if existing_context else {"fields": {}, "aliases": {}}
+            existing_field_names = set(existing_vocab["fields"].keys())
+            existing_aliases = set(existing_vocab["aliases"].keys())
+            client_id = f"{principal.client_id}:v2"
+            decisions = []
+            seen_batch: set[str] = set()
+            concept = None
+
+            def get_concept():
+                nonlocal concept
+                if concept is None:
+                    concept = ensure_proposed_concept(
+                        db,
+                        ConceptEnsure(
+                            path=path,
+                            description=args.get("concept_description"),
+                            created_by=client_id,
+                        ),
+                    )
+                return concept
+
+            for raw in raw_fields:
+                canonical_name = str(raw.get("canonical_name", "")).strip()
+                canonical_key = normalise_token(canonical_name)
+                aliases = [normalise_token(str(alias)) for alias in raw.get("aliases", []) if str(alias).strip()]
+                issues = list(mcp_v2._proposal_quality_issues(raw))
+                hard_reasons: list[str] = []
+
+                if not canonical_key:
+                    hard_reasons.append("canonical_name must contain at least one alphanumeric character")
+                if canonical_key in seen_batch:
+                    hard_reasons.append("the same canonical field appears more than once in this proposal batch")
+                seen_batch.add(canonical_key)
+
+                review_path = "review" in set(path.split("."))
+                prohibited_review_tokens = {"rating", "ratings", "score", "scores", "star", "stars", "sentiment", "satisfaction"}
+                name_tokens = set(part for part in canonical_key.split("_") if part)
+                if review_path and name_tokens & prohibited_review_tokens:
+                    hard_reasons.append(
+                        "review concepts must not add generic rating, score, stars, sentiment or satisfaction fields; preserve direct user evidence in the experience and AI interpretation in assessments"
+                    )
+
+                # Existing canonical vocabulary is authoritative. A new proposal that
+                # duplicates it is not something to revise into existence.
+                if canonical_key in existing_field_names:
+                    hard_reasons.append("an existing canonical field already covers this field name/meaning")
+                if canonical_key in existing_aliases:
+                    hard_reasons.append("this name is already an accepted alias for existing canonical vocabulary")
+                if any(alias in existing_field_names or alias in existing_aliases for alias in aliases):
+                    hard_reasons.append("one or more proposed aliases collide with existing canonical vocabulary")
+
+                if hard_reasons:
+                    decisions.append({
+                        "canonical_name": canonical_name,
+                        "status": "rejected",
+                        "reasons": hard_reasons,
+                        "resubmit": False,
+                        "instruction": "Do not resubmit substantially the same design. Reuse the existing vocabulary or choose a materially different model that obeys the rule.",
+                    })
+                    continue
+
+                target_concept = get_concept()
                 existing = db.scalar(
                     select(ConceptFieldProposal).where(
-                        ConceptFieldProposal.concept_id == concept.id,
+                        ConceptFieldProposal.concept_id == target_concept.id,
                         ConceptFieldProposal.canonical_name_normalized == canonical_key,
                     )
                 )
-                if not existing or existing.status != "rejected":
+
+                if existing and existing.status == "rejected":
+                    decisions.append({
+                        "proposal_id": str(existing.id),
+                        "canonical_name": canonical_name,
+                        "status": "rejected",
+                        "reasons": [existing.decision_reason or "A substantially identical design was already rejected."],
+                        "resubmit": False,
+                    })
+                    continue
+                if existing and existing.status in {"accepted", "approved"}:
+                    decisions.append({
+                        "proposal_id": str(existing.id),
+                        "canonical_name": canonical_name,
+                        "status": "accepted",
+                        "reasons": ["This proposal is already canonical."],
+                        "resubmit": False,
+                    })
+                    continue
+                if existing and existing.status == "review":
+                    decisions.append({
+                        "proposal_id": str(existing.id),
+                        "canonical_name": canonical_name,
+                        "status": "review",
+                        "reasons": [existing.decision_reason or "This proposal has already been escalated for human/admin review."],
+                        "resubmit": False,
+                        "manual_review_url": f"{mcp_v2._base()}/development/concept-fields",
+                    })
                     continue
 
-                same = (
-                    existing.submitted_name == proposal.submitted_name
-                    and existing.canonical_name == proposal.canonical_name
-                    and existing.json_schema == proposal.json_schema
-                    and existing.description == proposal.description
-                    and existing.aliases_json == proposal.aliases
-                )
-                if same:
-                    reason = existing.decision_reason or "No rejection reason was recorded."
-                    raise ValueError(
-                        "Identical vocabulary proposal was previously rejected and will not be reopened. "
-                        f"Rejection reason: {reason} Use a materially different concept/field/schema rather than resubmitting unchanged."
+                materially_changed = False
+                if existing:
+                    materially_changed = any((
+                        existing.submitted_name != raw.get("submitted_name"),
+                        existing.canonical_name != canonical_name,
+                        existing.json_schema != (raw.get("json_schema") or {}),
+                        existing.description != raw.get("description"),
+                        existing.aliases_json != raw.get("aliases", []),
+                    ))
+
+                if issues:
+                    status = "revise"
+                    if existing and existing.status == "revise" and materially_changed:
+                        status = "review"
+                    reason_text = "; ".join(issues)
+                    if existing:
+                        existing.submitted_name = str(raw.get("submitted_name", ""))
+                        existing.canonical_name = canonical_name
+                        existing.canonical_name_normalized = canonical_key
+                        existing.json_schema = raw.get("json_schema") or {}
+                        existing.description = raw.get("description")
+                        existing.aliases_json = raw.get("aliases", [])
+                        existing.status = status
+                        existing.decision_by = "tastegraph-policy"
+                        existing.decision_reason = reason_text
+                        existing.decided_at = datetime.now(timezone.utc)
+                        row = existing
+                    else:
+                        row = ConceptFieldProposal(
+                            concept_id=target_concept.id,
+                            submitted_name=str(raw.get("submitted_name", "")),
+                            canonical_name=canonical_name,
+                            canonical_name_normalized=canonical_key,
+                            json_schema=raw.get("json_schema") or {},
+                            description=raw.get("description"),
+                            aliases_json=raw.get("aliases", []),
+                            proposer_client_id=client_id,
+                            status=status,
+                            decision_by="tastegraph-policy",
+                            decision_reason=reason_text,
+                            decided_at=datetime.now(timezone.utc),
+                        )
+                        db.add(row)
+                    db.commit()
+                    db.refresh(row)
+                    decision = {
+                        "proposal_id": str(row.id),
+                        "canonical_name": canonical_name,
+                        "status": status,
+                        "reasons": issues,
+                        "resubmit": status == "revise",
+                    }
+                    if status == "revise":
+                        decision["instruction"] = "Correct every listed issue and resubmit a materially improved proposal. Human review is not required yet."
+                    else:
+                        decision["instruction"] = "A materially revised submission still fails deterministic rules, so this proposal now requires human/admin review."
+                        decision["manual_review_url"] = f"{mcp_v2._base()}/development/concept-fields"
+                    decisions.append(decision)
+                    continue
+
+                # Clear proposal: persist it and let the existing canonicalisation path do
+                # the schema validation/field creation, but identify the decision as a
+                # server policy decision rather than an AI peer decision.
+                if existing:
+                    existing.submitted_name = str(raw.get("submitted_name", ""))
+                    existing.canonical_name = canonical_name
+                    existing.canonical_name_normalized = canonical_key
+                    existing.json_schema = raw.get("json_schema") or {}
+                    existing.description = raw.get("description")
+                    existing.aliases_json = raw.get("aliases", [])
+                    existing.proposer_client_id = client_id
+                    existing.status = "pending"
+                    existing.decision_by = None
+                    existing.decision_reason = None
+                    existing.decided_at = None
+                    db.commit()
+                    row = existing
+                else:
+                    row = ConceptFieldProposal(
+                        concept_id=target_concept.id,
+                        submitted_name=str(raw.get("submitted_name", "")),
+                        canonical_name=canonical_name,
+                        canonical_name_normalized=canonical_key,
+                        json_schema=raw.get("json_schema") or {},
+                        description=raw.get("description"),
+                        aliases_json=raw.get("aliases", []),
+                        proposer_client_id=client_id,
+                        status="pending",
                     )
-                raise ValueError(
-                    f"A rejected proposal already occupies canonical field name '{proposal.canonical_name}' on this concept. "
-                    "Choose a materially different canonical design instead of overwriting or reopening the rejected proposal."
-                )
+                    db.add(row)
+                    db.commit()
+                    db.refresh(row)
 
-            return original(db, concept=concept, proposals=proposals, proposer_client_id=proposer_client_id)
+                try:
+                    proposal, field = verify_field_proposal(
+                        db,
+                        row.id,
+                        verifier_client_id="tastegraph-policy",
+                        reason="Accepted by deterministic TasteGraph vocabulary rules.",
+                    )
+                except ValueError as exc:
+                    db.rollback()
+                    row = db.get(ConceptFieldProposal, row.id)
+                    if row:
+                        row.status = "revise"
+                        row.decision_by = "tastegraph-policy"
+                        row.decision_reason = str(exc)
+                        row.decided_at = datetime.now(timezone.utc)
+                        db.commit()
+                    decisions.append({
+                        "proposal_id": str(row.id) if row else None,
+                        "canonical_name": canonical_name,
+                        "status": "revise",
+                        "reasons": [str(exc)],
+                        "resubmit": True,
+                        "instruction": "Correct the schema error and resubmit a materially improved proposal. Human review is not required yet.",
+                    })
+                    continue
 
-        guarded_propose_concept_fields._tastegraph_rejection_guard = True
-        mcp_v2.propose_concept_fields = guarded_propose_concept_fields
+                proposal.status = "accepted"
+                proposal.decision_by = "tastegraph-policy"
+                proposal.decision_reason = "Accepted by deterministic TasteGraph vocabulary rules."
+                proposal.decided_at = datetime.now(timezone.utc)
+                db.commit()
+                db.refresh(proposal)
+                decisions.append({
+                    "proposal_id": str(proposal.id),
+                    "field_id": str(field.id),
+                    "canonical_name": field.canonical_name,
+                    "status": "accepted",
+                    "reasons": [proposal.decision_reason],
+                    "resubmit": False,
+                })
+
+            statuses = {item["status"] for item in decisions}
+            overall = "accepted" if statuses == {"accepted"} else "rejected" if statuses == {"rejected"} else "review" if "review" in statuses else "revise" if "revise" in statuses else "accepted"
+            return mcp_v2._result({
+                "concept_path": path,
+                "status": overall,
+                "decisions": decisions,
+                "peer_review_required": False,
+                "experience_created": False,
+                "instruction": "For revise decisions, correct every returned reason and resubmit the materially improved field. Do not send a revise decision to the user for routine approval. review is reserved for exceptional human/admin escalation.",
+            })
+
+        governed_propose_concept_fields._tastegraph_server_governance = True
+        mcp_v2._propose_concept_fields = governed_propose_concept_fields
 
 
 __all__ = ["apply_mcp_v2_autonomy_policy"]
