@@ -21,6 +21,7 @@ CANONICAL_ROOT_BY_SUBJECT: dict[str, str] = {
     "park": "leisure",
     "bookshop": "retail",
     "dentist": "healthcare",
+    "ferry": "transportation",
 }
 
 
@@ -182,4 +183,41 @@ def resolve_concept_path(db: Session, proposed_path: str) -> dict[str, Any]:
     )
 
 
-__all__ = ["CANONICAL_ROOT_BY_SUBJECT", "resolve_concept_path"]
+def validate_review_save_path(db: Session, proposed_path: str) -> dict[str, Any]:
+    """Require direct experiences to use a canonical review leaf.
+
+    Saving is deliberately stricter than proposing. An active broad ancestor such as
+    transportation is a vocabulary node, not a valid place to store a ferry review.
+    """
+    submitted_path = normalise_path(proposed_path)
+    segments = submitted_path.split(".") if submitted_path else []
+    if len(segments) < 3 or segments[-1] != "review":
+        return _result(
+            status="revise",
+            submitted_path=submitted_path,
+            path=None,
+            reason=(
+                "Direct review experiences must be saved at a specific domain-rooted "
+                "review leaf such as transportation.ferry.review; broad ancestor "
+                "concepts cannot store reviews."
+            ),
+        )
+
+    placement = resolve_concept_path(db, submitted_path)
+    if placement["status"] == "reuse" and placement["path"] != submitted_path:
+        return _result(
+            status="revise",
+            submitted_path=submitted_path,
+            path=None,
+            reason=placement["reason"],
+            candidates=[placement["path"]],
+            matched_word=placement.get("matched_word"),
+        )
+    return placement
+
+
+__all__ = [
+    "CANONICAL_ROOT_BY_SUBJECT",
+    "resolve_concept_path",
+    "validate_review_save_path",
+]
