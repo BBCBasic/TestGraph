@@ -3,6 +3,7 @@ from __future__ import annotations
 import csv
 import gzip
 import json
+from collections import defaultdict
 from functools import lru_cache
 from pathlib import Path
 
@@ -65,6 +66,32 @@ def _rows() -> tuple[tuple[dict[str, str], ...], str]:
     raise RuntimeError("No local UCI recipe review data is installed")
 
 
+@lru_cache(maxsize=1)
+def _index():
+    rows, source = _rows()
+    by_recipe: dict[str, list[dict[str, str]]] = defaultdict(list)
+    recipes: dict[str, dict] = {}
+    for row in rows:
+        code = row.get("recipe_code") or row.get("recipe_number") or row.get("recipe_name")
+        if not code:
+            continue
+        name = row.get("recipe_name") or f"Recipe {code}"
+        by_recipe[code].append(row)
+        item = recipes.setdefault(code, {
+            "recipe_code": code,
+            "recipe_name": name,
+            "recipe_number": row.get("recipe_number"),
+            "review_count": 0,
+        })
+        item["review_count"] += 1
+    recipe_list = list(recipes.values())
+    recipe_list.sort(key=lambda x: (
+        int(x["recipe_number"]) if str(x.get("recipe_number", "")).isdigit() else 999999,
+        x["recipe_name"],
+    ))
+    return rows, source, recipe_list, dict(by_recipe)
+
+
 @router.get("/api/status")
 def status():
     result = {
@@ -85,10 +112,11 @@ def status():
             result["gzip_ok"] = False
             result["gzip_error"] = f"{type(exc).__name__}: {exc}"
     try:
-        rows, source = _rows()
+        rows, source, recipe_list, _ = _index()
         result["load_ok"] = True
         result["source"] = source
         result["row_count"] = len(rows)
+        result["recipe_count"] = len(recipe_list)
     except Exception as exc:
         result["load_ok"] = False
         result["load_error"] = f"{type(exc).__name__}: {exc}"
@@ -98,28 +126,11 @@ def status():
 @router.get("/api/recipes")
 def recipes(q: str = ""):
     try:
-        rows, source = _rows()
+        rows, source, recipe_list, _ = _index()
     except Exception as exc:
         raise HTTPException(503, f"Could not load local recipe dataset: {exc}") from exc
-    grouped: dict[str, dict] = {}
     needle = q.strip().lower()
-    for row in rows:
-        code = row.get("recipe_code") or row.get("recipe_number") or row.get("recipe_name")
-        name = row.get("recipe_name") or f"Recipe {code}"
-        if not code or (needle and needle not in name.lower()):
-            continue
-        item = grouped.setdefault(code, {
-            "recipe_code": code,
-            "recipe_name": name,
-            "recipe_number": row.get("recipe_number"),
-            "review_count": 0,
-        })
-        item["review_count"] += 1
-    items = list(grouped.values())
-    items.sort(key=lambda x: (
-        int(x["recipe_number"]) if str(x.get("recipe_number", "")).isdigit() else 999999,
-        x["recipe_name"],
-    ))
+    items = recipe_list if not needle else [item for item in recipe_list if needle in item["recipe_name"].lower()]
     return {"count": len(items), "recipes": items, "source": source, "row_count": len(rows)}
 
 
@@ -130,18 +141,15 @@ def reviews(
     limit: int = Query(200, ge=1, le=500),
 ):
     try:
-        rows, source = _rows()
+        _, source, _, by_recipe = _index()
     except Exception as exc:
         raise HTTPException(503, f"Could not load local recipe dataset: {exc}") from exc
+    rows = by_recipe.get(recipe_code, [])
     matches = []
-    recipe_name = None
+    recipe_name = rows[0].get("recipe_name") if rows else None
     for row in rows:
-        code = row.get("recipe_code") or row.get("recipe_number") or row.get("recipe_name")
-        if code != recipe_code:
-            continue
         if stars is not None and str(row.get("stars", "")) != str(stars):
             continue
-        recipe_name = row.get("recipe_name") or recipe_name
         matches.append({
             "comment_id": row.get("comment_id"),
             "user_name": row.get("user_name") or "Anonymous",
