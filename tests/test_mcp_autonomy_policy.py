@@ -9,7 +9,7 @@ from app.services.v2 import normalise_path, normalise_token
 def test_mcp_vocabulary_governance_is_server_side():
     apply_mcp_v2_autonomy_policy()
 
-    assert mcp_v2.SERVER_VERSION == "2.5.0-alpha"
+    assert mcp_v2.SERVER_VERSION == "2.6.0-alpha"
     tools = {tool["name"]: tool for tool in mcp_v2.TOOLS}
 
     assert "verify_concept_field_proposal" not in tools
@@ -23,6 +23,8 @@ def test_mcp_vocabulary_governance_is_server_side():
     assert "TasteGraph governs it with deterministic server-side rules" in propose
     assert "accepted, revise, rejected or review" in propose
     assert "materially improve the proposal and resubmit" in propose
+    assert "canonical vocabulary index" in propose
+    assert "food.recipe.review rather than recipe.review" in propose
     assert "generic rating, score, stars, sentiment or satisfaction fields" in propose
     assert "no second AI vote is required" in alias
     assert "Unrelated vocabulary proposals must never block the save" in save
