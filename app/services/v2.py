@@ -54,7 +54,7 @@ def resolve_subject_type(db: Session, term: str) -> SubjectType | None:
 
 def ensure_subject_type(
     db: Session, term: str, *, created_by: str, description: str | None = None,
-    create_if_missing: bool = True,
+    create_if_missing: bool = True, commit: bool = True,
 ) -> tuple[SubjectType, bool, str]:
     obj = resolve_subject_type(db, term)
     if obj:
@@ -66,7 +66,11 @@ def ensure_subject_type(
         canonical_name=canonical_label(term), normalized_name=key, description=description,
         status="provisional", created_by=created_by,
     )
-    db.add(obj); db.commit(); db.refresh(obj)
+    db.add(obj)
+    if commit:
+        db.commit(); db.refresh(obj)
+    else:
+        db.flush()
     return obj, True, "created_provisional"
 
 
