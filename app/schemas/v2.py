@@ -23,6 +23,23 @@ class SubjectEnsure(StrictModel):
     canonical_key: str = Field(min_length=1, max_length=300)
     identifiers: dict[str, Any] = {}
     attributes: dict[str, Any] = {}
+    provenance: dict[str, Any] = {}
+
+
+class ContextSubjectEnsure(SubjectEnsure):
+    ref: str = Field(min_length=1, max_length=80, pattern=r"^[a-zA-Z0-9_-]+$")
+
+
+class ContextRelationshipEnsure(StrictModel):
+    source_ref: str = Field(min_length=1, max_length=80)
+    relationship: str = Field(min_length=1, max_length=60)
+    target_ref: str = Field(min_length=1, max_length=80)
+    provenance: dict[str, Any] = {}
+
+
+class SubjectContextEnsure(StrictModel):
+    subjects: list[ContextSubjectEnsure] = []
+    relationships: list[ContextRelationshipEnsure] = []
 
 
 class SourceCreate(StrictModel):
@@ -82,6 +99,7 @@ class SubjectRead(StrictModel):
     canonical_key: str
     identifiers_json: dict[str, Any]
     attributes_json: dict[str, Any]
+    provenance_json: dict[str, Any]
     created_at: datetime
     updated_at: datetime
 
