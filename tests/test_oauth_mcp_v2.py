@@ -32,7 +32,9 @@ def test_oauth_mcp_v2_resource_flow(client,auth,monkeypatch):
     assert "subject_enrichment_check" in save_tool["inputSchema"]["required"]
     assert "collection_assessment" in properties
     assert "collection_assessment" in save_tool["inputSchema"]["required"]
-    assert "deferred" not in properties["collection_assessment"]["properties"]["status"]["enum"]\n    assert "discovered_count" in properties["collection_assessment"]["properties"]\n    assert "submitted_member_refs" in properties["collection_assessment"]["properties"]
+    assert "deferred" not in properties["collection_assessment"]["properties"]["status"]["enum"]
+    assert "discovered_count" in properties["collection_assessment"]["properties"]
+    assert "submitted_member_refs" in properties["collection_assessment"]["properties"]
     delete_tool=next(tool for tool in tools if tool["name"]=="delete_experience")
     assert delete_tool["annotations"]["destructiveHint"] is True
     assert "confirm_deletion" in delete_tool["inputSchema"]["required"]
