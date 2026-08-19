@@ -802,7 +802,7 @@ def _validate_collection_assessment(raw, args, enrichment_check):
                 "discovered_count": assessment.discovered_count,
                 "submitted_member_refs": assessment.submitted_member_refs,
             }.items()
-            if value is None
+            if value is None or value == []
         ]
         if missing:
             return None, _collection_action_required(
