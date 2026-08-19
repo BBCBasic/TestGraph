@@ -10,10 +10,13 @@ from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from app.models.v2 import (
-    Assessment, FieldAlias, FieldDefinition, Source, SubjectType, SubjectTypeAlias,
-    SubjectTypeField, TypeRelationship, V2Experience, V2Subject,
+    Assessment, FieldAlias, FieldDefinition, Source, SubjectRelationship, SubjectType,
+    SubjectTypeAlias, SubjectTypeField, TypeRelationship, V2Experience, V2Subject, now_utc,
 )
-from app.schemas.v2 import AssessmentCreate, ExperienceCreate, FieldEnsure, SourceCreate, SubjectEnsure
+from app.schemas.v2 import (
+    AssessmentCreate, ExperienceCreate, FieldEnsure, SourceCreate, SubjectContextEnsure,
+    SubjectEnsure,
+)
 
 
 def normalise_term(value: str) -> str:
@@ -181,6 +184,16 @@ def normalise_data(db: Session, subject_type: SubjectType, data: dict) -> tuple[
     return result, log
 
 
+def _fill_missing(existing: dict | None, incoming: dict) -> tuple[dict, bool]:
+    merged = dict(existing or {})
+    changed = False
+    for key, value in incoming.items():
+        if key not in merged or merged[key] in (None, ""):
+            merged[key] = value
+            changed = True
+    return merged, changed
+
+
 def ensure_subject(db: Session, payload: SubjectEnsure, client_id: str = "ai-client") -> V2Subject:
     subject_type = resolve_subject_type(db, payload.subject_type)
     if not subject_type:
@@ -191,11 +204,92 @@ def ensure_subject(db: Session, payload: SubjectEnsure, client_id: str = "ai-cli
         V2Subject.deleted_at.is_(None),
     ))
     if obj:
+        identifiers, identifiers_changed = _fill_missing(obj.identifiers_json, payload.identifiers)
+        attributes, attributes_changed = _fill_missing(obj.attributes_json, payload.attributes)
+        provenance, provenance_changed = _fill_missing(obj.provenance_json, payload.provenance)
+        if identifiers_changed or attributes_changed or provenance_changed:
+            obj.identifiers_json = identifiers
+            obj.attributes_json = attributes
+            obj.provenance_json = provenance
+            db.commit(); db.refresh(obj)
         return obj
-    obj = V2Subject(subject_type_id=subject_type.id, name=payload.name, canonical_key=payload.canonical_key,
-                    identifiers_json=payload.identifiers, attributes_json=payload.attributes)
+    obj = V2Subject(
+        subject_type_id=subject_type.id, name=payload.name, canonical_key=payload.canonical_key,
+        identifiers_json=payload.identifiers, attributes_json=payload.attributes,
+        provenance_json=payload.provenance,
+    )
     db.add(obj); db.commit(); db.refresh(obj)
     return obj
+
+
+def add_subject_relationship(
+    db: Session, source_subject: V2Subject, relationship: str, target_subject: V2Subject,
+    *, provenance: dict | None = None, created_by: str = "ai-client",
+) -> SubjectRelationship:
+    rel = normalise_term(relationship).replace(" ", "_")
+    if source_subject.id == target_subject.id:
+        raise ValueError("A subject cannot relate to itself")
+    existing = db.scalar(select(SubjectRelationship).where(
+        SubjectRelationship.source_subject_id == source_subject.id,
+        SubjectRelationship.relationship == rel,
+        SubjectRelationship.target_subject_id == target_subject.id,
+    ))
+    if existing:
+        merged, changed = _fill_missing(existing.provenance_json, provenance or {})
+        if changed:
+            existing.provenance_json = merged
+            db.commit(); db.refresh(existing)
+        return existing
+    obj = SubjectRelationship(
+        source_subject_id=source_subject.id, relationship=rel,
+        target_subject_id=target_subject.id, provenance_json=provenance or {},
+        status="active", created_by=created_by,
+    )
+    db.add(obj); db.commit(); db.refresh(obj)
+    return obj
+
+
+def ensure_subject_context(
+    db: Session, reviewed_subject: V2Subject, payload: SubjectContextEnsure,
+    *, client_id: str,
+) -> dict:
+    refs = {"reviewed_subject": reviewed_subject}
+    created_subjects = []
+    for item in payload.subjects:
+        if item.ref == "reviewed_subject" or item.ref in refs:
+            raise ValueError(f"Duplicate or reserved subject reference '{item.ref}'")
+        subject = ensure_subject(
+            db,
+            SubjectEnsure(
+                subject_type=item.subject_type, name=item.name,
+                canonical_key=item.canonical_key, identifiers=item.identifiers,
+                attributes=item.attributes, provenance=item.provenance,
+            ),
+            client_id,
+        )
+        refs[item.ref] = subject
+        created_subjects.append(subject)
+    relationships = []
+    for item in payload.relationships:
+        if item.source_ref not in refs or item.target_ref not in refs:
+            raise ValueError("Subject relationship refers to an unknown context reference")
+        relationships.append(add_subject_relationship(
+            db, refs[item.source_ref], item.relationship, refs[item.target_ref],
+            provenance=item.provenance, created_by=client_id,
+        ))
+    return {
+        "subjects": [
+            {"id": str(subject.id), "name": subject.name, "canonical_key": subject.canonical_key}
+            for subject in created_subjects
+        ],
+        "relationships": [
+            {
+                "id": str(rel.id), "source_subject_id": str(rel.source_subject_id),
+                "relationship": rel.relationship, "target_subject_id": str(rel.target_subject_id),
+            }
+            for rel in relationships
+        ],
+    }
 
 
 def _source(db: Session, payload: SourceCreate | None) -> Source | None:
@@ -221,7 +315,7 @@ def create_experience(db: Session, payload: ExperienceCreate, client_id: str) ->
     source = _source(db, payload.source)
     obj = V2Experience(
         owner_id=payload.owner_id, subject_id=subject.id, source_id=source.id if source else None,
-        record_type="review", experienced_at=payload.experienced_at, headline=payload.headline,
+        record_type="review", experienced_at=payload.experienced_at or now_utc(), headline=payload.headline,
         summary=payload.summary, raw_text=payload.raw_text, structured_data=canonical_data,
         submitted_data=payload.structured_data, normalization_log=log, visibility=payload.visibility,
         publication_status="published", provenance={"kind": "direct_user_experience", "source_client": client_id},

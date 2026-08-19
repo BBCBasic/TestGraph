@@ -100,9 +100,29 @@ class V2Subject(Base):
     canonical_key: Mapped[str] = mapped_column(String(300), index=True)
     identifiers_json: Mapped[dict] = mapped_column(JsonType, default=dict)
     attributes_json: Mapped[dict] = mapped_column(JsonType, default=dict)
+    provenance_json: Mapped[dict] = mapped_column(JsonType, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc, onupdate=now_utc)
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class SubjectRelationship(Base):
+    __tablename__ = "subject_relationships"
+    __table_args__ = (
+        UniqueConstraint("source_subject_id", "relationship", "target_subject_id", name="uq_subject_relationship"),
+    )
+    id: Mapped[uuid.UUID] = mapped_column(UuidType, primary_key=True, default=new_uuid)
+    source_subject_id: Mapped[uuid.UUID] = mapped_column(
+        UuidType, ForeignKey("v2_subjects.id"), index=True
+    )
+    relationship: Mapped[str] = mapped_column(String(60), index=True)
+    target_subject_id: Mapped[uuid.UUID] = mapped_column(
+        UuidType, ForeignKey("v2_subjects.id"), index=True
+    )
+    provenance_json: Mapped[dict] = mapped_column(JsonType, default=dict)
+    status: Mapped[str] = mapped_column(String(20), default="active", index=True)
+    created_by: Mapped[str] = mapped_column(String(200), default="system")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
 
 
 class Source(Base):

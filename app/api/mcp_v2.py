@@ -5,25 +5,25 @@ import uuid
 
 from fastapi import APIRouter, Depends, Request, Response
 from fastapi.responses import JSONResponse
-from sqlalchemy import or_, select
+from sqlalchemy import String, cast, func, or_, select
 from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
 from app.core.security import Principal, TokenError, principal_from_authorization
 from app.db.session import get_db
-from app.models.v2 import Assessment, SubjectType, SubjectTypeAlias, V2Experience, V2Subject
-from app.schemas.v2 import AssessmentCreate, ExperienceCreate, FieldEnsure, SubjectEnsure
+from app.models.v2 import Assessment, SubjectRelationship, SubjectType, SubjectTypeAlias, V2Experience, V2Subject
+from app.schemas.v2 import AssessmentCreate, ExperienceCreate, FieldEnsure, SubjectContextEnsure, SubjectEnsure
 from app.services.semantic import add_semantic_relationship, resolve_subject_hierarchy, retire_semantic_relationship
 from app.services.v2 import (
     add_subject_type_alias, create_assessment, create_experience,
-    descendant_type_ids, ensure_field, ensure_subject,
+    descendant_type_ids, ensure_field, ensure_subject, ensure_subject_context,
     fields_for_type, resolve_subject_type, vocabulary_index,
 )
 from app.services.write_safety import begin_idempotent_write, finish_idempotent_write
 
 router = APIRouter()
 PROTOCOL_VERSION = "2025-06-18"
-SERVER_VERSION = "3.1.0-alpha"
+SERVER_VERSION = "3.2.0-alpha"
 READ_SECURITY = [{"type": "oauth2", "scopes": ["reviews:read"]}]
 WRITE_SECURITY = [{"type": "oauth2", "scopes": ["reviews:write"]}]
 
@@ -58,7 +58,7 @@ def _auth_error(message):
 
 
 TOOLS = [
-    {"name": "search", "title": "Search reviews", "description": "Search by subject, review text, a canonical subject type or any broader category connected by belongs_to relationships.", "inputSchema": {"type": "object", "properties": {"query": {"type": "string", "default": ""}, "subject_type": {"type": "string"}, "include_related": {"type": "boolean", "default": True}, "limit": {"type": "integer", "minimum": 1, "maximum": 50, "default": 10}}, "additionalProperties": False}, **_security(READ_SECURITY), "annotations": {"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False}},
+    {"name": "search", "title": "Search reviews and known subjects", "description": "Search reviews plus matching reviewed or unreviewed subjects. Known subjects include immediate subject-to-subject connections so a location, organisation, variant or sibling discovered earlier can inform recommendations without being misrepresented as reviewed. Search by subject, review text, canonical subject type or broader category.", "inputSchema": {"type": "object", "properties": {"query": {"type": "string", "default": ""}, "subject_type": {"type": "string"}, "include_related": {"type": "boolean", "default": True}, "limit": {"type": "integer", "minimum": 1, "maximum": 50, "default": 10}}, "additionalProperties": False}, **_security(READ_SECURITY), "annotations": {"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False}},
     {"name": "fetch", "title": "Fetch a review", "description": "Fetch a complete review with its stable subject type, original words and AI assessments.", "inputSchema": {"type": "object", "properties": {"id": {"type": "string", "format": "uuid"}}, "required": ["id"], "additionalProperties": False}, **_security(READ_SECURITY), "annotations": {"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False}},
     {"name": "vocabulary_index", "title": "Inspect standard vocabulary", "description": "List canonical subject types, aliases, flexible relationships and reusable fields. Inspect this before classifying any unknown subject type. There are no DNS storage paths or review leaf concepts.", "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False}, **_security(READ_SECURITY), "annotations": {"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False}},
     {"name": "resolve_subject_type", "title": "Resolve a subject type", "description": "Resolve flexible input to one stable subject-type ID. Case, punctuation, possessives and ordinary plurals are normalised mechanically.", "inputSchema": {"type": "object", "properties": {"term": {"type": "string"}}, "required": ["term"], "additionalProperties": False}, **_security(READ_SECURITY), "annotations": {"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False}},
@@ -67,7 +67,95 @@ TOOLS = [
     {"name": "set_type_relationship", "title": "Connect existing subject types", "description": "Add editable classification metadata between existing subject types, such as ferry belongs_to transportation. Unknown types must first be resolved with resolve_subject_hierarchy. Relationships improve broad search but never determine storage IDs.", "inputSchema": {"type": "object", "properties": {"source_type": {"type": "string"}, "relationship": {"type": "string", "default": "belongs_to"}, "target_type": {"type": "string"}}, "required": ["source_type", "target_type"], "additionalProperties": False}, **_security(WRITE_SECURITY), "annotations": {"readOnlyHint": False, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False}},
     {"name": "retire_type_relationship", "title": "Retire an incorrect subject classification", "description": "Retire one exact semantic relationship while preserving the subject type, subjects and reviews. The retired edge remains as a rejection tombstone, so another AI cannot silently recreate it.", "inputSchema": {"type": "object", "properties": {"source_type": {"type": "string"}, "relationship": {"type": "string", "default": "belongs_to"}, "target_type": {"type": "string"}, "reason": {"type": "string", "minLength": 1}}, "required": ["source_type", "target_type", "reason"], "additionalProperties": False}, **_security(WRITE_SECURITY), "annotations": {"readOnlyHint": False, "destructiveHint": True, "idempotentHint": True, "openWorldHint": False}},
     {"name": "register_field", "title": "Register a reusable field", "description": "Register one globally canonical field and attach it to relevant subject types. Prefer raw_text for one-off narrative detail.", "inputSchema": {"type": "object", "properties": {"canonical_name": {"type": "string"}, "json_schema": {"type": "object", "additionalProperties": True}, "description": {"type": "string"}, "aliases": {"type": "array", "items": {"type": "string"}}, "subject_types": {"type": "array", "items": {"type": "string"}}}, "required": ["canonical_name", "json_schema", "subject_types"], "additionalProperties": False}, **_security(WRITE_SECURITY), "annotations": {"readOnlyHint": False, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False}},
-    {"name": "save_experience", "title": "Save an approved review", "description": "Save a review against an already-resolved stable subject type. If the type is unknown, first inspect vocabulary_index and call resolve_subject_hierarchy. save_experience never creates a new root-level type implicitly.", "inputSchema": {"type": "object", "properties": {"subject_type": {"type": "string"}, "subject_name": {"type": "string"}, "canonical_key": {"type": "string"}, "identifiers": {"type": "object", "additionalProperties": True, "default": {}}, "subject_attributes": {"type": "object", "additionalProperties": True, "default": {}}, "headline": {"type": "string"}, "summary": {"type": "string"}, "raw_text": {"type": "string", "minLength": 1}, "structured_data": {"type": "object", "additionalProperties": True, "default": {}}, "visibility": {"type": "string", "enum": ["private", "unlisted", "public", "aggregate_only"], "default": "private"}, "user_approved": {"type": "boolean"}, "idempotency_key": {"type": "string", "minLength": 8, "maxLength": 200}}, "required": ["subject_type", "subject_name", "canonical_key", "headline", "summary", "raw_text", "user_approved", "idempotency_key"], "additionalProperties": False}, **_security(WRITE_SECURITY), "annotations": {"readOnlyHint": False, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False}},
+    {
+        "name": "save_experience",
+        "title": "Save an approved review",
+        "description": (
+            "Save a review against an already-resolved stable subject type. Before saving, determine whether "
+            "the subject has an official website; when one is available, inspect it for stable identity, branches "
+            "and related subjects. Add discoveries in subject_context as unreviewed subjects with generic "
+            "relationships and source provenance, while attaching the review only to what was actually experienced. "
+            "Location is optional. For physical locations, record the town and coordinates only when explicitly "
+            "published by the source; otherwise record the published address. Skip location when it is irrelevant. "
+            "The experience date defaults to creation time unless experienced_at is explicit. All context subject "
+            "types must already be resolved. If the official source is unavailable, preserve that limitation and "
+            "do not invent facts or silently geocode coordinates."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "subject_type": {"type": "string"},
+                "subject_name": {"type": "string"},
+                "canonical_key": {"type": "string"},
+                "identifiers": {"type": "object", "additionalProperties": True, "default": {}},
+                "subject_attributes": {"type": "object", "additionalProperties": True, "default": {}},
+                "subject_provenance": {"type": "object", "additionalProperties": True, "default": {}},
+                "headline": {"type": "string"},
+                "summary": {"type": "string"},
+                "raw_text": {"type": "string", "minLength": 1},
+                "structured_data": {"type": "object", "additionalProperties": True, "default": {}},
+                "experienced_at": {"type": "string", "format": "date-time"},
+                "subject_context": {
+                    "type": "object",
+                    "description": (
+                        "Optional graph enrichment discovered while identifying the reviewed subject. "
+                        "Use reviewed_subject as the reserved ref for the subject receiving the review."
+                    ),
+                    "properties": {
+                        "subjects": {
+                            "type": "array", "maxItems": 50, "default": [],
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "ref": {"type": "string", "pattern": "^[a-zA-Z0-9_-]+$"},
+                                    "subject_type": {"type": "string"},
+                                    "name": {"type": "string"},
+                                    "canonical_key": {"type": "string"},
+                                    "identifiers": {"type": "object", "additionalProperties": True, "default": {}},
+                                    "attributes": {"type": "object", "additionalProperties": True, "default": {}},
+                                    "provenance": {"type": "object", "additionalProperties": True, "default": {}},
+                                },
+                                "required": ["ref", "subject_type", "name", "canonical_key"],
+                                "additionalProperties": False,
+                            },
+                        },
+                        "relationships": {
+                            "type": "array", "maxItems": 100, "default": [],
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "source_ref": {"type": "string"},
+                                    "relationship": {"type": "string"},
+                                    "target_ref": {"type": "string"},
+                                    "provenance": {"type": "object", "additionalProperties": True, "default": {}},
+                                },
+                                "required": ["source_ref", "relationship", "target_ref"],
+                                "additionalProperties": False,
+                            },
+                        },
+                    },
+                    "additionalProperties": False,
+                },
+                "visibility": {
+                    "type": "string",
+                    "enum": ["private", "unlisted", "public", "aggregate_only"],
+                    "default": "private",
+                },
+                "user_approved": {"type": "boolean"},
+                "idempotency_key": {"type": "string", "minLength": 8, "maxLength": 200},
+            },
+            "required": [
+                "subject_type", "subject_name", "canonical_key", "headline", "summary",
+                "raw_text", "user_approved", "idempotency_key",
+            ],
+            "additionalProperties": False,
+        },
+        **_security(WRITE_SECURITY),
+        "annotations": {
+            "readOnlyHint": False, "destructiveHint": False,
+            "idempotentHint": True, "openWorldHint": False,
+        },
+    },
     {"name": "save_assessment", "title": "Save AI-derived assessment", "description": "Save separately attributed AI analysis against the exact review it evaluates.", "inputSchema": {"type": "object", "properties": {"experience_id": {"type": "string", "format": "uuid"}, "assessment_type": {"type": "string"}, "evidence": {"type": "object", "additionalProperties": True, "default": {}}, "analysis": {"type": "object", "additionalProperties": True, "default": {}}, "conclusion": {"type": "string"}, "confidence": {"type": "number", "minimum": 0, "maximum": 1}, "source_model": {"type": "string"}, "idempotency_key": {"type": "string", "minLength": 8, "maxLength": 200}}, "required": ["experience_id", "assessment_type", "idempotency_key"], "additionalProperties": False}, **_security(WRITE_SECURITY), "annotations": {"readOnlyHint": False, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False}},
 ]
 
@@ -95,7 +183,71 @@ def _search(db, principal, args):
         stmt = stmt.where(or_(V2Subject.name.ilike(p), V2Subject.canonical_key.ilike(p), V2Experience.headline.ilike(p), V2Experience.summary.ilike(p), V2Experience.raw_text.ilike(p)))
     limit = max(1, min(int(args.get("limit", 10)), 50))
     rows = db.execute(stmt.order_by(V2Experience.created_at.desc()).limit(limit)).all()
-    return _result({"count": len(rows), "results": [{"id": str(e.id), "subject_id": str(s.id), "subject_name": s.name, "subject_type_id": str(t.id), "subject_type": t.canonical_name, "headline": e.headline, "summary": e.summary} for e, s, t in rows]})
+    known_subjects = []
+    if q or type_term:
+        subject_stmt = (
+            select(V2Subject, SubjectType)
+            .join(SubjectType, V2Subject.subject_type_id == SubjectType.id)
+            .where(V2Subject.deleted_at.is_(None))
+        )
+        if type_term:
+            subject_stmt = subject_stmt.where(SubjectType.id.in_(ids))
+        if q:
+            subject_stmt = subject_stmt.where(or_(
+                V2Subject.name.ilike(p), V2Subject.canonical_key.ilike(p),
+                cast(V2Subject.identifiers_json, String).ilike(p),
+                cast(V2Subject.attributes_json, String).ilike(p),
+            ))
+        subject_rows = db.execute(subject_stmt.order_by(V2Subject.name).limit(limit)).all()
+        for known, known_type in subject_rows:
+            review_count = db.scalar(select(func.count(V2Experience.id)).where(
+                V2Experience.subject_id == known.id,
+                V2Experience.owner_id == principal.user_id,
+                V2Experience.deleted_at.is_(None),
+            )) or 0
+            relationship_rows = list(db.scalars(select(SubjectRelationship).where(
+                SubjectRelationship.status == "active",
+                or_(
+                    SubjectRelationship.source_subject_id == known.id,
+                    SubjectRelationship.target_subject_id == known.id,
+                ),
+            )).all())
+            connections = []
+            for relation in relationship_rows:
+                outgoing = relation.source_subject_id == known.id
+                other_id = relation.target_subject_id if outgoing else relation.source_subject_id
+                other = db.get(V2Subject, other_id)
+                if not other or other.deleted_at:
+                    continue
+                other_type = db.get(SubjectType, other.subject_type_id)
+                connections.append({
+                    "direction": "outgoing" if outgoing else "incoming",
+                    "relationship": relation.relationship,
+                    "subject_id": str(other.id),
+                    "subject_name": other.name,
+                    "subject_type": other_type.canonical_name if other_type else None,
+                    "provenance": relation.provenance_json,
+                })
+            known_subjects.append({
+                "id": str(known.id), "name": known.name, "canonical_key": known.canonical_key,
+                "subject_type_id": str(known_type.id), "subject_type": known_type.canonical_name,
+                "identifiers": known.identifiers_json, "attributes": known.attributes_json,
+                "provenance": known.provenance_json, "review_count": review_count,
+                "review_status": "reviewed" if review_count else "unreviewed",
+                "connections": connections,
+            })
+    return _result({
+        "count": len(rows),
+        "results": [
+            {
+                "id": str(e.id), "subject_id": str(subject.id), "subject_name": subject.name,
+                "subject_type_id": str(subject_type.id), "subject_type": subject_type.canonical_name,
+                "headline": e.headline, "summary": e.summary,
+            }
+            for e, subject, subject_type in rows
+        ],
+        "known_subjects": known_subjects,
+    })
 
 
 def _fetch(db, principal, args):
@@ -108,7 +260,7 @@ def _fetch(db, principal, args):
         return _error("Experience not found")
     e, s, t = row
     assessments = list(db.scalars(select(Assessment).where(Assessment.experience_id == e.id).order_by(Assessment.created_at)).all())
-    return _result({"id": str(e.id), "record_type": e.record_type, "subject": {"id": str(s.id), "name": s.name, "canonical_key": s.canonical_key, "subject_type_id": str(t.id), "subject_type": t.canonical_name, "identifiers": s.identifiers_json, "attributes": s.attributes_json}, "headline": e.headline, "summary": e.summary, "raw_text": e.raw_text, "structured_data": e.structured_data, "submitted_data": e.submitted_data, "normalization_log": e.normalization_log, "provenance": e.provenance, "assessments": [{"id": str(a.id), "assessment_type": a.assessment_type, "evidence": a.evidence_json, "analysis": a.analysis_json, "conclusion": a.conclusion, "confidence": a.confidence, "provenance": a.provenance} for a in assessments], "created_at": e.created_at.isoformat()})
+    return _result({"id": str(e.id), "record_type": e.record_type, "subject": {"id": str(s.id), "name": s.name, "canonical_key": s.canonical_key, "subject_type_id": str(t.id), "subject_type": t.canonical_name, "identifiers": s.identifiers_json, "attributes": s.attributes_json, "provenance": s.provenance_json}, "headline": e.headline, "summary": e.summary, "raw_text": e.raw_text, "structured_data": e.structured_data, "submitted_data": e.submitted_data, "normalization_log": e.normalization_log, "provenance": e.provenance, "assessments": [{"id": str(a.id), "assessment_type": a.assessment_type, "evidence": a.evidence_json, "analysis": a.analysis_json, "conclusion": a.conclusion, "confidence": a.confidence, "provenance": a.provenance} for a in assessments], "created_at": e.created_at.isoformat()})
 
 
 def _save_experience(db, principal, args):
@@ -127,9 +279,39 @@ def _save_experience(db, principal, args):
             f"Unknown subject type '{args['subject_type']}'",
             {"instruction": "Inspect vocabulary_index and call resolve_subject_hierarchy with a broad-to-specific semantic path before resubmitting this review."},
         )
-    subject = ensure_subject(db, SubjectEnsure(subject_type=subject_type.canonical_name, name=args["subject_name"], canonical_key=args["canonical_key"], identifiers=args.get("identifiers", {}), attributes=args.get("subject_attributes", {})), client_id)
-    exp = create_experience(db, ExperienceCreate(owner_id=principal.user_id, subject_id=subject.id, headline=args["headline"], summary=args["summary"], raw_text=args["raw_text"], structured_data=args.get("structured_data", {}), visibility=args.get("visibility", "private"), user_approved=True, source_client=client_id), client_id)
-    body = {"saved": True, "experience_id": str(exp.id), "subject_id": str(subject.id), "subject_type_id": str(subject_type.id), "subject_type": subject_type.canonical_name, "type_status": subject_type.status, "type_resolution": "existing", "type_created": False, "canonical_data": exp.structured_data, "normalization_log": exp.normalization_log}
+    subject = ensure_subject(
+        db,
+        SubjectEnsure(
+            subject_type=subject_type.canonical_name, name=args["subject_name"],
+            canonical_key=args["canonical_key"], identifiers=args.get("identifiers", {}),
+            attributes=args.get("subject_attributes", {}),
+            provenance=args.get("subject_provenance", {}),
+        ),
+        client_id,
+    )
+    context = ensure_subject_context(
+        db, subject, SubjectContextEnsure.model_validate(args.get("subject_context") or {}),
+        client_id=client_id,
+    )
+    exp = create_experience(
+        db,
+        ExperienceCreate(
+            owner_id=principal.user_id, subject_id=subject.id, headline=args["headline"],
+            summary=args["summary"], raw_text=args["raw_text"],
+            structured_data=args.get("structured_data", {}),
+            experienced_at=args.get("experienced_at"),
+            visibility=args.get("visibility", "private"), user_approved=True,
+            source_client=client_id,
+        ),
+        client_id,
+    )
+    body = {
+        "saved": True, "experience_id": str(exp.id), "subject_id": str(subject.id),
+        "subject_type_id": str(subject_type.id), "subject_type": subject_type.canonical_name,
+        "type_status": subject_type.status, "type_resolution": "existing", "type_created": False,
+        "experienced_at": exp.experienced_at.isoformat(), "canonical_data": exp.structured_data,
+        "normalization_log": exp.normalization_log, "subject_context": context,
+    }
     finish_idempotent_write(db, client_id=client_id, key=f"experience:{args['idempotency_key']}", payload_hash=payload_hash, response_body=body)
     return _result(body)
 
@@ -152,7 +334,7 @@ async def mcp_v2(request: Request, db: Session = Depends(get_db)):
     if method and method.startswith("notifications/"):
         return Response(status_code=202)
     if method == "initialize":
-        result = {"protocolVersion": PROTOCOL_VERSION, "capabilities": {"tools": {"listChanged": False}}, "serverInfo": {"name": "TasteGraph v2", "version": SERVER_VERSION}, "instructions": "Before saving an experience, identify what is being experienced and inspect vocabulary_index. Reuse an existing canonical type or alias whenever possible. If the specific type is absent, reason from meaning to a broad-to-specific hierarchy and call resolve_subject_hierarchy; never create a type merely because it arrived first. Reviews store stable subject-type IDs, while belongs_to relationships provide the evolving semantic structure. Preserve exact user wording in raw_text and AI analysis in save_assessment."}
+        result = {"protocolVersion": PROTOCOL_VERSION, "capabilities": {"tools": {"listChanged": False}}, "serverInfo": {"name": "TasteGraph v2", "version": SERVER_VERSION}, "instructions": "Before saving an experience, identify exactly what was experienced and inspect vocabulary_index. Reuse an existing canonical type or alias whenever possible. If the specific type is absent, reason from meaning to a broad-to-specific hierarchy and call resolve_subject_hierarchy; never create a type merely because it arrived first. Before saving, determine whether the subject has an official website. When one is available, inspect it for stable identity, branches and related subjects. Save discoveries as unreviewed subject_context with generic relationships and source provenance, while attaching the review only to the exact subject experienced. Location is optional: for a physical location record town and coordinates only when explicitly published by the source, otherwise record the published address; skip location when irrelevant. If the official source is unavailable, preserve that limitation and never invent facts or silently geocode coordinates. The experience date defaults to creation time unless explicitly provided. Reviews store stable subject-type IDs, while belongs_to relationships provide the evolving semantic structure. Preserve exact user wording in raw_text and AI analysis in save_assessment."}
     elif method == "ping":
         result = {}
     elif method == "tools/list":
