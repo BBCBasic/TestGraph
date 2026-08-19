@@ -228,7 +228,8 @@ TOOLS = [
                     "type": "object",
                     "description": (
                         "Mandatory wider-collection assessment. member requires a collection name, type, "
-                        "authoritative directory URL, reported member count and a linked collection subject in "
+                        "authoritative directory URL, reported member count stored on the collection subject, "
+                        "and a linked collection subject in "
                         "subject_context. independent requires evidence_sources or search attempts. unavailable "
                         "requires attempts and a reason. ambiguous blocks the save. There is no deferred status."
                     ),
@@ -836,6 +837,17 @@ def _validate_collection_assessment(raw, args, enrichment_check):
                 "Store the authoritative directory URL on the collection subject.",
                 collection_ref=collection_subject.get("ref"),
                 directory_url=assessment.directory_url,
+            )
+
+        if not _contains_exact_value(
+            collection_subject.get("attributes", {}),
+            assessment.reported_member_count,
+        ):
+            return None, _collection_action_required(
+                "collection_member_count_not_stored",
+                "Store reported_member_count on the collection subject attributes.",
+                collection_ref=collection_subject.get("ref"),
+                reported_member_count=assessment.reported_member_count,
             )
 
         collection_ref = collection_subject.get("ref")
