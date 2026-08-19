@@ -60,6 +60,13 @@ def _enrichment_args(subject, key, identifiers):
             "status": "completed",
             "sources": [SOURCE],
             "applied_fields": {SOURCE: ["identifiers.address"]},
+            "retrieval_uses": {
+                "identifiers.address": {
+                    "roles": ["location"],
+                    "likely_queries": ["Example Cafe in Stroud"],
+                    "reason": "Supports likely place-and-location searches.",
+                }
+            },
         },
         "collection_assessment": {
             "status": "independent",
@@ -170,6 +177,27 @@ def test_collection_mismatch_is_rejected_before_related_subject_write(db, princi
                     "subject_context.subjects[0].attributes.discovered_count",
                     "subject_context.relationships[0]",
                 ],
+            },
+            "retrieval_uses": {
+                "identifiers.website": {
+                    "roles": ["identity"],
+                    "likely_queries": ["Example Cafe official website"],
+                    "reason": "Provides the canonical subject locator.",
+                },
+                "subject_context.subjects[0].identifiers.directory_url": {
+                    "roles": ["relationship"],
+                    "likely_queries": ["Example Group locations"],
+                    "reason": "Enables later collection expansion.",
+                },
+                "subject_context.subjects[0].attributes.discovered_count": {
+                    "roles": ["verification"],
+                    "reason": "Supports server verification of collection completeness.",
+                },
+                "subject_context.relationships[0]": {
+                    "roles": ["relationship"],
+                    "likely_queries": ["Example Group cafe in Stroud"],
+                    "reason": "Connects the target to its searchable collection.",
+                },
             },
         },
         "collection_assessment": {
