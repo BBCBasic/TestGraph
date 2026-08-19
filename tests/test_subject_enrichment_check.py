@@ -38,6 +38,13 @@ def test_valid_non_ambiguous_checks_can_continue(status):
     if status=="completed":
         raw["sources"]=["https://example.test/about"]
         raw["applied_fields"]={"https://example.test/about":["identifiers.website"]}
+        raw["retrieval_uses"]={
+            "identifiers.website":{
+                "roles":["identity"],
+                "likely_queries":["Example official website"],
+                "reason":"Distinguishes the exact subject and provides its canonical locator.",
+            }
+        }
     elif status=="unavailable":
         raw.update(reason="No reliable source found",attempts=["Searched subject name and publisher"])
     else:
@@ -75,6 +82,12 @@ def test_applied_source_must_point_to_data_present_in_save_request():
         {
             "status":"completed","sources":[source],
             "applied_fields":{source:["identifiers.website"]},
+            "retrieval_uses":{
+                "identifiers.website":{
+                    "roles":["identity"],"likely_queries":["Example official website"],
+                    "reason":"Canonical subject identity.",
+                }
+            },
         },
         {"identifiers":{}},
     )
@@ -102,6 +115,13 @@ def test_applied_source_can_point_to_nested_subject_context_data():
             "status": "completed",
             "sources": [source],
             "applied_fields": {source: [path]},
+            "retrieval_uses": {
+                path: {
+                    "roles": ["relationship"],
+                    "likely_queries": ["Example Restaurants in Stroud"],
+                    "reason": "Enables location-based expansion through the parent collection.",
+                }
+            },
         },
         {
             "subject_context": {
@@ -132,6 +152,13 @@ def test_nested_subject_context_path_must_point_to_existing_data():
             "applied_fields": {
                 source: ["subject_context.subjects[1].identifiers.branch_directory"]
             },
+            "retrieval_uses": {
+                "subject_context.subjects[1].identifiers.branch_directory": {
+                    "roles": ["relationship"],
+                    "likely_queries": ["Example locations"],
+                    "reason": "Would support collection expansion if the path existed.",
+                }
+            },
         },
         {
             "subject_context": {
@@ -151,3 +178,72 @@ def test_nested_subject_context_path_must_point_to_existing_data():
         "subject_context.subjects[1].identifiers.branch_directory"
     ]
 
+
+
+def test_applied_fact_requires_generic_retrieval_use():
+    source = "https://example.test/about"
+    check, error = _validate_subject_enrichment_check(
+        {
+            "status": "completed",
+            "sources": [source],
+            "applied_fields": {source: ["identifiers.website"]},
+        },
+        {"identifiers": {"website": source}},
+    )
+
+    assert check is None
+    assert _payload(error)["details"]["code"] == "subject_enrichment_retrieval_use_invalid"
+    assert _payload(error)["details"]["missing_retrieval_uses"] == ["identifiers.website"]
+
+
+def test_non_verification_use_requires_likely_query_example():
+    source = "https://example.test/about"
+    check, error = _validate_subject_enrichment_check(
+        {
+            "status": "completed",
+            "sources": [source],
+            "applied_fields": {source: ["subject_attributes.service"]},
+            "retrieval_uses": {
+                "subject_attributes.service": {
+                    "roles": ["classification"],
+                    "reason": "Describes the kind of service available.",
+                }
+            },
+        },
+        {"subject_attributes": {"service": "example"}},
+    )
+
+    assert check is None
+    payload = _payload(error)
+    assert payload["details"]["code"] == "subject_enrichment_retrieval_use_invalid"
+    assert payload["details"]["uses_without_likely_queries"] == [
+        "subject_attributes.service"
+    ]
+
+
+def test_verification_only_use_does_not_require_query_example():
+    source = "https://example.test/directory"
+    path = "collection_assessment.source_manifest.source_pages[0].url"
+    check, error = _validate_subject_enrichment_check(
+        {
+            "status": "completed",
+            "sources": [source],
+            "applied_fields": {source: [path]},
+            "retrieval_uses": {
+                path: {
+                    "roles": ["verification"],
+                    "reason": "Proves which authoritative directory page was traversed.",
+                }
+            },
+        },
+        {
+            "collection_assessment": {
+                "source_manifest": {
+                    "source_pages": [{"url": source}]
+                }
+            }
+        },
+    )
+
+    assert error is None
+    assert check.retrieval_uses[path].roles == ["verification"]
