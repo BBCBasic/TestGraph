@@ -1,18 +1,18 @@
 from __future__ import annotations
 
 
-RELATED_SUBJECT_LIMIT = 50
-RELATED_RELATIONSHIP_LIMIT = 100
-_SAVE_POLICY_MARKER = "Other members are created lazily, not bulk-ingested."
+RELATED_SUBJECT_LIMIT = 500
+RELATED_RELATIONSHIP_LIMIT = 1000
+_SAVE_POLICY_MARKER = "Every discovered collection member must be submitted."
 
 
 def apply_chain_ingest_policy(tools: list[dict]) -> None:
-    """Apply the MCP v2 collection-discovery policy idempotently.
+    """Apply the MCP v2 complete collection-discovery policy idempotently.
 
-    The graph stores the reviewed subject and its collection relationship at save
-    time. Other collection members are materialised lazily when reviewed,
-    explicitly requested or relevant to a search.
+    A finite authoritative directory must be represented completely. The server
+    rejects collection saves whose discovered and submitted member counts differ.
     """
+
     by_name = {tool.get("name"): tool for tool in tools}
 
     enrich = by_name.get("enrich_subject")
@@ -20,13 +20,12 @@ def apply_chain_ingest_policy(tools: list[dict]) -> None:
         enrich["description"] = (
             "Add missing identifiers, attributes, provenance and related unreviewed subjects to an existing "
             "subject without creating another review. Use this proactively when authoritative information was "
-            "missed during the original save. Search for the official website yourself. For a multi-location or "
-            "otherwise collected subject, preserve the parent collection, its authoritative directory URL and the "
-            "relationship to the existing subject. Do not bulk-ingest every published member merely because a "
-            "directory exists; materialise another member when it is reviewed, explicitly requested or relevant to "
-            "a search. Do not ask the user for a URL or routine lookup permission unless automatic lookup is "
-            "unavailable or identity is genuinely ambiguous. Existing conflicting values are preserved rather than "
-            "silently overwritten."
+            "missed during the original save. Search for the official website yourself. When an authoritative "
+            "source exposes a finite collection, submit every discovered member as an unreviewed subject, connect "
+            "each member to the collection, and preserve the directory URL and provenance. Do not omit members "
+            "because they are unreviewed, numerous or may be materialised later. Do not ask the user for a URL or "
+            "routine lookup permission unless automatic lookup is unavailable or identity is genuinely ambiguous. "
+            "Existing conflicting values are preserved rather than silently overwritten."
         )
         _set_context_limits(enrich)
 
@@ -35,9 +34,10 @@ def apply_chain_ingest_policy(tools: list[dict]) -> None:
         current = save.get("description", "")
         if _SAVE_POLICY_MARKER not in current:
             save["description"] = current + (
-                " Collection assessment is mandatory and server-enforced. A collection member must include the "
-                "collection subject, authoritative directory evidence, reported member count and a relationship to "
-                "reviewed_subject. Other members are created lazily, not bulk-ingested."
+                " Every discovered collection member must be submitted. Include reviewed_subject plus every "
+                "discovered sibling in collection_assessment.submitted_member_refs; the server derives the submitted "
+                "count, requires it to equal discovered_count, and verifies that every ref exists and is connected "
+                "to the collection. Unreviewed status, collection size and future materialisation are not omissions."
             )
         _set_context_limits(save)
 
