@@ -29,7 +29,7 @@ from app.services.write_safety import begin_idempotent_write, finish_idempotent_
 
 router = APIRouter()
 PROTOCOL_VERSION = "2025-06-18"
-SERVER_VERSION = "3.9.0-alpha"
+SERVER_VERSION = "3.10.0-alpha"
 READ_SECURITY = [{"type": "oauth2", "scopes": ["reviews:read"]}]
 WRITE_SECURITY = [{"type": "oauth2", "scopes": ["reviews:write"]}]
 
@@ -157,7 +157,10 @@ TOOLS = [
             "identifiers, subject_attributes and subject_context with source provenance, while attaching the review "
             "only to what was actually experienced. A completed check requires at least one source, and every "
             "source must be reconciled: list the request paths populated from it in applied_fields, or explain in "
-            "unapplied_sources why it yielded no stored discovery. A subject's own canonical URL is a stable "
+            "unapplied_sources why it yielded no stored discovery. Every applied path must declare a generic "
+            "retrieval_uses entry explaining how it helps future identity, likely queries, location, classification, "
+            "relationships, comparison or verification. Do not store facts merely because they are available. "
+            "A subject's own canonical URL is a stable "
             "identifier and must be stored in identifiers when found. If enrichment cannot be found, use unavailable "
             "with a reason and the searches attempted. Use not_applicable with a "
             "reason when external enrichment has no sensible application. Collection assessment is mandatory: "
@@ -205,6 +208,40 @@ TOOLS = [
                             "additionalProperties": {
                                 "type": "array", "minItems": 1,
                                 "items": {"type": "string", "minLength": 1},
+                            },
+                            "default": {},
+                        },
+                        "retrieval_uses": {
+                            "type": "object",
+                            "description": (
+                                "Map every applied request path to its generic TestGraph purpose. Store a fact only "
+                                "when it helps future identity, likely queries, location, classification, relationships, "
+                                "comparison or server verification. Give likely query examples for every purpose other "
+                                "than verification. Facts that are merely available but have no plausible graph or "
+                                "retrieval use must not be stored."
+                            ),
+                            "additionalProperties": {
+                                "type": "object",
+                                "properties": {
+                                    "roles": {
+                                        "type": "array", "minItems": 1,
+                                        "items": {
+                                            "type": "string",
+                                            "enum": [
+                                                "identity", "likely_query", "location",
+                                                "classification", "relationship", "comparison",
+                                                "verification",
+                                            ],
+                                        },
+                                    },
+                                    "likely_queries": {
+                                        "type": "array", "default": [],
+                                        "items": {"type": "string", "minLength": 1},
+                                    },
+                                    "reason": {"type": "string", "minLength": 1},
+                                },
+                                "required": ["roles", "reason"],
+                                "additionalProperties": False,
                             },
                             "default": {},
                         },
@@ -752,6 +789,10 @@ def _enrich_subject(db, principal, args):
         "status": enrichment_check.status,
         "sources": enrichment_check.sources,
         "applied_fields": enrichment_check.applied_fields,
+        "retrieval_uses": {
+            path: use.model_dump(mode="json")
+            for path, use in enrichment_check.retrieval_uses.items()
+        },
         "unapplied_sources": enrichment_check.unapplied_sources,
         "collection_assessment": collection_assessment.model_dump(mode="json"),
         "recorded_at": datetime.now(timezone.utc).isoformat(),
@@ -969,6 +1010,33 @@ def _validate_subject_enrichment_check(raw, args=None, allowed_roots=None):
                     "instruction": (
                         "For each source, list the save-request paths populated from it in applied_fields, "
                         "or give a reason in unapplied_sources when it yielded no stored discovery."
+                    ),
+                },
+            )
+        applied_paths = {
+            path for paths in check.applied_fields.values() for path in paths
+        }
+        retrieval_paths = set(check.retrieval_uses)
+        missing_retrieval_uses = sorted(applied_paths - retrieval_paths)
+        unknown_retrieval_uses = sorted(retrieval_paths - applied_paths)
+        queryless_uses = sorted(
+            path for path, use in check.retrieval_uses.items()
+            if any(role != "verification" for role in use.roles)
+            and not use.likely_queries
+        )
+        if missing_retrieval_uses or unknown_retrieval_uses or queryless_uses:
+            return None, _error(
+                "Every stored discovery requires a generic TestGraph retrieval purpose",
+                {
+                    "code": "subject_enrichment_retrieval_use_invalid",
+                    "missing_retrieval_uses": missing_retrieval_uses,
+                    "unknown_retrieval_uses": unknown_retrieval_uses,
+                    "uses_without_likely_queries": queryless_uses,
+                    "instruction": (
+                        "For every applied request path, state how it helps identity, likely queries, "
+                        "location, classification, relationships, comparison or verification. Give "
+                        "likely query examples unless the path exists only for server verification. "
+                        "Do not store facts merely because the source publishes them."
                     ),
                 },
             )
@@ -1548,7 +1616,7 @@ async def mcp_v2(request: Request, db: Session = Depends(get_db)):
     if method and method.startswith("notifications/"):
         return Response(status_code=202)
     if method == "initialize":
-        result = {"protocolVersion": PROTOCOL_VERSION, "capabilities": {"tools": {"listChanged": False}}, "serverInfo": {"name": "TasteGraph v2", "version": SERVER_VERSION}, "instructions": "Before saving an experience, identify exactly what was experienced and inspect vocabulary_index. Reuse an existing canonical type or alias whenever possible. If the specific type is absent, reason from meaning to a broad-to-specific hierarchy and call resolve_subject_hierarchy; never create a type merely because it arrived first. Before saving, perform the generic subject enrichment check and include its result in subject_enrichment_check. Use authoritative or primary sources where available, but do not require a website, location or any domain-specific field. Reconcile every consulted source with the request paths it populated, or explain why it yielded no stored discovery. When the subject has its own canonical URL, store it as an identifier. Perform routine checking and retry automatically; do not ask the user unless identity is genuinely ambiguous. If enrichment cannot be found, use unavailable with a reason and the searches attempted. Save discoveries as unreviewed subject_context with generic relationships and source provenance, while attaching the review only to the exact subject experienced. Always submit collection_assessment. When the subject belongs to a wider collection, do not stop at one company landing page. Use web search to discover every authoritative collection surface, including pagination, sitemaps, official APIs, regional directories and member pages. Return a complete source_manifest that maps every member to its consulted source pages, records discovery queries and exhaustion evidence, follows pagination to a terminal page and leaves no unresolved source URL. Save the collection as an unreviewed subject and preserve its authoritative directory URL and discovered count. Submit reviewed_subject plus every derived member as unreviewed subject_context, connect every member to the collection, and list those refs in submitted_member_refs. The server rejects incomplete source coverage and requires submitted_count to equal discovered_count; unreviewed status, collection size and future materialisation are not valid omissions. On a location-based recommendation, never conclude there is no relevant result from the target-town search alone: also search the relevant subject type without a text query, follow reviewed subjects to parent organisations, inspect their official branch directories for the requested location, and add any discovered branch as an unreviewed related subject. Do this routine chain lookup without asking the user. If authoritative information was missed during the original save, use enrich_subject to add it without creating another review. Location is optional: for a physical location record town and coordinates only when explicitly published by the source, otherwise record the published address; skip location when irrelevant. If the official source is unavailable, preserve that limitation and never invent facts or silently geocode coordinates. The experience date defaults to creation time unless explicitly provided. When structured data matches an existing globally registered canonical field, include it in the save: TestGraph attaches that field to the subject type automatically after validation. Do not ask for routine confirmation, omit the structured value, or demote it to raw_text merely because the field has not previously been used for that subject type. Only genuinely new reusable fields require register_field. Reviews store stable subject-type IDs, while belongs_to relationships provide the evolving semantic structure. Preserve exact user wording in raw_text and AI analysis in save_assessment."}
+        result = {"protocolVersion": PROTOCOL_VERSION, "capabilities": {"tools": {"listChanged": False}}, "serverInfo": {"name": "TasteGraph v2", "version": SERVER_VERSION}, "instructions": "Before saving an experience, identify exactly what was experienced and inspect vocabulary_index. Reuse an existing canonical type or alias whenever possible. If the specific type is absent, reason from meaning to a broad-to-specific hierarchy and call resolve_subject_hierarchy; never create a type merely because it arrived first. Before saving, perform the generic subject enrichment check and include its result in subject_enrichment_check. Use authoritative or primary sources where available, but do not require a website, location or any domain-specific field. Reconcile every consulted source with the request paths it populated, or explain why it yielded no stored discovery. For every applied path, declare its generic retrieval_uses purpose and likely query examples: identity, likely query, location, classification, relationship, comparison or verification. Do not store facts merely because a source publishes them; omit facts with no plausible future TestGraph retrieval or graph use. When the subject has its own canonical URL, store it as an identifier. Perform routine checking and retry automatically; do not ask the user unless identity is genuinely ambiguous. If enrichment cannot be found, use unavailable with a reason and the searches attempted. Save discoveries as unreviewed subject_context with generic relationships and source provenance, while attaching the review only to the exact subject experienced. Always submit collection_assessment. When the subject belongs to a wider collection, do not stop at one company landing page. Use web search to discover every authoritative collection surface, including pagination, sitemaps, official APIs, regional directories and member pages. Return a complete source_manifest that maps every member to its consulted source pages, records discovery queries and exhaustion evidence, follows pagination to a terminal page and leaves no unresolved source URL. Save the collection as an unreviewed subject and preserve its authoritative directory URL and discovered count. Submit reviewed_subject plus every derived member as unreviewed subject_context, connect every member to the collection, and list those refs in submitted_member_refs. The server rejects incomplete source coverage and requires submitted_count to equal discovered_count; unreviewed status, collection size and future materialisation are not valid omissions. On a location-based recommendation, never conclude there is no relevant result from the target-town search alone: also search the relevant subject type without a text query, follow reviewed subjects to parent organisations, inspect their official branch directories for the requested location, and add any discovered branch as an unreviewed related subject. Do this routine chain lookup without asking the user. If authoritative information was missed during the original save, use enrich_subject to add it without creating another review. Location is optional: for a physical location record town and coordinates only when explicitly published by the source, otherwise record the published address; skip location when irrelevant. If the official source is unavailable, preserve that limitation and never invent facts or silently geocode coordinates. The experience date defaults to creation time unless explicitly provided. When structured data matches an existing globally registered canonical field, include it in the save: TestGraph attaches that field to the subject type automatically after validation. Do not ask for routine confirmation, omit the structured value, or demote it to raw_text merely because the field has not previously been used for that subject type. Only genuinely new reusable fields require register_field. Reviews store stable subject-type IDs, while belongs_to relationships provide the evolving semantic structure. Preserve exact user wording in raw_text and AI analysis in save_assessment."}
     elif method == "ping":
         result = {}
     elif method == "tools/list":
