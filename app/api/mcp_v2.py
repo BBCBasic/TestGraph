@@ -71,12 +71,15 @@ TOOLS = [
         "name": "save_experience",
         "title": "Save an approved review",
         "description": (
-            "Save a review against an already-resolved stable subject type. The experience date defaults "
-            "to creation time unless experienced_at is explicit. Location is optional. When an authoritative "
-            "source identifies related subjects, add them in subject_context as unreviewed subjects and link "
-            "them generically; attach the review only to what was actually experienced. For physical locations, "
-            "store town and source-published coordinates when explicit, otherwise the published address. "
-            "Preserve the source URL and retrieval details in provenance. All context subject types must already be resolved. Never invent or silently geocode coordinates."
+            "Save a review against an already-resolved stable subject type. Before saving, determine whether "
+            "the subject has an official website; when one is available, inspect it for stable identity, branches "
+            "and related subjects. Add discoveries in subject_context as unreviewed subjects with generic "
+            "relationships and source provenance, while attaching the review only to what was actually experienced. "
+            "Location is optional. For physical locations, record the town and coordinates only when explicitly "
+            "published by the source; otherwise record the published address. Skip location when it is irrelevant. "
+            "The experience date defaults to creation time unless experienced_at is explicit. All context subject "
+            "types must already be resolved. If the official source is unavailable, preserve that limitation and "
+            "do not invent facts or silently geocode coordinates."
         ),
         "inputSchema": {
             "type": "object",
@@ -331,7 +334,7 @@ async def mcp_v2(request: Request, db: Session = Depends(get_db)):
     if method and method.startswith("notifications/"):
         return Response(status_code=202)
     if method == "initialize":
-        result = {"protocolVersion": PROTOCOL_VERSION, "capabilities": {"tools": {"listChanged": False}}, "serverInfo": {"name": "TasteGraph v2", "version": SERVER_VERSION}, "instructions": "Before saving an experience, identify exactly what was experienced and inspect vocabulary_index. Reuse an existing canonical type or alias whenever possible. If the specific type is absent, reason from meaning to a broad-to-specific hierarchy and call resolve_subject_hierarchy; never create a type merely because it arrived first. Reviews store stable subject-type IDs, while belongs_to relationships provide the evolving semantic structure. A review attaches only to the exact experienced subject. Location is optional. If an authoritative source exposes related subjects such as an organisation and its locations, save those as unreviewed subject_context with generic relationships and provenance. Store coordinates only when explicit in the source; otherwise preserve the published address. The experience date defaults to creation time unless explicitly provided. Preserve exact user wording in raw_text and AI analysis in save_assessment."}
+        result = {"protocolVersion": PROTOCOL_VERSION, "capabilities": {"tools": {"listChanged": False}}, "serverInfo": {"name": "TasteGraph v2", "version": SERVER_VERSION}, "instructions": "Before saving an experience, identify exactly what was experienced and inspect vocabulary_index. Reuse an existing canonical type or alias whenever possible. If the specific type is absent, reason from meaning to a broad-to-specific hierarchy and call resolve_subject_hierarchy; never create a type merely because it arrived first. Before saving, determine whether the subject has an official website. When one is available, inspect it for stable identity, branches and related subjects. Save discoveries as unreviewed subject_context with generic relationships and source provenance, while attaching the review only to the exact subject experienced. Location is optional: for a physical location record town and coordinates only when explicitly published by the source, otherwise record the published address; skip location when irrelevant. If the official source is unavailable, preserve that limitation and never invent facts or silently geocode coordinates. The experience date defaults to creation time unless explicitly provided. Reviews store stable subject-type IDs, while belongs_to relationships provide the evolving semantic structure. Preserve exact user wording in raw_text and AI analysis in save_assessment."}
     elif method == "ping":
         result = {}
     elif method == "tools/list":
