@@ -162,25 +162,38 @@ def fields_for_type(db: Session, subject_type: SubjectType) -> list[FieldDefinit
     ).all())
 
 
-def normalise_data(db: Session, subject_type: SubjectType, data: dict) -> tuple[dict, list]:
+def normalise_data(
+    db: Session, subject_type: SubjectType, data: dict, *, source: str = "ai-client",
+) -> tuple[dict, list]:
     allowed = {field.id: field for field in fields_for_type(db, subject_type)}
     result, log = {}, []
     for submitted_name, value in data.items():
         field = resolve_field(db, submitted_name)
-        if not field or field.id not in allowed:
+        if not field:
             raise ValueError(
-                f"Field '{submitted_name}' is not registered for subject type "
-                f"'{subject_type.canonical_name}'. Preserve it in raw_text or register a reusable field first."
+                f"Field '{submitted_name}' is not registered globally. Preserve a one-off detail in "
+                "raw_text or register a genuinely reusable field before saving."
             )
         try:
             Draft202012Validator(field.json_schema).validate(value)
         except ValidationError as exc:
             raise ValueError(f"Field '{field.canonical_name}' is invalid: {exc.message}") from exc
+        attached = field.id in allowed
+        if not attached:
+            db.add(SubjectTypeField(
+                subject_type_id=subject_type.id, field_id=field.id, source=source,
+            ))
+            db.flush()
+            allowed[field.id] = field
         if field.canonical_name in result:
             raise ValueError(f"Multiple submitted fields resolve to '{field.canonical_name}'")
         result[field.canonical_name] = value
         method = "canonical" if normalise_term(submitted_name) == field.normalized_name else "alias"
-        log.append({"submitted": submitted_name, "canonical": field.canonical_name, "field_id": str(field.id), "method": method})
+        log.append({
+            "submitted": submitted_name, "canonical": field.canonical_name,
+            "field_id": str(field.id), "method": method,
+            "attached_to_subject_type": not attached,
+        })
     return result, log
 
 
@@ -253,10 +266,10 @@ def ensure_subject_context(
     db: Session, reviewed_subject: V2Subject, payload: SubjectContextEnsure,
     *, client_id: str,
 ) -> dict:
-    refs = {"reviewed_subject": reviewed_subject}
+    refs = {"reviewed_subject": reviewed_subject, "subject": reviewed_subject}
     created_subjects = []
     for item in payload.subjects:
-        if item.ref == "reviewed_subject" or item.ref in refs:
+        if item.ref in refs:
             raise ValueError(f"Duplicate or reserved subject reference '{item.ref}'")
         subject = ensure_subject(
             db,
@@ -311,7 +324,9 @@ def create_experience(db: Session, payload: ExperienceCreate, client_id: str) ->
     if not subject or subject.deleted_at:
         raise ValueError("Subject not found")
     subject_type = db.get(SubjectType, subject.subject_type_id)
-    canonical_data, log = normalise_data(db, subject_type, payload.structured_data)
+    canonical_data, log = normalise_data(
+        db, subject_type, payload.structured_data, source=client_id,
+    )
     source = _source(db, payload.source)
     obj = V2Experience(
         owner_id=payload.owner_id, subject_id=subject.id, source_id=source.id if source else None,
