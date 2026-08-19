@@ -8,11 +8,7 @@ from app.services.mcp_v2_policy import (
 )
 
 
-def _tool(name):
-    return next(tool for tool in TOOLS if tool["name"] == name)
-
-
-def test_chain_policy_ingests_large_finite_sets_instead_of_deferring():
+def test_collection_policy_keeps_only_relevant_members():
     tools = deepcopy(TOOLS)
     apply_chain_ingest_policy(tools)
 
@@ -20,18 +16,18 @@ def test_chain_policy_ingests_large_finite_sets_instead_of_deferring():
     enrich = by_name["enrich_subject"]
     save = by_name["save_experience"]
 
-    assert "complete published set" in enrich["description"]
-    assert "regardless of chain size" in enrich["description"]
-    assert "Do not deliberately defer a large chain" in enrich["description"]
-    assert "complete published set" in save["description"]
+    assert "Do not bulk-ingest every published member" in enrich["description"]
+    assert "materialise another member" in enrich["description"]
+    assert "Collection assessment is mandatory" in save["description"]
+    assert "Other members are created lazily" in save["description"]
 
     for tool in (enrich, save):
         context = tool["inputSchema"]["properties"]["subject_context"]["properties"]
-        assert context["subjects"]["maxItems"] == RELATED_SUBJECT_LIMIT
-        assert context["relationships"]["maxItems"] == RELATED_RELATIONSHIP_LIMIT
+        assert context["subjects"]["maxItems"] == RELATED_SUBJECT_LIMIT == 50
+        assert context["relationships"]["maxItems"] == RELATED_RELATIONSHIP_LIMIT == 100
 
 
-def test_chain_policy_is_idempotent():
+def test_collection_policy_is_idempotent():
     tools = deepcopy(TOOLS)
     apply_chain_ingest_policy(tools)
     first = deepcopy(tools)

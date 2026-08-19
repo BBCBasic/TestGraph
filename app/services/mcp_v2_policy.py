@@ -1,18 +1,17 @@
 from __future__ import annotations
 
 
-RELATED_SUBJECT_LIMIT = 5000
-RELATED_RELATIONSHIP_LIMIT = 10000
-_SAVE_POLICY_MARKER = "complete published set as unreviewed subject_context"
+RELATED_SUBJECT_LIMIT = 50
+RELATED_RELATIONSHIP_LIMIT = 100
+_SAVE_POLICY_MARKER = "Other members are created lazily, not bulk-ingested."
 
 
 def apply_chain_ingest_policy(tools: list[dict]) -> None:
-    """Apply the MCP v2 policy for authoritative multi-location discovery.
+    """Apply the MCP v2 collection-discovery policy idempotently.
 
-    Authoritative finite location sets are ingested when first discovered rather
-    than deliberately deferred. The underlying subject-context service is
-    idempotent by canonical identity; these limits are MCP payload guardrails,
-    not a semantic threshold between "small" and "large" organisations.
+    The graph stores the reviewed subject and its collection relationship at save
+    time. Other collection members are materialised lazily when reviewed,
+    explicitly requested or relevant to a search.
     """
     by_name = {tool.get("name"): tool for tool in tools}
 
@@ -21,33 +20,29 @@ def apply_chain_ingest_policy(tools: list[dict]) -> None:
         enrich["description"] = (
             "Add missing identifiers, attributes, provenance and related unreviewed subjects to an existing "
             "subject without creating another review. Use this proactively when authoritative information was "
-            "missed during the original save. Search for the official website yourself. When an authoritative "
-            "source exposes a finite enumerable set of locations or other related subjects, ingest the complete "
-            "published set on first discovery where technically practical, regardless of chain size. Create them "
-            "as unreviewed subjects, connect them to the parent organisation, preserve source provenance and the "
-            "official directory URL, and rely on canonical keys/idempotency to avoid duplicates on later refreshes. "
-            "Do not deliberately defer a large chain merely because it has many locations. If one MCP payload cannot "
-            "carry the complete set, submit deterministic batches until the published set is represented. Do not ask "
-            "the user for a URL or routine lookup permission unless automatic lookup is unavailable or identity is "
-            "genuinely ambiguous. Existing conflicting values are preserved rather than silently overwritten."
+            "missed during the original save. Search for the official website yourself. For a multi-location or "
+            "otherwise collected subject, preserve the parent collection, its authoritative directory URL and the "
+            "relationship to the existing subject. Do not bulk-ingest every published member merely because a "
+            "directory exists; materialise another member when it is reviewed, explicitly requested or relevant to "
+            "a search. Do not ask the user for a URL or routine lookup permission unless automatic lookup is "
+            "unavailable or identity is genuinely ambiguous. Existing conflicting values are preserved rather than "
+            "silently overwritten."
         )
-        _raise_context_limits(enrich)
+        _set_context_limits(enrich)
 
     save = by_name.get("save_experience")
     if save:
         current = save.get("description", "")
         if _SAVE_POLICY_MARKER not in current:
             save["description"] = current + (
-                " When authoritative enrichment reveals a finite enumerable set of sibling locations or related "
-                "subjects, include the complete published set as unreviewed subject_context on first discovery where "
-                "technically practical, regardless of chain size. Preserve parent relationships, canonical identifiers "
-                "and source provenance. Do not use chain size as a reason to defer known locations; if the complete set "
-                "exceeds one payload, complete the ingestion through deterministic enrich_subject batches."
+                " Collection assessment is mandatory and server-enforced. A collection member must include the "
+                "collection subject, authoritative directory evidence, reported member count and a relationship to "
+                "reviewed_subject. Other members are created lazily, not bulk-ingested."
             )
-        _raise_context_limits(save)
+        _set_context_limits(save)
 
 
-def _raise_context_limits(tool: dict) -> None:
+def _set_context_limits(tool: dict) -> None:
     properties = tool.get("inputSchema", {}).get("properties", {})
     context = properties.get("subject_context", {})
     context_properties = context.get("properties", {})

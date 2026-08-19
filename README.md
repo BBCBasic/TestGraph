@@ -2,6 +2,14 @@
 
 AI-native structured review storage with a controlled vocabulary and personalised interpretation.
 
+## Project goals
+
+1. **Schema emergence:** Give several AIs unfamiliar experiences and obtain a useful structure without designing the categories beforehand.
+2. **Controlled disagreement:** Conflicting classifications converge through evidence, confidence and server rules instead of flip-flopping.
+3. **Truthful execution:** Models cannot claim that discovery, enrichment or reconciliation happened unless the server can verify it.
+
+These goals are acceptance criteria for TestGraph's architecture and tests, not merely guidance for individual AI clients.
+
 ## Standard vocabulary model
 
 Reviews are stored against stable `subject_type_id` values, not DNS-style concept paths. Flexible input is resolved through canonical subject types and globally unique aliases; case, punctuation, possessives and ordinary plurals are normalised mechanically. Unknown types may be created as provisional entries after dictionary lookup.

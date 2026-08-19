@@ -338,6 +338,12 @@ def create_experience(db: Session, payload: ExperienceCreate, client_id: str) ->
     )
     if enrichment_check is not None:
         enrichment_check["recorded_at"] = now_utc().isoformat()
+    collection_assessment = (
+        payload.collection_assessment.model_dump(mode="json")
+        if payload.collection_assessment else None
+    )
+    if collection_assessment is not None:
+        collection_assessment["recorded_at"] = now_utc().isoformat()
     obj = V2Experience(
         owner_id=payload.owner_id, subject_id=subject.id, source_id=source.id if source else None,
         record_type="review", experienced_at=payload.experienced_at or now_utc(), headline=payload.headline,
@@ -347,6 +353,7 @@ def create_experience(db: Session, payload: ExperienceCreate, client_id: str) ->
         provenance={
             "kind": "direct_user_experience", "source_client": client_id,
             **({"subject_enrichment_check": enrichment_check} if enrichment_check else {}),
+            **({"collection_assessment": collection_assessment} if collection_assessment else {}),
         },
         created_by_client=client_id,
     )
