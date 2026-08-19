@@ -96,6 +96,7 @@ class V2Subject(Base):
     __table_args__ = (UniqueConstraint("subject_type_id", "canonical_key", name="uq_v2_subject_type_key"),)
     id: Mapped[uuid.UUID] = mapped_column(UuidType, primary_key=True, default=new_uuid)
     subject_type_id: Mapped[uuid.UUID] = mapped_column(UuidType, ForeignKey("subject_types.id"), index=True)
+    owner_id: Mapped[uuid.UUID | None] = mapped_column(UuidType, ForeignKey("users.id"), index=True)
     name: Mapped[str] = mapped_column(String(240), index=True)
     canonical_key: Mapped[str] = mapped_column(String(300), index=True)
     identifiers_json: Mapped[dict] = mapped_column(JsonType, default=dict)

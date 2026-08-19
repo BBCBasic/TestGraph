@@ -18,7 +18,7 @@ from app.schemas.v2 import (
 )
 from app.services.semantic import add_semantic_relationship, resolve_subject_hierarchy, retire_semantic_relationship
 from app.services.v2 import (
-    add_subject_type_alias, create_assessment, create_experience,
+    add_subject_type_alias, create_assessment, create_experience, delete_owned_experience,
     descendant_type_ids, ensure_field, ensure_subject, ensure_subject_context,
     fields_for_type, resolve_subject_type, vocabulary_index,
 )
@@ -26,7 +26,7 @@ from app.services.write_safety import begin_idempotent_write, finish_idempotent_
 
 router = APIRouter()
 PROTOCOL_VERSION = "2025-06-18"
-SERVER_VERSION = "3.4.1-alpha"
+SERVER_VERSION = "3.5.0-alpha"
 READ_SECURITY = [{"type": "oauth2", "scopes": ["reviews:read"]}]
 WRITE_SECURITY = [{"type": "oauth2", "scopes": ["reviews:write"]}]
 
@@ -284,6 +284,34 @@ TOOLS = [
             "idempotentHint": True, "openWorldHint": False,
         },
     },
+    {
+        "name": "delete_experience",
+        "title": "Delete a user-owned review",
+        "description": (
+            "Permanently delete one review only after the authenticated user explicitly requests deletion. "
+            "Ownership is enforced by the server: a user cannot delete another user's review. Dependent AI "
+            "assessments are deleted with the review. The subject is deleted only when it was created by the "
+            "same user, has no remaining reviews and has no subject relationships; otherwise it is preserved. "
+            "Do not ask for a second confirmation when the current user request already explicitly authorises "
+            "deletion."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "id": {"type": "string", "format": "uuid"},
+                "delete_orphan_subject": {"type": "boolean", "default": True},
+                "confirm_deletion": {"type": "boolean"},
+                "idempotency_key": {"type": "string", "minLength": 8, "maxLength": 200},
+            },
+            "required": ["id", "confirm_deletion", "idempotency_key"],
+            "additionalProperties": False,
+        },
+        **_security(WRITE_SECURITY),
+        "annotations": {
+            "readOnlyHint": False, "destructiveHint": True,
+            "idempotentHint": True, "openWorldHint": False,
+        },
+    },
     {"name": "save_assessment", "title": "Save AI-derived assessment", "description": "Save separately attributed AI analysis against the exact review it evaluates.", "inputSchema": {"type": "object", "properties": {"experience_id": {"type": "string", "format": "uuid"}, "assessment_type": {"type": "string"}, "evidence": {"type": "object", "additionalProperties": True, "default": {}}, "analysis": {"type": "object", "additionalProperties": True, "default": {}}, "conclusion": {"type": "string"}, "confidence": {"type": "number", "minimum": 0, "maximum": 1}, "source_model": {"type": "string"}, "idempotency_key": {"type": "string", "minLength": 8, "maxLength": 200}}, "required": ["experience_id", "assessment_type", "idempotency_key"], "additionalProperties": False}, **_security(WRITE_SECURITY), "annotations": {"readOnlyHint": False, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False}},
 ]
 
@@ -422,11 +450,11 @@ def _enrich_subject(db, principal, args):
             canonical_key=subject.canonical_key, identifiers=args.get("identifiers", {}),
             attributes=args.get("attributes", {}), provenance=args.get("provenance", {}),
         ),
-        client_id,
+        client_id, owner_id=principal.user_id,
     )
     context = ensure_subject_context(
         db, subject, SubjectContextEnsure.model_validate(args.get("subject_context") or {}),
-        client_id=client_id,
+        client_id=client_id, owner_id=principal.user_id,
     )
     body = {
         "enriched": True, "subject_id": str(subject.id), "subject_type": subject_type.canonical_name,
@@ -590,7 +618,7 @@ def _save_experience(db, principal, args):
     )
     context = ensure_subject_context(
         db, subject, SubjectContextEnsure.model_validate(args.get("subject_context") or {}),
-        client_id=client_id,
+        client_id=client_id, owner_id=principal.user_id,
     )
     exp = create_experience(
         db,
@@ -613,6 +641,37 @@ def _save_experience(db, principal, args):
         "subject_enrichment_check": exp.provenance.get("subject_enrichment_check"),
     }
     finish_idempotent_write(db, client_id=client_id, key=f"experience:{args['idempotency_key']}", payload_hash=payload_hash, response_body=body)
+    return _result(body)
+
+
+def _delete_experience(db, principal, args):
+    if args.get("confirm_deletion") is not True:
+        return _error("Explicit deletion confirmation is required")
+    if principal.user_id is None:
+        return _error("Authenticated TasteGraph user is required")
+    try:
+        experience_id = uuid.UUID(str(args.get("id", "")))
+    except ValueError:
+        return _error("Invalid experience ID")
+    client_id = f"{principal.client_id}:v3"
+    relevant = {k: v for k, v in args.items() if k != "idempotency_key"}
+    payload_hash, prior = begin_idempotent_write(
+        db, client_id=client_id, key=f"delete-experience:{args['idempotency_key']}",
+        payload=relevant,
+    )
+    if prior is not None:
+        return _result(prior)
+    try:
+        body = delete_owned_experience(
+            db, experience_id, principal.user_id,
+            delete_orphan_subject=args.get("delete_orphan_subject", True),
+        )
+    except ValueError:
+        return _error("Experience not found")
+    finish_idempotent_write(
+        db, client_id=client_id, key=f"delete-experience:{args['idempotency_key']}",
+        payload_hash=payload_hash, response_body=body,
+    )
     return _result(body)
 
 
@@ -641,7 +700,7 @@ async def mcp_v2(request: Request, db: Session = Depends(get_db)):
         result = {"tools": TOOLS}
     elif method == "tools/call":
         params = body.get("params") or {}; name = params.get("name"); args = params.get("arguments") or {}
-        write_names = {"resolve_subject_hierarchy", "register_subject_type_alias", "set_type_relationship", "retire_type_relationship", "register_field", "enrich_subject", "save_experience", "save_assessment"}
+        write_names = {"resolve_subject_hierarchy", "register_subject_type_alias", "set_type_relationship", "retire_type_relationship", "register_field", "enrich_subject", "save_experience", "delete_experience", "save_assessment"}
         try:
             principal = _principal(request, "reviews:write" if name in write_names else "reviews:read")
         except TokenError as exc:
@@ -691,6 +750,7 @@ async def mcp_v2(request: Request, db: Session = Depends(get_db)):
                     result = _result({"registered": True, "field_id": str(field.id), "canonical_name": field.canonical_name})
                 elif name == "enrich_subject": result = _enrich_subject(db, principal, args)
                 elif name == "save_experience": result = _save_experience(db, principal, args)
+                elif name == "delete_experience": result = _delete_experience(db, principal, args)
                 elif name == "save_assessment": result = _save_assessment(db, principal, args)
                 else: return JSONResponse({"jsonrpc": "2.0", "id": rpc_id, "error": {"code": -32602, "message": "Unknown tool"}})
             except Exception as exc:
