@@ -27,7 +27,7 @@ from app.services.write_safety import begin_idempotent_write, finish_idempotent_
 
 router = APIRouter()
 PROTOCOL_VERSION = "2025-06-18"
-SERVER_VERSION = "3.6.0-alpha"
+SERVER_VERSION = "3.7.0-alpha"
 READ_SECURITY = [{"type": "oauth2", "scopes": ["reviews:read"]}]
 WRITE_SECURITY = [{"type": "oauth2", "scopes": ["reviews:write"]}]
 
@@ -160,9 +160,10 @@ TOOLS = [
             "with a reason and the searches attempted. Use not_applicable with a "
             "reason when external enrichment has no sensible application. Collection assessment is mandatory: "
             "declare whether the subject belongs to a wider collection, and when it does, save the collection as "
-            "subject_context with its authoritative directory URL and a relationship to reviewed_subject. Do not "
-            "bulk-ingest every member merely because a directory exists; materialise other members only when reviewed, "
-            "explicitly requested or relevant to a search. Location is optional; never invent facts "
+            "subject_context with its authoritative directory URL and a relationship to reviewed_subject. Submit "
+            "every member exposed by a finite authoritative directory as an unreviewed subject and connect each one "
+            "to the collection. The server rejects mismatched discovered and submitted counts. Location is optional; "
+            "never invent facts "
             "or silently geocode coordinates. The experience date defaults to creation time unless experienced_at "
             "is explicit. All context subject types must already be resolved. Existing globally registered fields "
             "such as rating are automatically attached to this subject type on first valid use; preserve them in "
@@ -228,10 +229,11 @@ TOOLS = [
                     "type": "object",
                     "description": (
                         "Mandatory wider-collection assessment. member requires a collection name, type, "
-                        "authoritative directory URL, reported member count stored on the collection subject, "
-                        "and a linked collection subject in "
-                        "subject_context. independent requires evidence_sources or search attempts. unavailable "
-                        "requires attempts and a reason. ambiguous blocks the save. There is no deferred status."
+                        "authoritative directory URL, discovered count, and submitted_member_refs naming "
+                        "reviewed_subject plus every discovered sibling in subject_context. The server derives the "
+                        "submitted count, requires it to equal discovered_count, and verifies every member relationship. "
+                        "independent requires evidence_sources or search attempts. unavailable requires attempts and "
+                        "a reason. ambiguous blocks the save. There is no deferred or lazy status."
                     ),
                     "properties": {
                         "status": {
@@ -241,7 +243,11 @@ TOOLS = [
                         "collection_name": {"type": "string", "minLength": 1},
                         "collection_type": {"type": "string", "minLength": 1},
                         "directory_url": {"type": "string", "minLength": 1},
-                        "reported_member_count": {"type": "integer", "minimum": 2},
+                        "discovered_count": {"type": "integer", "minimum": 2},
+                        "submitted_member_refs": {
+                            "type": "array", "minItems": 2, "maxItems": 500,
+                            "items": {"type": "string", "minLength": 1},
+                        },
                         "evidence_sources": {
                             "type": "array", "maxItems": 50, "default": [],
                             "items": {"type": "string", "minLength": 1},
@@ -793,14 +799,15 @@ def _validate_collection_assessment(raw, args, enrichment_check):
                 "collection_name": assessment.collection_name,
                 "collection_type": assessment.collection_type,
                 "directory_url": assessment.directory_url,
-                "reported_member_count": assessment.reported_member_count,
+                "discovered_count": assessment.discovered_count,
+                "submitted_member_refs": assessment.submitted_member_refs,
             }.items()
             if value is None
         ]
         if missing:
             return None, _collection_action_required(
                 "collection_member_details_required",
-                "Supply the collection identity, authoritative directory URL and reported member count.",
+                "Supply the collection identity, authoritative directory URL, discovered count and every submitted member ref.",
                 missing_fields=missing,
             )
         if assessment.directory_url not in enrichment_sources:
@@ -841,13 +848,13 @@ def _validate_collection_assessment(raw, args, enrichment_check):
 
         if not _contains_exact_value(
             collection_subject.get("attributes", {}),
-            assessment.reported_member_count,
+            assessment.discovered_count,
         ):
             return None, _collection_action_required(
                 "collection_member_count_not_stored",
-                "Store reported_member_count on the collection subject attributes.",
+                "Store discovered_count on the collection subject attributes.",
                 collection_ref=collection_subject.get("ref"),
-                reported_member_count=assessment.reported_member_count,
+                discovered_count=assessment.discovered_count,
             )
 
         collection_ref = collection_subject.get("ref")
@@ -860,6 +867,64 @@ def _validate_collection_assessment(raw, args, enrichment_check):
             return None, _collection_action_required(
                 "collection_relationship_required",
                 "Connect reviewed_subject to the collection subject in subject_context.",
+                collection_ref=collection_ref,
+            )
+
+        submitted_refs = assessment.submitted_member_refs
+        if not submitted_refs:
+            return None, _collection_action_required(
+                "collection_members_required",
+                "Submit reviewed_subject and every discovered collection member in submitted_member_refs.",
+            )
+        if len(submitted_refs) != len(set(submitted_refs)):
+            return None, _collection_action_required(
+                "collection_member_refs_not_unique",
+                "Remove duplicate submitted_member_refs and retry.",
+            )
+        known_refs = {"reviewed_subject"} | {
+            subject.get("ref") for subject in subjects if subject.get("ref")
+        }
+        unknown_refs = sorted(set(submitted_refs) - known_refs)
+        if unknown_refs:
+            return None, _collection_action_required(
+                "collection_member_refs_unknown",
+                "Every submitted member ref must be reviewed_subject or a subject_context subject.",
+                unknown_refs=unknown_refs,
+            )
+        if collection_ref in submitted_refs:
+            return None, _collection_action_required(
+                "collection_subject_is_not_member",
+                "Do not count the collection subject itself as one of its members.",
+                collection_ref=collection_ref,
+            )
+        if "reviewed_subject" not in submitted_refs:
+            return None, _collection_action_required(
+                "reviewed_subject_not_counted",
+                "Include reviewed_subject in submitted_member_refs.",
+            )
+        submitted_count = len(submitted_refs)
+        if submitted_count != assessment.discovered_count:
+            return None, _collection_action_required(
+                "collection_member_count_mismatch",
+                "Submit every discovered member before retrying; lazy or future materialisation is not accepted.",
+                discovered_count=assessment.discovered_count,
+                submitted_count=submitted_count,
+                missing_count=assessment.discovered_count - submitted_count,
+            )
+        relationships = context.get("relationships") or []
+        unlinked_refs = sorted(
+            member_ref for member_ref in submitted_refs
+            if not any(
+                {relationship.get("source_ref"), relationship.get("target_ref")}
+                == {member_ref, collection_ref}
+                for relationship in relationships
+            )
+        )
+        if unlinked_refs:
+            return None, _collection_action_required(
+                "collection_members_not_linked",
+                "Connect every submitted member to the collection.",
+                unlinked_refs=unlinked_refs,
                 collection_ref=collection_ref,
             )
 
@@ -1031,7 +1096,7 @@ async def mcp_v2(request: Request, db: Session = Depends(get_db)):
     if method and method.startswith("notifications/"):
         return Response(status_code=202)
     if method == "initialize":
-        result = {"protocolVersion": PROTOCOL_VERSION, "capabilities": {"tools": {"listChanged": False}}, "serverInfo": {"name": "TasteGraph v2", "version": SERVER_VERSION}, "instructions": "Before saving an experience, identify exactly what was experienced and inspect vocabulary_index. Reuse an existing canonical type or alias whenever possible. If the specific type is absent, reason from meaning to a broad-to-specific hierarchy and call resolve_subject_hierarchy; never create a type merely because it arrived first. Before saving, perform the generic subject enrichment check and include its result in subject_enrichment_check. Use authoritative or primary sources where available, but do not require a website, location or any domain-specific field. Reconcile every consulted source with the request paths it populated, or explain why it yielded no stored discovery. When the subject has its own canonical URL, store it as an identifier. Perform routine checking and retry automatically; do not ask the user unless identity is genuinely ambiguous. If enrichment cannot be found, use unavailable with a reason and the searches attempted. Save discoveries as unreviewed subject_context with generic relationships and source provenance, while attaching the review only to the exact subject experienced. Always submit collection_assessment. When the subject belongs to a wider collection, save that collection as an unreviewed subject, connect it to the reviewed subject, and preserve the authoritative directory URL and reported member count. Do not bulk-ingest every member merely because a directory exists; materialise other members only when reviewed, explicitly requested or relevant to a search. On a location-based recommendation, never conclude there is no relevant result from the target-town search alone: also search the relevant subject type without a text query, follow reviewed subjects to parent organisations, inspect their official branch directories for the requested location, and add any discovered branch as an unreviewed related subject. Do this routine chain lookup without asking the user. If authoritative information was missed during the original save, use enrich_subject to add it without creating another review. Location is optional: for a physical location record town and coordinates only when explicitly published by the source, otherwise record the published address; skip location when irrelevant. If the official source is unavailable, preserve that limitation and never invent facts or silently geocode coordinates. The experience date defaults to creation time unless explicitly provided. When structured data matches an existing globally registered canonical field, include it in the save: TestGraph attaches that field to the subject type automatically after validation. Do not ask for routine confirmation, omit the structured value, or demote it to raw_text merely because the field has not previously been used for that subject type. Only genuinely new reusable fields require register_field. Reviews store stable subject-type IDs, while belongs_to relationships provide the evolving semantic structure. Preserve exact user wording in raw_text and AI analysis in save_assessment."}
+        result = {"protocolVersion": PROTOCOL_VERSION, "capabilities": {"tools": {"listChanged": False}}, "serverInfo": {"name": "TasteGraph v2", "version": SERVER_VERSION}, "instructions": "Before saving an experience, identify exactly what was experienced and inspect vocabulary_index. Reuse an existing canonical type or alias whenever possible. If the specific type is absent, reason from meaning to a broad-to-specific hierarchy and call resolve_subject_hierarchy; never create a type merely because it arrived first. Before saving, perform the generic subject enrichment check and include its result in subject_enrichment_check. Use authoritative or primary sources where available, but do not require a website, location or any domain-specific field. Reconcile every consulted source with the request paths it populated, or explain why it yielded no stored discovery. When the subject has its own canonical URL, store it as an identifier. Perform routine checking and retry automatically; do not ask the user unless identity is genuinely ambiguous. If enrichment cannot be found, use unavailable with a reason and the searches attempted. Save discoveries as unreviewed subject_context with generic relationships and source provenance, while attaching the review only to the exact subject experienced. Always submit collection_assessment. When the subject belongs to a wider collection, save that collection as an unreviewed subject and preserve the authoritative directory URL and discovered count. Submit reviewed_subject plus every member exposed by the finite authoritative directory as unreviewed subject_context, connect every member to the collection, and list those refs in submitted_member_refs. The server derives submitted_count and rejects the save unless it equals discovered_count; unreviewed status, collection size and future materialisation are not valid omissions. On a location-based recommendation, never conclude there is no relevant result from the target-town search alone: also search the relevant subject type without a text query, follow reviewed subjects to parent organisations, inspect their official branch directories for the requested location, and add any discovered branch as an unreviewed related subject. Do this routine chain lookup without asking the user. If authoritative information was missed during the original save, use enrich_subject to add it without creating another review. Location is optional: for a physical location record town and coordinates only when explicitly published by the source, otherwise record the published address; skip location when irrelevant. If the official source is unavailable, preserve that limitation and never invent facts or silently geocode coordinates. The experience date defaults to creation time unless explicitly provided. When structured data matches an existing globally registered canonical field, include it in the save: TestGraph attaches that field to the subject type automatically after validation. Do not ask for routine confirmation, omit the structured value, or demote it to raw_text merely because the field has not previously been used for that subject type. Only genuinely new reusable fields require register_field. Reviews store stable subject-type IDs, while belongs_to relationships provide the evolving semantic structure. Preserve exact user wording in raw_text and AI analysis in save_assessment."}
     elif method == "ping":
         result = {}
     elif method == "tools/list":
