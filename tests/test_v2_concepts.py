@@ -6,7 +6,8 @@ from app.db.base import Base
 from app.models.entities import User
 from app.models.v2 import SubjectRelationship, SubjectType, SubjectTypeField, V2Experience
 from app.schemas.v2 import (
-    ExperienceCreate, FieldEnsure, SubjectContextEnsure, SubjectEnrichmentCheck, SubjectEnsure,
+    CollectionAssessment, ExperienceCreate, FieldEnsure, SubjectContextEnsure,
+    SubjectEnrichmentCheck, SubjectEnsure,
 )
 from app.services.v2 import (
     add_subject_type_alias, add_type_relationship, create_experience, delete_owned_experience,
@@ -242,6 +243,34 @@ def test_subject_enrichment_check_is_saved_in_review_provenance(db):
     assert check["sources"]==["https://example.test/about"]
     assert "recorded_at" in check
 
+
+
+def test_collection_assessment_is_saved_in_review_provenance(db):
+    user=User(display_name="Test",profile_data={});db.add(user);db.commit();db.refresh(user)
+    ensure_subject_type(db,"cafe",created_by="test")
+    subject=ensure_subject(
+        db,SubjectEnsure(subject_type="cafe",name="Example Cafe",canonical_key="example-cafe")
+    )
+    exp=create_experience(
+        db,
+        ExperienceCreate(
+            owner_id=user.id,subject_id=subject.id,headline="Good coffee",summary="Good",
+            raw_text="The coffee was good.",user_approved=True,
+            collection_assessment=CollectionAssessment(
+                status="member",collection_name="Example Group",
+                collection_type="business_chain",
+                directory_url="https://example.test/locations",
+                reported_member_count=44,
+                evidence_sources=["https://example.test/locations"],
+            ),
+        ),
+        "test-client",
+    )
+
+    assessment=exp.provenance["collection_assessment"]
+    assert assessment["status"]=="member"
+    assert assessment["reported_member_count"]==44
+    assert "recorded_at" in assessment
 
 
 def test_user_can_delete_only_their_own_review_and_owned_orphan_subject(db):
