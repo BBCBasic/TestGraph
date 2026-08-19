@@ -499,9 +499,8 @@ def test_member_validation_returns_all_determinable_violations_together():
     payload = _payload(error)
     details = payload["details"]
     codes = {item["code"] for item in details["violations"]}
-    assert details["code"] == "collection_directory_not_stored"
+    assert details["code"] == "collection_member_count_not_stored"
     assert {
-        "collection_directory_not_stored",
         "collection_member_count_not_stored",
         "collection_relationship_required",
         "collection_source_pages_not_evidence",

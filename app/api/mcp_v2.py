@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 from datetime import datetime, timezone
+import hashlib
 import json
 import re
 import uuid
@@ -29,7 +30,7 @@ from app.services.write_safety import begin_idempotent_write, finish_idempotent_
 
 router = APIRouter()
 PROTOCOL_VERSION = "2025-06-18"
-SERVER_VERSION = "3.11.0-alpha"
+SERVER_VERSION = "3.12.0-alpha"
 READ_SECURITY = [{"type": "oauth2", "scopes": ["reviews:read"]}]
 WRITE_SECURITY = [{"type": "oauth2", "scopes": ["reviews:write"]}]
 
@@ -200,9 +201,11 @@ TOOLS = [
             "with a reason and the searches attempted. Use not_applicable with a "
             "reason when external enrichment has no sensible application. Collection assessment is mandatory: "
             "declare whether the subject belongs to a wider collection, and when it does, save the collection as "
-            "subject_context with its authoritative directory URL and a relationship to reviewed_subject. Submit "
-            "every member exposed by a finite authoritative directory as an unreviewed subject and connect each one "
-            "to the collection. The server rejects mismatched discovered and submitted counts. Location is optional; "
+            "subject_context with its authoritative directory URL and a relationship to reviewed_subject. On first "
+            "discovery, submit every member exposed by a finite authoritative directory as an unreviewed subject and "
+            "connect each one to the collection. The server stores that verified manifest. On later reviews, reuse "
+            "the returned collection_id and manifest_revision; do not resubmit the full member list. The server still "
+            "verifies that the reviewed subject belongs to the stored manifest. Location is optional; "
             "never invent facts "
             "or silently geocode coordinates. The experience date defaults to creation time unless experienced_at "
             "is explicit. All context subject types must already be resolved. Existing globally registered fields "
@@ -302,10 +305,13 @@ TOOLS = [
                 "collection_assessment": {
                     "type": "object",
                     "description": (
-                        "Mandatory wider-collection assessment. member requires a collection name, type, "
-                        "authoritative directory URL, discovered count, and submitted_member_refs naming "
-                        "reviewed_subject plus every discovered sibling in subject_context. The server derives the "
-                        "submitted count, requires it to equal discovered_count, and verifies every member relationship. "
+                        "Mandatory wider-collection assessment. The first member save requires a collection name, "
+                        "type, authoritative directory URL, discovered count, and submitted_member_refs naming "
+                        "reviewed_subject plus every discovered sibling in subject_context. The server validates and "
+                        "stores that manifest. Later member saves should pass collection_id and manifest_revision only; "
+                        "the server reuses the stored manifest and verifies the reviewed subject against it. Set "
+                        "refresh_manifest only when deliberately replacing the stored manifest, in which case the full "
+                        "collection is required again. "
                         "independent requires evidence_sources or search attempts. unavailable requires "
                         "unavailability_kind, attempts and a reason, and is only for genuine collection-identity or "
                         "authoritative-source failure. It is rejected when collection signals are already known or "
@@ -317,6 +323,9 @@ TOOLS = [
                             "type": "string",
                             "enum": ["member", "independent", "unavailable", "ambiguous"],
                         },
+                        "collection_id": {"type": "string", "format": "uuid"},
+                        "manifest_revision": {"type": "integer", "minimum": 1},
+                        "refresh_manifest": {"type": "boolean", "default": False},
                         "collection_name": {"type": "string", "minLength": 1},
                         "collection_type": {"type": "string", "minLength": 1},
                         "directory_url": {"type": "string", "minLength": 1},
@@ -962,6 +971,17 @@ def _enrich_subject(db, principal, args):
         db, subject, context_payload,
         client_id=client_id, owner_id=principal.user_id, commit=False,
     )
+    collection_assessment, collection_reference = _persist_collection_manifest(
+        db, collection_assessment, subject, context_payload, context,
+        primary_ref="subject",
+    )
+    updated_provenance = deepcopy(subject.provenance_json or {})
+    updated_provenance["enrichment_checks"][args["idempotency_key"]][
+        "collection_assessment"
+    ] = collection_assessment.model_dump(mode="json")
+    subject.provenance_json = updated_provenance
+    db.add(subject)
+    db.flush()
     related_changed = any(
         item.get("created") or item.get("fields_added")
         for item in context["subjects"] + context["relationships"]
@@ -976,6 +996,7 @@ def _enrich_subject(db, principal, args):
         "conflicts_preserved": conflicts,
         "identifiers": subject.identifiers_json, "attributes": subject.attributes_json,
         "provenance": subject.provenance_json, "subject_context": context,
+        "collection_reference": collection_reference,
     }
     finish_idempotent_write(
         db, client_id=client_id, key=f"subject-enrichment:{args['idempotency_key']}",
@@ -1230,6 +1251,10 @@ _COLLECTION_RELATIONSHIPS = {
     "branch_of", "location_of", "member_of", "owned_by", "part_of",
     "subsidiary_of", "variant_of",
 }
+_COLLECTION_MEMBERSHIP_RELATIONSHIPS = {
+    "branch_of", "location_of", "member_of", "part_of", "variant_of",
+}
+_COLLECTION_MANIFEST_PROVENANCE_KEY = "testgraph_collection_manifest"
 _COLLECTION_OPERATIONAL_EXCUSE_RE = re.compile(
     r"(disproportionate|quick\s+review|too\s+many|too\s+large|"
     r"time[-\s]?consuming|not\s+enough\s+time|inconvenien|"
@@ -1486,6 +1511,215 @@ def _existing_collection_matches(db, collection_subject, directory_url):
     return matches
 
 
+def _collection_member_ids(db, collection_subject_id):
+    relationships = db.scalars(select(SubjectRelationship).where(
+        SubjectRelationship.status == "active",
+        SubjectRelationship.relationship.in_(_COLLECTION_MEMBERSHIP_RELATIONSHIPS),
+        or_(
+            SubjectRelationship.source_subject_id == collection_subject_id,
+            SubjectRelationship.target_subject_id == collection_subject_id,
+        ),
+    )).all()
+    return {
+        relationship.target_subject_id
+        if relationship.source_subject_id == collection_subject_id
+        else relationship.source_subject_id
+        for relationship in relationships
+    }
+
+
+def _collection_subject_candidates(db, assessment):
+    if db is None:
+        return []
+    if assessment.collection_id is not None:
+        subject = db.get(V2Subject, assessment.collection_id)
+        return [subject] if subject and subject.deleted_at is None else []
+    if not assessment.collection_name and not assessment.directory_url:
+        return []
+    candidates = db.scalars(select(V2Subject).where(
+        V2Subject.deleted_at.is_(None)
+    )).all()
+    result = []
+    for candidate in candidates:
+        name_matches = (
+            not assessment.collection_name
+            or candidate.name.strip().casefold()
+            == assessment.collection_name.strip().casefold()
+        )
+        directory_matches = (
+            not assessment.directory_url
+            or _contains_exact_value(
+                {
+                    "identifiers": candidate.identifiers_json or {},
+                    "attributes": candidate.attributes_json or {},
+                    "provenance": candidate.provenance_json or {},
+                },
+                assessment.directory_url,
+            )
+        )
+        if name_matches and directory_matches:
+            result.append(candidate)
+    return result
+
+
+def _manifest_hash(source_manifest, member_subject_ids):
+    value = {
+        "source_manifest": source_manifest,
+        "member_subject_ids": sorted(str(item) for item in member_subject_ids),
+    }
+    encoded = json.dumps(
+        value, sort_keys=True, separators=(",", ":"), default=str
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _legacy_collection_manifest(db, collection_subject, assessment):
+    member_ids = _collection_member_ids(db, collection_subject.id)
+    experiences = db.scalars(select(V2Experience).where(
+        V2Experience.deleted_at.is_(None)
+    ).order_by(V2Experience.created_at.desc())).all()
+    for experience in experiences:
+        raw = (experience.provenance or {}).get("collection_assessment") or {}
+        if raw.get("status") != "member" or not raw.get("source_manifest"):
+            continue
+        if assessment.collection_name and (
+            str(raw.get("collection_name", "")).strip().casefold()
+            != assessment.collection_name.strip().casefold()
+        ):
+            continue
+        if assessment.directory_url and raw.get("directory_url") != assessment.directory_url:
+            continue
+        discovered_count = raw.get("discovered_count")
+        submitted_refs = raw.get("submitted_member_refs") or []
+        if (
+            not isinstance(discovered_count, int)
+            or len(submitted_refs) != discovered_count
+            or len(member_ids) != discovered_count
+            or experience.subject_id not in member_ids
+        ):
+            continue
+        return {
+            "status": "verified",
+            "revision": 1,
+            "collection_id": str(collection_subject.id),
+            "collection_name": raw.get("collection_name") or collection_subject.name,
+            "collection_type": raw.get("collection_type"),
+            "directory_url": raw.get("directory_url"),
+            "discovered_count": discovered_count,
+            "member_subject_ids": sorted(str(item) for item in member_ids),
+            "source_manifest": raw.get("source_manifest"),
+            "evidence_sources": raw.get("evidence_sources") or [],
+            "manifest_hash": _manifest_hash(raw.get("source_manifest"), member_ids),
+            "verified_at": raw.get("recorded_at") or experience.created_at.isoformat(),
+            "legacy_backfill": True,
+        }
+    return None
+
+
+def _stored_collection_manifest(db, assessment):
+    candidates = _collection_subject_candidates(db, assessment)
+    if len(candidates) != 1:
+        return None, candidates
+    collection_subject = candidates[0]
+    state = (collection_subject.provenance_json or {}).get(
+        _COLLECTION_MANIFEST_PROVENANCE_KEY
+    )
+    if not isinstance(state, dict) or state.get("status") != "verified":
+        state = _legacy_collection_manifest(db, collection_subject, assessment)
+    if not state:
+        return None, candidates
+    member_ids = {str(item) for item in _collection_member_ids(db, collection_subject.id)}
+    stored_ids = {str(item) for item in state.get("member_subject_ids") or []}
+    if (
+        not stored_ids
+        or len(stored_ids) != state.get("discovered_count")
+        or not stored_ids.issubset(member_ids)
+    ):
+        return None, candidates
+    state = {**state, "member_subject_ids": sorted(stored_ids)}
+    return state, candidates
+
+
+def _reviewed_subject_for_collection_check(db, args):
+    if db is None or not args.get("subject_type") or not args.get("canonical_key"):
+        return None
+    subject_type = resolve_subject_type(db, args["subject_type"])
+    if not subject_type:
+        return None
+    return db.scalar(select(V2Subject).where(
+        V2Subject.subject_type_id == subject_type.id,
+        V2Subject.canonical_key == args["canonical_key"],
+        V2Subject.deleted_at.is_(None),
+    ))
+
+
+def _reuse_collection_manifest(db, assessment, args):
+    state, candidates = _stored_collection_manifest(db, assessment)
+    if assessment.collection_id is not None and not candidates:
+        return None, _collection_violation(
+            "collection_manifest_not_found",
+            "Resolve a valid stored collection, or submit a complete new manifest.",
+            field="collection_assessment.collection_id",
+            collection_id=str(assessment.collection_id),
+        )
+    if len(candidates) > 1:
+        return None, _collection_violation(
+            "collection_manifest_ambiguous",
+            "Supply collection_id to select the intended stored collection.",
+            field="collection_assessment.collection_id",
+            candidate_collection_ids=[str(item.id) for item in candidates],
+        )
+    if state is None:
+        return None, None
+    conflicts = {}
+    for field, supplied, stored in (
+        ("collection_name", assessment.collection_name, state.get("collection_name")),
+        ("collection_type", assessment.collection_type, state.get("collection_type")),
+        ("directory_url", assessment.directory_url, state.get("directory_url")),
+        ("discovered_count", assessment.discovered_count, state.get("discovered_count")),
+    ):
+        if supplied is not None and stored is not None and supplied != stored:
+            conflicts[field] = {"supplied": supplied, "stored": stored}
+    if conflicts:
+        return None, _collection_violation(
+            "collection_manifest_conflict",
+            "Use the stored collection facts, or set refresh_manifest and submit a complete replacement manifest.",
+            field="collection_assessment",
+            conflicts=conflicts,
+        )
+    if (
+        assessment.manifest_revision is not None
+        and assessment.manifest_revision != state.get("revision")
+    ):
+        return None, _collection_violation(
+            "collection_manifest_revision_mismatch",
+            "Retry using the current stored manifest revision.",
+            field="collection_assessment.manifest_revision",
+            supplied_revision=assessment.manifest_revision,
+            current_revision=state.get("revision"),
+        )
+    reviewed_subject = _reviewed_subject_for_collection_check(db, args)
+    if reviewed_subject is None or str(reviewed_subject.id) not in set(state["member_subject_ids"]):
+        return None, _collection_violation(
+            "subject_not_in_collection_manifest",
+            "Resolve the subject identity recorded in the stored collection manifest, or refresh the manifest.",
+            field="canonical_key",
+            collection_id=state["collection_id"],
+        )
+    return assessment.model_copy(update={
+        "collection_id": uuid.UUID(state["collection_id"]),
+        "manifest_revision": state["revision"],
+        "refresh_manifest": False,
+        "collection_name": state.get("collection_name"),
+        "collection_type": state.get("collection_type"),
+        "directory_url": state.get("directory_url"),
+        "discovered_count": state.get("discovered_count"),
+        "submitted_member_refs": [],
+        "source_manifest": None,
+        "evidence_sources": [],
+    }), None
+
+
 def _validate_collection_assessment(
     raw, args, enrichment_check, *, primary_ref="reviewed_subject",
     retry_tool="save_experience", attribute_key="subject_attributes",
@@ -1510,6 +1744,17 @@ def _validate_collection_assessment(
         )
 
     violations = []
+    if assessment.status == "member" and not assessment.refresh_manifest and db is not None:
+        reused_assessment, reuse_violation = _reuse_collection_manifest(
+            db, assessment, args
+        )
+        if reuse_violation is not None:
+            return None, _collection_violations_error(
+                [reuse_violation], retry_tool=retry_tool
+            )
+        if reused_assessment is not None:
+            return reused_assessment, None
+
     enrichment_sources = set(enrichment_check.sources)
     unknown_evidence = sorted(
         set(assessment.evidence_sources) - enrichment_sources
@@ -1523,6 +1768,26 @@ def _validate_collection_assessment(
         ))
 
     if assessment.status == "member":
+        if assessment.collection_id is not None and db is not None:
+            stored, candidates = _stored_collection_manifest(db, assessment)
+            if stored is None and candidates:
+                violations.append(_collection_violation(
+                    "collection_manifest_refresh_invalid",
+                    "A refresh requires a previously verified collection manifest.",
+                    field="collection_assessment.collection_id",
+                ))
+            elif (
+                stored is not None
+                and assessment.manifest_revision is not None
+                and assessment.manifest_revision != stored.get("revision")
+            ):
+                violations.append(_collection_violation(
+                    "collection_manifest_revision_mismatch",
+                    "Refresh from the current stored manifest revision.",
+                    field="collection_assessment.manifest_revision",
+                    supplied_revision=assessment.manifest_revision,
+                    current_revision=stored.get("revision"),
+                ))
         missing = [
             name for name, value in {
                 "collection_name": assessment.collection_name,
@@ -1675,7 +1940,7 @@ def _validate_collection_assessment(
         ):
             violations.append(_collection_violation(
                 "collection_member_count_mismatch",
-                "Submit every discovered member before retrying; lazy or future materialisation is not accepted.",
+                "Submit every discovered member for the initial manifest or an explicit refresh. Later reviews should reference the stored collection manifest.",
                 field="collection_assessment.submitted_member_refs",
                 discovered_count=assessment.discovered_count,
                 submitted_count=len(submitted_refs),
@@ -1784,6 +2049,88 @@ def _validate_collection_assessment(
     return assessment, None
 
 
+def _collection_subject_from_context(db, assessment, context_payload, context_result):
+    if assessment.collection_id is not None:
+        return db.get(V2Subject, assessment.collection_id)
+    subjects_by_ref = {
+        item.ref: item for item in context_payload.subjects
+    }
+    for result in context_result.get("subjects", []):
+        payload = subjects_by_ref.get(result.get("ref"))
+        if (
+            payload is not None
+            and assessment.collection_name
+            and payload.name.strip().casefold()
+            == assessment.collection_name.strip().casefold()
+        ):
+            return db.get(V2Subject, uuid.UUID(result["id"]))
+    return None
+
+
+def _persist_collection_manifest(
+    db, assessment, primary_subject, context_payload, context_result,
+    *, primary_ref="reviewed_subject",
+):
+    if assessment.status != "member":
+        return assessment, None
+    collection_subject = _collection_subject_from_context(
+        db, assessment, context_payload, context_result
+    )
+    if collection_subject is None:
+        return assessment, None
+
+    if assessment.source_manifest is None:
+        state, _ = _stored_collection_manifest(db, assessment)
+        if state is None:
+            return assessment, None
+    else:
+        refs = {primary_ref: primary_subject}
+        for result in context_result.get("subjects", []):
+            refs[result["ref"]] = db.get(V2Subject, uuid.UUID(result["id"]))
+        member_ids = {
+            refs[ref].id for ref in assessment.submitted_member_refs
+            if ref in refs and refs[ref] is not None
+        }
+        previous = (collection_subject.provenance_json or {}).get(
+            _COLLECTION_MANIFEST_PROVENANCE_KEY
+        ) or {}
+        revision = int(previous.get("revision", 0)) + 1
+        manifest_json = assessment.source_manifest.model_dump(mode="json")
+        state = {
+            "status": "verified",
+            "revision": revision,
+            "collection_id": str(collection_subject.id),
+            "collection_name": assessment.collection_name,
+            "collection_type": assessment.collection_type,
+            "directory_url": assessment.directory_url,
+            "discovered_count": assessment.discovered_count,
+            "member_subject_ids": sorted(str(item) for item in member_ids),
+            "source_manifest": manifest_json,
+            "evidence_sources": assessment.evidence_sources,
+            "manifest_hash": _manifest_hash(manifest_json, member_ids),
+            "verified_at": datetime.now(timezone.utc).isoformat(),
+        }
+
+    provenance = deepcopy(collection_subject.provenance_json or {})
+    provenance[_COLLECTION_MANIFEST_PROVENANCE_KEY] = state
+    collection_subject.provenance_json = provenance
+    db.add(collection_subject)
+    db.flush()
+    updated = assessment.model_copy(update={
+        "collection_id": collection_subject.id,
+        "manifest_revision": state["revision"],
+        "refresh_manifest": False,
+    })
+    reference = {
+        "collection_id": str(collection_subject.id),
+        "manifest_revision": state["revision"],
+        "manifest_hash": state["manifest_hash"],
+        "discovered_count": state["discovered_count"],
+        "verified_at": state["verified_at"],
+    }
+    return updated, reference
+
+
 def _save_experience(db, principal, args):
     if args.get("user_approved") is not True:
         return _error("Explicit user approval is required before saving a direct review")
@@ -1836,6 +2183,9 @@ def _save_experience(db, principal, args):
         db, subject, context_payload,
         client_id=client_id, owner_id=principal.user_id,
     )
+    collection_assessment, collection_reference = _persist_collection_manifest(
+        db, collection_assessment, subject, context_payload, context
+    )
     exp = create_experience(
         db,
         ExperienceCreate(
@@ -1857,6 +2207,7 @@ def _save_experience(db, principal, args):
         "normalization_log": exp.normalization_log, "subject_context": context,
         "subject_enrichment_check": exp.provenance.get("subject_enrichment_check"),
         "collection_assessment": exp.provenance.get("collection_assessment"),
+        "collection_reference": collection_reference,
     }
     finish_idempotent_write(db, client_id=client_id, key=f"experience:{args['idempotency_key']}", payload_hash=payload_hash, response_body=body)
     return _result(body)
@@ -1911,7 +2262,7 @@ async def mcp_v2(request: Request, db: Session = Depends(get_db)):
     if method and method.startswith("notifications/"):
         return Response(status_code=202)
     if method == "initialize":
-        result = {"protocolVersion": PROTOCOL_VERSION, "capabilities": {"tools": {"listChanged": False}}, "serverInfo": {"name": "TasteGraph v2", "version": SERVER_VERSION}, "instructions": "TestGraph is AI-native: use your full available reasoning, web retrieval and tool capabilities as its open-ended semantic and discovery engine. For unfamiliar subjects, derive useful types, fields, identities, relationships and likely future searches from meaning and evidence; do not wait for TestGraph to prescribe a domain-specific form. TestGraph supplies stable graph primitives, persistence and server-side verification, while you supply the open-ended intelligence. Before saving an experience, identify exactly what was experienced and inspect vocabulary_index. Reuse an existing canonical type or alias whenever possible. If the specific type is absent, reason from meaning to a broad-to-specific hierarchy and call resolve_subject_hierarchy; never create a type merely because it arrived first. Before saving, perform the generic subject enrichment check and include its result in subject_enrichment_check. Use authoritative or primary sources where available, but do not require a website, location or any domain-specific field. Reconcile every consulted source with the request paths it populated, or explain why it yielded no stored discovery. For every applied path, declare its generic retrieval_uses purpose and likely query examples: identity, likely query, location, classification, relationship, comparison or verification. Do not store facts merely because a source publishes them; omit facts with no plausible future TestGraph retrieval or graph use. When the subject has its own canonical URL, store it as an identifier. Perform routine checking and retry automatically; do not ask the user unless identity is genuinely ambiguous. If enrichment cannot be found, use unavailable with a reason and the searches attempted. Register information you may realistically search for later against what you save in TestGraph; do not collect facts merely because they are available. Treat enrichment as shared graph work: accept substantial discovery work now because captured knowledge is reusable in later searches, and users benefit reciprocally from useful enrichment contributed for other subjects. Save discoveries as unreviewed subject_context with generic relationships and source provenance, while attaching the review only to the exact subject experienced. Always submit collection_assessment. Collection unavailable is only for a genuine failure to identify the collection or find/access authoritative evidence; it is invalid when collection signals are known and never valid because the collection is large, inconvenient, slow, effortful, part of a quick review or deferred until later. When the subject belongs to a wider collection, do not stop at one company landing page. Use web search to discover every authoritative collection surface, including pagination, sitemaps, official APIs, regional directories and member pages. Return a complete source_manifest that maps every member to its consulted source pages, records discovery queries and exhaustion evidence, follows pagination to a terminal page and leaves no unresolved source URL. Save the collection as an unreviewed subject and preserve its authoritative directory URL and discovered count. Submit reviewed_subject plus every derived member as unreviewed subject_context, connect every member to the collection, and list those refs in submitted_member_refs. The server rejects incomplete source coverage and requires submitted_count to equal discovered_count; unreviewed status, collection size and future materialisation are not valid omissions. On a location-based recommendation, never conclude there is no relevant result from the target-town search alone: also search the relevant subject type without a text query, follow reviewed subjects to parent organisations, inspect their official branch directories for the requested location, and add any discovered branch as an unreviewed related subject. Do this routine chain lookup without asking the user. If authoritative information was missed during the original save, use enrich_subject to add it without creating another review. Location is optional: for a physical location record town and coordinates only when explicitly published by the source, otherwise record the published address; skip location when irrelevant. If the official source is unavailable, preserve that limitation and never invent facts or silently geocode coordinates. The experience date defaults to creation time unless explicitly provided. When structured data matches an existing globally registered canonical field, include it in the save: TestGraph attaches that field to the subject type automatically after validation. Do not ask for routine confirmation, omit the structured value, or demote it to raw_text merely because the field has not previously been used for that subject type. Only genuinely new reusable fields require register_field. Reviews store stable subject-type IDs, while belongs_to relationships provide the evolving semantic structure. Preserve exact user wording in raw_text and AI analysis in save_assessment."}
+        result = {"protocolVersion": PROTOCOL_VERSION, "capabilities": {"tools": {"listChanged": False}}, "serverInfo": {"name": "TasteGraph v2", "version": SERVER_VERSION}, "instructions": "TestGraph is AI-native: use your full available reasoning, web retrieval and tool capabilities as its open-ended semantic and discovery engine. For unfamiliar subjects, derive useful types, fields, identities, relationships and likely future searches from meaning and evidence; do not wait for TestGraph to prescribe a domain-specific form. TestGraph supplies stable graph primitives, persistence and server-side verification, while you supply the open-ended intelligence. Before saving an experience, identify exactly what was experienced and inspect vocabulary_index. Reuse an existing canonical type or alias whenever possible. If the specific type is absent, reason from meaning to a broad-to-specific hierarchy and call resolve_subject_hierarchy; never create a type merely because it arrived first. Before saving, perform the generic subject enrichment check and include its result in subject_enrichment_check. Use authoritative or primary sources where available, but do not require a website, location or any domain-specific field. Reconcile every consulted source with the request paths it populated, or explain why it yielded no stored discovery. For every applied path, declare its generic retrieval_uses purpose and likely query examples: identity, likely query, location, classification, relationship, comparison or verification. Do not store facts merely because a source publishes them; omit facts with no plausible future TestGraph retrieval or graph use. When the subject has its own canonical URL, store it as an identifier. Perform routine checking and retry automatically; do not ask the user unless identity is genuinely ambiguous. If enrichment cannot be found, use unavailable with a reason and the searches attempted. Register information you may realistically search for later against what you save in TestGraph; do not collect facts merely because they are available. Treat enrichment as shared graph work: accept substantial discovery work now because captured knowledge is reusable in later searches, and users benefit reciprocally from useful enrichment contributed for other subjects. Save discoveries as unreviewed subject_context with generic relationships and source provenance, while attaching the review only to the exact subject experienced. Always submit collection_assessment. Collection unavailable is only for a genuine failure to identify the collection or find/access authoritative evidence; it is invalid when collection signals are known and never valid because the collection is large, inconvenient, slow, effortful, part of a quick review or deferred until later. When the subject belongs to a wider collection, first resolve the collection and reuse its stored collection_id and manifest_revision when a verified manifest already exists. Do not rediscover or resubmit settled members for an ordinary later review. Only when no verified manifest exists, or when refresh_manifest is explicitly requested, discover every authoritative collection surface, including pagination, sitemaps, official APIs, regional directories and member pages. For that initial discovery or explicit refresh, return a complete source_manifest that maps every member to its consulted source pages, records discovery queries and exhaustion evidence, follows pagination to a terminal page and leaves no unresolved source URL. Save the collection as an unreviewed subject and preserve its authoritative directory URL and discovered count. Submit reviewed_subject plus every derived member as unreviewed subject_context, connect every member to the collection, and list those refs in submitted_member_refs. The server rejects incomplete source coverage and requires submitted_count to equal discovered_count for initial manifests and explicit refreshes. On a location-based recommendation, never conclude there is no relevant result from the target-town search alone: also search the relevant subject type without a text query, follow reviewed subjects to parent organisations, inspect their official branch directories for the requested location, and add any discovered branch as an unreviewed related subject. Do this routine chain lookup without asking the user. If authoritative information was missed during the original save, use enrich_subject to add it without creating another review. Location is optional: for a physical location record town and coordinates only when explicitly published by the source, otherwise record the published address; skip location when irrelevant. If the official source is unavailable, preserve that limitation and never invent facts or silently geocode coordinates. The experience date defaults to creation time unless explicitly provided. When structured data matches an existing globally registered canonical field, include it in the save: TestGraph attaches that field to the subject type automatically after validation. Do not ask for routine confirmation, omit the structured value, or demote it to raw_text merely because the field has not previously been used for that subject type. Only genuinely new reusable fields require register_field. Reviews store stable subject-type IDs, while belongs_to relationships provide the evolving semantic structure. Preserve exact user wording in raw_text and AI analysis in save_assessment."}
     elif method == "ping":
         result = {}
     elif method == "tools/list":

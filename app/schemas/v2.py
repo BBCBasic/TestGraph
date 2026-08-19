@@ -88,6 +88,9 @@ class CollectionSourceManifest(StrictModel):
 
 class CollectionAssessment(StrictModel):
     status: Literal["member", "independent", "unavailable", "ambiguous"]
+    collection_id: UUID | None = None
+    manifest_revision: int | None = Field(default=None, ge=1)
+    refresh_manifest: bool = False
     collection_name: str | None = Field(default=None, min_length=1, max_length=240)
     collection_type: str | None = Field(default=None, min_length=1, max_length=160)
     directory_url: str | None = Field(default=None, min_length=1)
