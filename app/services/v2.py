@@ -252,7 +252,7 @@ def create_assessment(db: Session, payload: AssessmentCreate, *, client_id: str,
 def vocabulary_index(db: Session) -> dict:
     types = list(db.scalars(select(SubjectType).order_by(SubjectType.canonical_name)).all())
     aliases = list(db.scalars(select(SubjectTypeAlias).order_by(SubjectTypeAlias.alias)).all())
-    relationships = list(db.scalars(select(TypeRelationship).order_by(TypeRelationship.relationship)).all())
+    relationships = list(db.scalars(select(TypeRelationship).where(TypeRelationship.status == "active").order_by(TypeRelationship.relationship)).all())
     fields = list(db.scalars(select(FieldDefinition).order_by(FieldDefinition.canonical_name)).all())
     by_id = {x.id: x for x in types}
     return {
@@ -269,7 +269,8 @@ def descendant_type_ids(db: Session, root: SubjectType) -> set[uuid.UUID]:
     found, frontier = {root.id}, {root.id}
     while frontier:
         rows = list(db.scalars(select(TypeRelationship).where(
-            TypeRelationship.relationship == "belongs_to", TypeRelationship.target_type_id.in_(frontier)
+            TypeRelationship.relationship == "belongs_to", TypeRelationship.status == "active",
+            TypeRelationship.target_type_id.in_(frontier)
         )).all())
         new = {row.source_type_id for row in rows} - found
         found |= new; frontier = new
