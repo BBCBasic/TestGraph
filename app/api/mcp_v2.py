@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import uuid
 
 from fastapi import APIRouter, Depends, Request, Response
@@ -191,7 +192,8 @@ TOOLS = [
                             "type": "object",
                             "description": (
                                 "Map each source to the save-request paths populated from it, for example "
-                                "{'https://example.test': ['identifiers.website', 'subject_attributes.address']}."
+                                "{'https://example.test': ['identifiers.website', "
+                                "'subject_context.subjects[0].identifiers.branch_directory']}."
                             ),
                             "additionalProperties": {
                                 "type": "array", "minItems": 1,
@@ -545,8 +547,20 @@ def _enrich_subject(db, principal, args):
     return _result(body)
 
 
+def _request_path_parts(path):
+    parts = []
+    for segment in path.split("."):
+        match = re.fullmatch(r"([^\[\]]+)(?:\[(\d+)\])?", segment)
+        if match is None:
+            return None
+        parts.append(match.group(1))
+        if match.group(2) is not None:
+            parts.append(match.group(2))
+    return parts
+
+
 def _request_path_exists(args, path):
-    parts = path.split(".")
+    parts = _request_path_parts(path)
     if not parts or parts[0] not in {
         "identifiers", "subject_attributes", "subject_provenance", "subject_context",
     }:
