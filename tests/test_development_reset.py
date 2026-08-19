@@ -7,6 +7,7 @@ from app.models.entities import (
     SchemaDefinition,
     User,
 )
+from app.models.v2 import SubjectRelationship, V2Subject
 from scripts.reset_user_data import CONTENT_MODELS
 
 
@@ -49,6 +50,11 @@ def test_development_reset_preserves_authentication_and_schema_models():
         CapabilityCredential,
     }
     assert preserved_models.isdisjoint(CONTENT_MODELS)
+
+
+def test_development_reset_deletes_subject_relationships_before_subjects():
+    assert SubjectRelationship in CONTENT_MODELS
+    assert CONTENT_MODELS.index(SubjectRelationship) < CONTENT_MODELS.index(V2Subject)
 
 
 def test_development_reset_calls_shared_reset_service(client, monkeypatch):
