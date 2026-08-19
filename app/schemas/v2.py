@@ -57,7 +57,8 @@ class CollectionAssessment(StrictModel):
     collection_name: str | None = Field(default=None, min_length=1, max_length=240)
     collection_type: str | None = Field(default=None, min_length=1, max_length=160)
     directory_url: str | None = Field(default=None, min_length=1)
-    reported_member_count: int | None = Field(default=None, ge=2)
+    discovered_count: int | None = Field(default=None, ge=2)
+    submitted_member_refs: list[str] = []
     evidence_sources: list[str] = []
     attempts: list[str] = []
     reason: str | None = Field(default=None, min_length=1)
