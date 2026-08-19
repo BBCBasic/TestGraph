@@ -52,6 +52,10 @@ class TypeRelationship(Base):
     relationship: Mapped[str] = mapped_column(String(60), default="belongs_to", index=True)
     target_type_id: Mapped[uuid.UUID] = mapped_column(UuidType, ForeignKey("subject_types.id"), index=True)
     source: Mapped[str] = mapped_column(String(200), default="system")
+    status: Mapped[str] = mapped_column(String(20), default="active", index=True)
+    retired_reason: Mapped[str | None] = mapped_column(Text)
+    retired_by: Mapped[str | None] = mapped_column(String(200))
+    retired_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
 
 

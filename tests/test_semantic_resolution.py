@@ -6,7 +6,7 @@ from sqlalchemy.orm import Session
 
 from app.db.base import Base
 from app.models.v2 import SubjectType, TypeRelationship
-from app.services.semantic import add_semantic_relationship, resolve_subject_hierarchy
+from app.services.semantic import add_semantic_relationship, resolve_subject_hierarchy, retire_semantic_relationship
 from app.services.v2 import resolve_subject_type, vocabulary_index
 
 
@@ -114,3 +114,45 @@ def test_hundred_diverse_leaf_insertions_are_order_independent():
     assert all(signature == signatures[0] for signature in signatures[1:])
     assert len(signatures[0][0]) == 105
     assert len(signatures[0][1]) == 100
+
+
+def test_retired_relationship_disappears_without_changing_type_ids():
+    with _new_session() as db:
+        resolve_subject_hierarchy(db, ["transportation", "makerspace"], created_by="first-ai")
+        makerspace = resolve_subject_type(db, "makerspace")
+        transportation = resolve_subject_type(db, "transportation")
+        makerspace_id = makerspace.id
+        transportation_id = transportation.id
+
+        retired = retire_semantic_relationship(
+            db, makerspace, "belongs_to", transportation,
+            reason="Makerspaces are not a kind of transportation",
+            retired_by="human-admin",
+        )
+
+        assert retired.status == "retired"
+        assert retired.retired_reason == "Makerspaces are not a kind of transportation"
+        assert resolve_subject_type(db, "makerspace").id == makerspace_id
+        assert resolve_subject_type(db, "transportation").id == transportation_id
+        assert vocabulary_index(db)["relationships"] == []
+
+
+def test_another_ai_cannot_recreate_a_retired_relationship():
+    with _new_session() as db:
+        resolve_subject_hierarchy(db, ["transportation", "makerspace"], created_by="first-ai")
+        makerspace = resolve_subject_type(db, "makerspace")
+        transportation = resolve_subject_type(db, "transportation")
+        retire_semantic_relationship(
+            db, makerspace, "belongs_to", transportation,
+            reason="Incorrect classification",
+            retired_by="human-admin",
+        )
+
+        with pytest.raises(ValueError, match="previously rejected"):
+            add_semantic_relationship(
+                db, makerspace, "belongs_to", transportation, source="second-ai"
+            )
+
+        rows = list(db.scalars(select(TypeRelationship)).all())
+        assert len(rows) == 1
+        assert rows[0].status == "retired"

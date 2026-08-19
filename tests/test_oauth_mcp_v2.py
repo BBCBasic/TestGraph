@@ -23,4 +23,4 @@ def test_oauth_mcp_v2_resource_flow(client,auth,monkeypatch):
     initialized=_rpc(client,"/mcp-v2","initialize",token=access)
     assert initialized.json()["result"]["serverInfo"]["version"]=="3.1.0-alpha"
     tools=_rpc(client,"/mcp-v2","tools/list",token=access,call_id=2).json()["result"]["tools"]
-    assert {tool["name"] for tool in tools}=={"search","fetch","vocabulary_index","resolve_subject_type","resolve_subject_hierarchy","register_subject_type_alias","set_type_relationship","register_field","save_experience","save_assessment"}
+    assert {tool["name"] for tool in tools}=={"search","fetch","vocabulary_index","resolve_subject_type","resolve_subject_hierarchy","register_subject_type_alias","set_type_relationship","retire_type_relationship","register_field","save_experience","save_assessment"}
