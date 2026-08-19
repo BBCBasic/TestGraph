@@ -550,7 +550,7 @@ def _enrich_subject(db, principal, args):
 def _request_path_parts(path):
     parts = []
     for segment in path.split("."):
-        match = re.fullmatch(r"([^\\[\\]]+)(?:\\[(\\d+)\\])?", segment)
+        match = re.fullmatch(r"([^\[\]]+)(?:\[(\d+)\])?", segment)
         if match is None:
             return None
         parts.append(match.group(1))
