@@ -23,7 +23,7 @@ from app.services.write_safety import begin_idempotent_write, finish_idempotent_
 
 router = APIRouter()
 PROTOCOL_VERSION = "2025-06-18"
-SERVER_VERSION = "3.2.1-alpha"
+SERVER_VERSION = "3.3.0-alpha"
 READ_SECURITY = [{"type": "oauth2", "scopes": ["reviews:read"]}]
 WRITE_SECURITY = [{"type": "oauth2", "scopes": ["reviews:write"]}]
 
@@ -68,12 +68,83 @@ TOOLS = [
     {"name": "retire_type_relationship", "title": "Retire an incorrect subject classification", "description": "Retire one exact semantic relationship while preserving the subject type, subjects and reviews. The retired edge remains as a rejection tombstone, so another AI cannot silently recreate it.", "inputSchema": {"type": "object", "properties": {"source_type": {"type": "string"}, "relationship": {"type": "string", "default": "belongs_to"}, "target_type": {"type": "string"}, "reason": {"type": "string", "minLength": 1}}, "required": ["source_type", "target_type", "reason"], "additionalProperties": False}, **_security(WRITE_SECURITY), "annotations": {"readOnlyHint": False, "destructiveHint": True, "idempotentHint": True, "openWorldHint": False}},
     {"name": "register_field", "title": "Register a reusable field", "description": "Register a genuinely new globally canonical field, or explicitly pre-attach one to subject types. Do not ask the user for routine confirmation to reuse an existing canonical field: a valid existing field is attached automatically on first use. Prefer raw_text for one-off narrative detail.", "inputSchema": {"type": "object", "properties": {"canonical_name": {"type": "string"}, "json_schema": {"type": "object", "additionalProperties": True}, "description": {"type": "string"}, "aliases": {"type": "array", "items": {"type": "string"}}, "subject_types": {"type": "array", "items": {"type": "string"}}}, "required": ["canonical_name", "json_schema", "subject_types"], "additionalProperties": False}, **_security(WRITE_SECURITY), "annotations": {"readOnlyHint": False, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False}},
     {
+        "name": "enrich_subject",
+        "title": "Enrich an existing subject",
+        "description": (
+            "Add missing identifiers, attributes, provenance and related unreviewed subjects to an existing "
+            "subject without creating another review. Use this proactively when authoritative information was "
+            "missed during the original save. Search for the official website yourself; do not ask the user for "
+            "a URL unless automatic lookup is unavailable or the identity is genuinely ambiguous. Existing "
+            "conflicting values are preserved rather than silently overwritten."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "subject_type": {"type": "string"},
+                "canonical_key": {"type": "string"},
+                "identifiers": {"type": "object", "additionalProperties": True, "default": {}},
+                "attributes": {"type": "object", "additionalProperties": True, "default": {}},
+                "provenance": {"type": "object", "additionalProperties": True, "default": {}},
+                "subject_context": {
+                    "type": "object",
+                    "description": (
+                        "Optional related subjects and relationships. Use subject as the reserved ref "
+                        "for the existing subject being enriched."
+                    ),
+                    "properties": {
+                        "subjects": {
+                            "type": "array", "maxItems": 50, "default": [],
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "ref": {"type": "string", "pattern": "^[a-zA-Z0-9_-]+$"},
+                                    "subject_type": {"type": "string"},
+                                    "name": {"type": "string"},
+                                    "canonical_key": {"type": "string"},
+                                    "identifiers": {"type": "object", "additionalProperties": True, "default": {}},
+                                    "attributes": {"type": "object", "additionalProperties": True, "default": {}},
+                                    "provenance": {"type": "object", "additionalProperties": True, "default": {}},
+                                },
+                                "required": ["ref", "subject_type", "name", "canonical_key"],
+                                "additionalProperties": False,
+                            },
+                        },
+                        "relationships": {
+                            "type": "array", "maxItems": 100, "default": [],
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "source_ref": {"type": "string"},
+                                    "relationship": {"type": "string"},
+                                    "target_ref": {"type": "string"},
+                                    "provenance": {"type": "object", "additionalProperties": True, "default": {}},
+                                },
+                                "required": ["source_ref", "relationship", "target_ref"],
+                                "additionalProperties": False,
+                            },
+                        },
+                    },
+                    "additionalProperties": False,
+                },
+                "idempotency_key": {"type": "string", "minLength": 8, "maxLength": 200},
+            },
+            "required": ["subject_type", "canonical_key", "idempotency_key"],
+            "additionalProperties": False,
+        },
+        **_security(WRITE_SECURITY),
+        "annotations": {
+            "readOnlyHint": False, "destructiveHint": False,
+            "idempotentHint": True, "openWorldHint": False,
+        },
+    },
+    {
         "name": "save_experience",
         "title": "Save an approved review",
         "description": (
             "Save a review against an already-resolved stable subject type. Before saving, determine whether "
-            "the subject has an official website; when one is available, inspect it for stable identity, branches "
-            "and related subjects. Add discoveries in subject_context as unreviewed subjects with generic "
+            "the subject has an official website; when one is available, inspect it yourself for stable identity, "
+            "branches and related subjects. Do not ask the user for a URL unless automatic lookup is unavailable "
+            "or the identity is genuinely ambiguous. Add discoveries in subject_context as unreviewed subjects with generic "
             "relationships and source provenance, while attaching the review only to what was actually experienced. "
             "Location is optional. For physical locations, record the town and coordinates only when explicitly "
             "published by the source; otherwise record the published address. Skip location when it is irrelevant. "
@@ -265,6 +336,56 @@ def _fetch(db, principal, args):
     return _result({"id": str(e.id), "record_type": e.record_type, "subject": {"id": str(s.id), "name": s.name, "canonical_key": s.canonical_key, "subject_type_id": str(t.id), "subject_type": t.canonical_name, "identifiers": s.identifiers_json, "attributes": s.attributes_json, "provenance": s.provenance_json}, "headline": e.headline, "summary": e.summary, "raw_text": e.raw_text, "structured_data": e.structured_data, "submitted_data": e.submitted_data, "normalization_log": e.normalization_log, "provenance": e.provenance, "assessments": [{"id": str(a.id), "assessment_type": a.assessment_type, "evidence": a.evidence_json, "analysis": a.analysis_json, "conclusion": a.conclusion, "confidence": a.confidence, "provenance": a.provenance} for a in assessments], "created_at": e.created_at.isoformat()})
 
 
+def _enrich_subject(db, principal, args):
+    client_id = f"{principal.client_id}:v3"
+    relevant = {k: v for k, v in args.items() if k != "idempotency_key"}
+    payload_hash, prior = begin_idempotent_write(
+        db, client_id=client_id, key=f"subject-enrichment:{args['idempotency_key']}",
+        payload=relevant,
+    )
+    if prior is not None:
+        return _result(prior)
+    subject_type = resolve_subject_type(db, args["subject_type"])
+    if not subject_type:
+        return _error("Subject type not found")
+    subject = db.scalar(select(V2Subject).where(
+        V2Subject.subject_type_id == subject_type.id,
+        V2Subject.canonical_key == args["canonical_key"],
+        V2Subject.deleted_at.is_(None),
+    ))
+    if not subject:
+        return _error("Subject not found")
+    if not any((
+        args.get("identifiers"), args.get("attributes"), args.get("provenance"),
+        args.get("subject_context"),
+    )):
+        return _error("No subject enrichment was supplied")
+    subject = ensure_subject(
+        db,
+        SubjectEnsure(
+            subject_type=subject_type.canonical_name, name=subject.name,
+            canonical_key=subject.canonical_key, identifiers=args.get("identifiers", {}),
+            attributes=args.get("attributes", {}), provenance=args.get("provenance", {}),
+        ),
+        client_id,
+    )
+    context = ensure_subject_context(
+        db, subject, SubjectContextEnsure.model_validate(args.get("subject_context") or {}),
+        client_id=client_id,
+    )
+    body = {
+        "enriched": True, "subject_id": str(subject.id), "subject_type": subject_type.canonical_name,
+        "canonical_key": subject.canonical_key, "identifiers": subject.identifiers_json,
+        "attributes": subject.attributes_json, "provenance": subject.provenance_json,
+        "subject_context": context,
+    }
+    finish_idempotent_write(
+        db, client_id=client_id, key=f"subject-enrichment:{args['idempotency_key']}",
+        payload_hash=payload_hash, response_body=body,
+    )
+    return _result(body)
+
+
 def _save_experience(db, principal, args):
     if args.get("user_approved") is not True:
         return _error("Explicit user approval is required before saving a direct review")
@@ -336,14 +457,14 @@ async def mcp_v2(request: Request, db: Session = Depends(get_db)):
     if method and method.startswith("notifications/"):
         return Response(status_code=202)
     if method == "initialize":
-        result = {"protocolVersion": PROTOCOL_VERSION, "capabilities": {"tools": {"listChanged": False}}, "serverInfo": {"name": "TasteGraph v2", "version": SERVER_VERSION}, "instructions": "Before saving an experience, identify exactly what was experienced and inspect vocabulary_index. Reuse an existing canonical type or alias whenever possible. If the specific type is absent, reason from meaning to a broad-to-specific hierarchy and call resolve_subject_hierarchy; never create a type merely because it arrived first. Before saving, determine whether the subject has an official website. When one is available, inspect it for stable identity, branches and related subjects. Save discoveries as unreviewed subject_context with generic relationships and source provenance, while attaching the review only to the exact subject experienced. Location is optional: for a physical location record town and coordinates only when explicitly published by the source, otherwise record the published address; skip location when irrelevant. If the official source is unavailable, preserve that limitation and never invent facts or silently geocode coordinates. The experience date defaults to creation time unless explicitly provided. When structured data matches an existing globally registered canonical field, include it in the save: TestGraph attaches that field to the subject type automatically after validation. Do not ask for routine confirmation, omit the structured value, or demote it to raw_text merely because the field has not previously been used for that subject type. Only genuinely new reusable fields require register_field. Reviews store stable subject-type IDs, while belongs_to relationships provide the evolving semantic structure. Preserve exact user wording in raw_text and AI analysis in save_assessment."}
+        result = {"protocolVersion": PROTOCOL_VERSION, "capabilities": {"tools": {"listChanged": False}}, "serverInfo": {"name": "TasteGraph v2", "version": SERVER_VERSION}, "instructions": "Before saving an experience, identify exactly what was experienced and inspect vocabulary_index. Reuse an existing canonical type or alias whenever possible. If the specific type is absent, reason from meaning to a broad-to-specific hierarchy and call resolve_subject_hierarchy; never create a type merely because it arrived first. Before saving, determine whether the subject has an official website. When one is available, inspect it for stable identity, branches and related subjects. Do this lookup yourself; do not ask the user for a website unless automatic lookup is unavailable or the identity is genuinely ambiguous. Save discoveries as unreviewed subject_context with generic relationships and source provenance, while attaching the review only to the exact subject experienced. If authoritative information was missed during the original save, use enrich_subject to add it without creating another review. Location is optional: for a physical location record town and coordinates only when explicitly published by the source, otherwise record the published address; skip location when irrelevant. If the official source is unavailable, preserve that limitation and never invent facts or silently geocode coordinates. The experience date defaults to creation time unless explicitly provided. When structured data matches an existing globally registered canonical field, include it in the save: TestGraph attaches that field to the subject type automatically after validation. Do not ask for routine confirmation, omit the structured value, or demote it to raw_text merely because the field has not previously been used for that subject type. Only genuinely new reusable fields require register_field. Reviews store stable subject-type IDs, while belongs_to relationships provide the evolving semantic structure. Preserve exact user wording in raw_text and AI analysis in save_assessment."}
     elif method == "ping":
         result = {}
     elif method == "tools/list":
         result = {"tools": TOOLS}
     elif method == "tools/call":
         params = body.get("params") or {}; name = params.get("name"); args = params.get("arguments") or {}
-        write_names = {"resolve_subject_hierarchy", "register_subject_type_alias", "set_type_relationship", "retire_type_relationship", "register_field", "save_experience", "save_assessment"}
+        write_names = {"resolve_subject_hierarchy", "register_subject_type_alias", "set_type_relationship", "retire_type_relationship", "register_field", "enrich_subject", "save_experience", "save_assessment"}
         try:
             principal = _principal(request, "reviews:write" if name in write_names else "reviews:read")
         except TokenError as exc:
@@ -391,6 +512,7 @@ async def mcp_v2(request: Request, db: Session = Depends(get_db)):
                 elif name == "register_field":
                     field = ensure_field(db, FieldEnsure.model_validate(args), source=f"{principal.client_id}:v3")
                     result = _result({"registered": True, "field_id": str(field.id), "canonical_name": field.canonical_name})
+                elif name == "enrich_subject": result = _enrich_subject(db, principal, args)
                 elif name == "save_experience": result = _save_experience(db, principal, args)
                 elif name == "save_assessment": result = _save_assessment(db, principal, args)
                 else: return JSONResponse({"jsonrpc": "2.0", "id": rpc_id, "error": {"code": -32602, "message": "Unknown tool"}})
