@@ -168,3 +168,49 @@ def test_existing_global_field_auto_attaches_on_first_valid_use(db):
         "submitted":"rating","canonical":"rating","field_id":str(rating.id),
         "method":"canonical","attached_to_subject_type":True,
     }]
+
+
+def test_existing_subject_can_be_enriched_without_another_review(db):
+    ensure_subject_type(db,"estate agent",created_by="test")
+    ensure_subject_type(db,"organization",created_by="test")
+    subject=ensure_subject(
+        db,
+        SubjectEnsure(
+            subject_type="estate agent",name="Example Estate Agents, Stroud",
+            canonical_key="example-estate-agents-stroud",
+        ),
+    )
+    enriched=ensure_subject(
+        db,
+        SubjectEnsure(
+            subject_type="estate agent",name=subject.name,
+            canonical_key=subject.canonical_key,
+            identifiers={"website":"https://example.test/stroud"},
+            attributes={"town":"Stroud","address":"1 Example Street"},
+            provenance={"source_url":"https://example.test/stroud"},
+        ),
+    )
+    context=ensure_subject_context(
+        db,
+        enriched,
+        SubjectContextEnsure.model_validate({
+            "subjects":[{
+                "ref":"brand","subject_type":"organization","name":"Example Estate Agents",
+                "canonical_key":"example-estate-agents",
+                "identifiers":{"website":"https://example.test"},
+                "provenance":{"source_url":"https://example.test"},
+            }],
+            "relationships":[{
+                "source_ref":"subject","relationship":"branch_of","target_ref":"brand",
+                "provenance":{"source_url":"https://example.test/branches"},
+            }],
+        }),
+        client_id="test",
+    )
+
+    assert enriched.id==subject.id
+    assert enriched.identifiers_json["website"]=="https://example.test/stroud"
+    assert enriched.attributes_json["town"]=="Stroud"
+    assert enriched.provenance_json["source_url"]=="https://example.test/stroud"
+    assert len(context["relationships"])==1
+    assert len(db.scalars(select(V2Experience)).all())==0
