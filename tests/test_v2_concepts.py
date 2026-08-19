@@ -4,11 +4,12 @@ from sqlalchemy.orm import Session
 
 from app.db.base import Base
 from app.models.entities import User
-from app.models.v2 import SubjectType, V2Experience
-from app.schemas.v2 import ExperienceCreate, FieldEnsure, SubjectEnsure
+from app.models.v2 import SubjectRelationship, SubjectType, V2Experience
+from app.schemas.v2 import ExperienceCreate, FieldEnsure, SubjectContextEnsure, SubjectEnsure
 from app.services.v2 import (
     add_subject_type_alias, add_type_relationship, create_experience, descendant_type_ids,
-    ensure_field, ensure_subject, ensure_subject_type, normalise_term, resolve_subject_type,
+    ensure_field, ensure_subject, ensure_subject_context, ensure_subject_type, normalise_term,
+    resolve_subject_type,
 )
 
 
@@ -63,3 +64,65 @@ def test_unknown_structured_field_does_not_create_schema_from_one_review(db):
     subject=ensure_subject(db,SubjectEnsure(subject_type="ferry",name="Crossing",canonical_key="crossing"))
     with pytest.raises(ValueError,match="Preserve it in raw_text"):
         create_experience(db,ExperienceCreate(owner_id=user.id,subject_id=subject.id,headline="Trip",summary="Trip",raw_text="Nice café.",structured_data={"cafe wallpaper colour":"blue"},user_approved=True),"test")
+
+
+def test_review_can_add_generic_unreviewed_subject_context(db):
+    user=User(display_name="Test",profile_data={});db.add(user);db.commit();db.refresh(user)
+    ensure_subject_type(db,"cafe",created_by="test")
+    ensure_subject_type(db,"organization",created_by="test")
+    reviewed=ensure_subject(
+        db,
+        SubjectEnsure(
+            subject_type="cafe",name="Example Cafe — Lechlade",
+            canonical_key="example-cafe-lechlade",
+            attributes={"town":"Lechlade"},
+        ),
+    )
+    context=ensure_subject_context(
+        db,
+        reviewed,
+        SubjectContextEnsure.model_validate({
+            "subjects":[
+                {
+                    "ref":"brand","subject_type":"organization","name":"Example Cafe",
+                    "canonical_key":"example-cafe",
+                    "identifiers":{"website":"https://example.test/locations"},
+                    "provenance":{"source_url":"https://example.test/locations"},
+                },
+                {
+                    "ref":"cirencester","subject_type":"cafe",
+                    "name":"Example Cafe — Cirencester",
+                    "canonical_key":"example-cafe-cirencester",
+                    "attributes":{"town":"Cirencester","address":"1 Example Street"},
+                    "provenance":{"source_url":"https://example.test/locations"},
+                },
+            ],
+            "relationships":[
+                {
+                    "source_ref":"reviewed_subject","relationship":"branch_of",
+                    "target_ref":"brand",
+                    "provenance":{"source_url":"https://example.test/locations"},
+                },
+                {
+                    "source_ref":"cirencester","relationship":"branch_of",
+                    "target_ref":"brand",
+                    "provenance":{"source_url":"https://example.test/locations"},
+                },
+            ],
+        }),
+        client_id="test",
+    )
+    exp=create_experience(
+        db,
+        ExperienceCreate(
+            owner_id=user.id,subject_id=reviewed.id,headline="Good lunch",
+            summary="Good lunch",raw_text="I enjoyed lunch here.",user_approved=True,
+        ),
+        "test",
+    )
+
+    assert exp.experienced_at is not None
+    assert len(context["subjects"])==2
+    assert len(context["relationships"])==2
+    assert len(db.scalars(select(SubjectRelationship)).all())==2
+    assert len(db.scalars(select(V2Experience)).all())==1
