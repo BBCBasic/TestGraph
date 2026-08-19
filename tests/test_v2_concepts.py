@@ -5,7 +5,9 @@ from sqlalchemy.orm import Session
 from app.db.base import Base
 from app.models.entities import User
 from app.models.v2 import SubjectRelationship, SubjectType, SubjectTypeField, V2Experience
-from app.schemas.v2 import ExperienceCreate, FieldEnsure, SubjectContextEnsure, SubjectEnsure
+from app.schemas.v2 import (
+    ExperienceCreate, FieldEnsure, SubjectContextEnsure, SubjectEnrichmentCheck, SubjectEnsure,
+)
 from app.services.v2 import (
     add_subject_type_alias, add_type_relationship, create_experience, descendant_type_ids,
     ensure_field, ensure_subject, ensure_subject_context, ensure_subject_type, normalise_term,
@@ -214,3 +216,27 @@ def test_existing_subject_can_be_enriched_without_another_review(db):
     assert enriched.provenance_json["source_url"]=="https://example.test/stroud"
     assert len(context["relationships"])==1
     assert len(db.scalars(select(V2Experience)).all())==0
+
+
+
+def test_subject_enrichment_check_is_saved_in_review_provenance(db):
+    user=User(display_name="Test",profile_data={});db.add(user);db.commit();db.refresh(user)
+    ensure_subject_type(db,"website",created_by="test")
+    subject=ensure_subject(
+        db,SubjectEnsure(subject_type="website",name="Example Site",canonical_key="example-site")
+    )
+    exp=create_experience(
+        db,
+        ExperienceCreate(
+            owner_id=user.id,subject_id=subject.id,headline="Useful site",summary="Useful",
+            raw_text="This website was useful.",user_approved=True,
+            subject_enrichment_check=SubjectEnrichmentCheck(
+                status="completed",sources=["https://example.test/about"]
+            ),
+        ),
+        "test-client",
+    )
+    check=exp.provenance["subject_enrichment_check"]
+    assert check["status"]=="completed"
+    assert check["sources"]==["https://example.test/about"]
+    assert "recorded_at" in check

@@ -12,7 +12,10 @@ from app.core.config import get_settings
 from app.core.security import Principal, TokenError, principal_from_authorization
 from app.db.session import get_db
 from app.models.v2 import Assessment, SubjectRelationship, SubjectType, SubjectTypeAlias, V2Experience, V2Subject
-from app.schemas.v2 import AssessmentCreate, ExperienceCreate, FieldEnsure, SubjectContextEnsure, SubjectEnsure
+from app.schemas.v2 import (
+    AssessmentCreate, ExperienceCreate, FieldEnsure, SubjectContextEnsure,
+    SubjectEnrichmentCheck, SubjectEnsure,
+)
 from app.services.semantic import add_semantic_relationship, resolve_subject_hierarchy, retire_semantic_relationship
 from app.services.v2 import (
     add_subject_type_alias, create_assessment, create_experience,
@@ -23,7 +26,7 @@ from app.services.write_safety import begin_idempotent_write, finish_idempotent_
 
 router = APIRouter()
 PROTOCOL_VERSION = "2025-06-18"
-SERVER_VERSION = "3.3.1-alpha"
+SERVER_VERSION = "3.4.0-alpha"
 READ_SECURITY = [{"type": "oauth2", "scopes": ["reviews:read"]}]
 WRITE_SECURITY = [{"type": "oauth2", "scopes": ["reviews:write"]}]
 
@@ -143,20 +146,19 @@ TOOLS = [
         "name": "save_experience",
         "title": "Save an approved review",
         "description": (
-            "Save a review against an already-resolved stable subject type. Before saving, determine whether "
-            "the subject has an official website; when one is available, inspect it yourself for stable identity, "
-            "branches and related subjects. Do not ask the user for a URL unless automatic lookup is unavailable "
-            "or the identity is genuinely ambiguous. Add discoveries in subject_context as unreviewed subjects with generic "
-            "relationships and source provenance, while attaching the review only to what was actually experienced. "
-            "For a small clearly published set of locations, save the sibling locations; for a large chain, save "
-            "the parent organisation and its official branch-directory URL rather than copying every branch. "
-            "Location is optional. For physical locations, record the town and coordinates only when explicitly "
-            "published by the source; otherwise record the published address. Skip location when it is irrelevant. "
-            "The experience date defaults to creation time unless experienced_at is explicit. All context subject "
-            "types must already be resolved. Existing globally registered fields such as rating are automatically "
-            "attached to this subject type on first valid use; preserve them in structured_data and do not ask for "
-            "routine confirmation or discard them into raw_text. If the official source is unavailable, preserve "
-            "that limitation and do not invent facts or silently geocode coordinates."
+            "Save a review against an already-resolved stable subject type. Before saving, perform a generic "
+            "subject enrichment check using authoritative or primary sources when available. This applies to any "
+            "kind of subject and does not require a website, location, address or relationship. Submit the result "
+            "in subject_enrichment_check. Perform routine checking and retry automatically rather than asking the "
+            "user. Ask the user only when the subject identity is genuinely ambiguous. Add useful discoveries in "
+            "identifiers, subject_attributes and subject_context with source provenance, while attaching the review "
+            "only to what was actually experienced. A completed check requires at least one source. If enrichment "
+            "cannot be found, use unavailable with a reason and the searches attempted. Use not_applicable with a "
+            "reason when external enrichment has no sensible application. Location is optional; never invent facts "
+            "or silently geocode coordinates. The experience date defaults to creation time unless experienced_at "
+            "is explicit. All context subject types must already be resolved. Existing globally registered fields "
+            "such as rating are automatically attached to this subject type on first valid use; preserve them in "
+            "structured_data and do not ask for routine confirmation or discard them into raw_text."
         ),
         "inputSchema": {
             "type": "object",
@@ -167,6 +169,34 @@ TOOLS = [
                 "identifiers": {"type": "object", "additionalProperties": True, "default": {}},
                 "subject_attributes": {"type": "object", "additionalProperties": True, "default": {}},
                 "subject_provenance": {"type": "object", "additionalProperties": True, "default": {}},
+                "subject_enrichment_check": {
+                    "type": "object",
+                    "description": (
+                        "Generic pre-save check. completed requires sources; unavailable requires a reason and "
+                        "attempts; not_applicable requires a reason; ambiguous stops the save for clarification."
+                    ),
+                    "properties": {
+                        "status": {
+                            "type": "string",
+                            "enum": ["completed", "unavailable", "not_applicable", "ambiguous"],
+                        },
+                        "sources": {
+                            "type": "array", "maxItems": 50, "default": [],
+                            "items": {"type": "string", "minLength": 1},
+                        },
+                        "attempts": {
+                            "type": "array", "maxItems": 50, "default": [],
+                            "items": {"type": "string", "minLength": 1},
+                        },
+                        "reason": {"type": "string", "minLength": 1},
+                        "candidate_identities": {
+                            "type": "array", "maxItems": 20, "default": [],
+                            "items": {"type": "string", "minLength": 1},
+                        },
+                    },
+                    "required": ["status"],
+                    "additionalProperties": False,
+                },
                 "headline": {"type": "string"},
                 "summary": {"type": "string"},
                 "raw_text": {"type": "string", "minLength": 1},
@@ -223,7 +253,7 @@ TOOLS = [
             },
             "required": [
                 "subject_type", "subject_name", "canonical_key", "headline", "summary",
-                "raw_text", "user_approved", "idempotency_key",
+                "raw_text", "subject_enrichment_check", "user_approved", "idempotency_key",
             ],
             "additionalProperties": False,
         },
@@ -390,11 +420,67 @@ def _enrich_subject(db, principal, args):
     return _result(body)
 
 
+def _validate_subject_enrichment_check(raw):
+    if raw is None:
+        return None, _error(
+            "Subject enrichment check required",
+            {
+                "code": "subject_enrichment_check_required",
+                "question": "Have you checked for authoritative information about this subject?",
+                "instruction": (
+                    "Perform the generic subject enrichment check automatically and retry the save. "
+                    "Do not ask the user unless the subject identity is genuinely ambiguous."
+                ),
+            },
+        )
+    try:
+        check = SubjectEnrichmentCheck.model_validate(raw)
+    except ValueError as exc:
+        return None, _error(
+            "Invalid subject enrichment check",
+            {"code": "subject_enrichment_check_invalid", "reason": str(exc)},
+        )
+    if check.status == "completed" and not check.sources:
+        return None, _error(
+            "A completed subject enrichment check requires at least one source",
+            {
+                "code": "subject_enrichment_sources_required",
+                "instruction": "Add the sources consulted, or use unavailable with a reason and attempted searches.",
+            },
+        )
+    if check.status == "unavailable" and (not check.reason or not check.attempts):
+        return None, _error(
+            "An unavailable subject enrichment check requires a reason and attempted searches",
+            {"code": "subject_enrichment_unavailable_details_required"},
+        )
+    if check.status == "not_applicable" and not check.reason:
+        return None, _error(
+            "A not_applicable subject enrichment check requires a reason",
+            {"code": "subject_enrichment_reason_required"},
+        )
+    if check.status == "ambiguous":
+        return None, _error(
+            "Subject identity is ambiguous",
+            {
+                "code": "subject_identity_ambiguous",
+                "reason": check.reason,
+                "candidate_identities": check.candidate_identities,
+                "instruction": "Ask the user only for the clarification needed to identify the subject, then retry.",
+            },
+        )
+    return check, None
+
+
 def _save_experience(db, principal, args):
     if args.get("user_approved") is not True:
         return _error("Explicit user approval is required before saving a direct review")
     if principal.user_id is None:
         return _error("Authenticated TasteGraph user is required")
+    enrichment_check, check_error = _validate_subject_enrichment_check(
+        args.get("subject_enrichment_check")
+    )
+    if check_error is not None:
+        return check_error
     client_id = f"{principal.client_id}:v3"
     relevant = {k: v for k, v in args.items() if k != "idempotency_key"}
     payload_hash, prior = begin_idempotent_write(db, client_id=client_id, key=f"experience:{args['idempotency_key']}", payload=relevant)
@@ -428,7 +514,7 @@ def _save_experience(db, principal, args):
             structured_data=args.get("structured_data", {}),
             experienced_at=args.get("experienced_at"),
             visibility=args.get("visibility", "private"), user_approved=True,
-            source_client=client_id,
+            subject_enrichment_check=enrichment_check, source_client=client_id,
         ),
         client_id,
     )
@@ -438,6 +524,7 @@ def _save_experience(db, principal, args):
         "type_status": subject_type.status, "type_resolution": "existing", "type_created": False,
         "experienced_at": exp.experienced_at.isoformat(), "canonical_data": exp.structured_data,
         "normalization_log": exp.normalization_log, "subject_context": context,
+        "subject_enrichment_check": exp.provenance.get("subject_enrichment_check"),
     }
     finish_idempotent_write(db, client_id=client_id, key=f"experience:{args['idempotency_key']}", payload_hash=payload_hash, response_body=body)
     return _result(body)
@@ -461,7 +548,7 @@ async def mcp_v2(request: Request, db: Session = Depends(get_db)):
     if method and method.startswith("notifications/"):
         return Response(status_code=202)
     if method == "initialize":
-        result = {"protocolVersion": PROTOCOL_VERSION, "capabilities": {"tools": {"listChanged": False}}, "serverInfo": {"name": "TasteGraph v2", "version": SERVER_VERSION}, "instructions": "Before saving an experience, identify exactly what was experienced and inspect vocabulary_index. Reuse an existing canonical type or alias whenever possible. If the specific type is absent, reason from meaning to a broad-to-specific hierarchy and call resolve_subject_hierarchy; never create a type merely because it arrived first. Before saving, determine whether the subject has an official website. When one is available, inspect it for stable identity, branches and related subjects. Do this lookup yourself; do not ask the user for a website unless automatic lookup is unavailable or the identity is genuinely ambiguous. Save discoveries as unreviewed subject_context with generic relationships and source provenance, while attaching the review only to the exact subject experienced. For a small clearly published set of locations, save sibling locations; for a large chain, preserve the parent organisation's official branch-directory URL and expand it on demand. On a location-based recommendation, never conclude there is no relevant result from the target-town search alone: also search the relevant subject type without a text query, follow reviewed subjects to parent organisations, inspect their official branch directories for the requested location, and add any discovered branch as an unreviewed related subject. Do this routine chain lookup without asking the user. If authoritative information was missed during the original save, use enrich_subject to add it without creating another review. Location is optional: for a physical location record town and coordinates only when explicitly published by the source, otherwise record the published address; skip location when irrelevant. If the official source is unavailable, preserve that limitation and never invent facts or silently geocode coordinates. The experience date defaults to creation time unless explicitly provided. When structured data matches an existing globally registered canonical field, include it in the save: TestGraph attaches that field to the subject type automatically after validation. Do not ask for routine confirmation, omit the structured value, or demote it to raw_text merely because the field has not previously been used for that subject type. Only genuinely new reusable fields require register_field. Reviews store stable subject-type IDs, while belongs_to relationships provide the evolving semantic structure. Preserve exact user wording in raw_text and AI analysis in save_assessment."}
+        result = {"protocolVersion": PROTOCOL_VERSION, "capabilities": {"tools": {"listChanged": False}}, "serverInfo": {"name": "TasteGraph v2", "version": SERVER_VERSION}, "instructions": "Before saving an experience, identify exactly what was experienced and inspect vocabulary_index. Reuse an existing canonical type or alias whenever possible. If the specific type is absent, reason from meaning to a broad-to-specific hierarchy and call resolve_subject_hierarchy; never create a type merely because it arrived first. Before saving, perform the generic subject enrichment check and include its result in subject_enrichment_check. Use authoritative or primary sources where available, but do not require a website, location or any domain-specific field. Perform routine checking and retry automatically; do not ask the user unless identity is genuinely ambiguous. If enrichment cannot be found, use unavailable with a reason and the searches attempted. Save discoveries as unreviewed subject_context with generic relationships and source provenance, while attaching the review only to the exact subject experienced. For a small clearly published set of locations, save sibling locations; for a large chain, preserve the parent organisation's official branch-directory URL and expand it on demand. On a location-based recommendation, never conclude there is no relevant result from the target-town search alone: also search the relevant subject type without a text query, follow reviewed subjects to parent organisations, inspect their official branch directories for the requested location, and add any discovered branch as an unreviewed related subject. Do this routine chain lookup without asking the user. If authoritative information was missed during the original save, use enrich_subject to add it without creating another review. Location is optional: for a physical location record town and coordinates only when explicitly published by the source, otherwise record the published address; skip location when irrelevant. If the official source is unavailable, preserve that limitation and never invent facts or silently geocode coordinates. The experience date defaults to creation time unless explicitly provided. When structured data matches an existing globally registered canonical field, include it in the save: TestGraph attaches that field to the subject type automatically after validation. Do not ask for routine confirmation, omit the structured value, or demote it to raw_text merely because the field has not previously been used for that subject type. Only genuinely new reusable fields require register_field. Reviews store stable subject-type IDs, while belongs_to relationships provide the evolving semantic structure. Preserve exact user wording in raw_text and AI analysis in save_assessment."}
     elif method == "ping":
         result = {}
     elif method == "tools/list":
