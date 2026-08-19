@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from copy import deepcopy
+
 
 RELATED_SUBJECT_LIMIT = 500
 RELATED_RELATIONSHIP_LIMIT = 1000
@@ -30,6 +32,36 @@ def apply_chain_ingest_policy(tools: list[dict]) -> None:
         _set_context_limits(enrich)
 
     save = by_name.get("save_experience")
+    if enrich and save:
+        enrich_schema = enrich["inputSchema"]
+        enrich_properties = enrich_schema["properties"]
+        save_properties = save["inputSchema"]["properties"]
+        enrich_properties["subject_id"] = {
+            "type": "string", "format": "uuid",
+            "description": "Preferred stable subject locator returned by search, fetch or save_experience.",
+        }
+        enrich_properties["subject_enrichment_check"] = deepcopy(
+            save_properties["subject_enrichment_check"]
+        )
+        enrich_properties["subject_enrichment_check"]["description"] = (
+            "Required evidence check for this enrichment. Reconcile sources against identifiers, "
+            "attributes, provenance or subject_context request paths."
+        )
+        enrich_properties["collection_assessment"] = deepcopy(
+            save_properties["collection_assessment"]
+        )
+        enrich_properties["collection_assessment"]["description"] = (
+            "Required collection assessment for enrichment. For member status, use subject as the "
+            "existing target ref and submit it plus every discovered sibling."
+        )
+        enrich_schema["required"] = [
+            "idempotency_key", "subject_enrichment_check", "collection_assessment",
+        ]
+        enrich_schema["anyOf"] = [
+            {"required": ["subject_id"]},
+            {"required": ["subject_type", "canonical_key"]},
+        ]
+
     if save:
         current = save.get("description", "")
         if _SAVE_POLICY_MARKER not in current:
