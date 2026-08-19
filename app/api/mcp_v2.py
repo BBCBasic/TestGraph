@@ -419,6 +419,77 @@ def _fetch(db, principal, args):
     return _result({"id": str(e.id), "record_type": e.record_type, "subject": {"id": str(s.id), "name": s.name, "canonical_key": s.canonical_key, "subject_type_id": str(t.id), "subject_type": t.canonical_name, "identifiers": s.identifiers_json, "attributes": s.attributes_json, "provenance": s.provenance_json}, "headline": e.headline, "summary": e.summary, "raw_text": e.raw_text, "structured_data": e.structured_data, "submitted_data": e.submitted_data, "normalization_log": e.normalization_log, "provenance": e.provenance, "assessments": [{"id": str(a.id), "assessment_type": a.assessment_type, "evidence": a.evidence_json, "analysis": a.analysis_json, "conclusion": a.conclusion, "confidence": a.confidence, "provenance": a.provenance} for a in assessments], "created_at": e.created_at.isoformat()})
 
 
+
+def _validate_subject_context(db, raw):
+    try:
+        context = SubjectContextEnsure.model_validate(raw or {})
+    except ValueError as exc:
+        return None, _error(
+            "Invalid subject context",
+            {"code": "subject_context_invalid", "reason": str(exc)},
+        )
+
+    reserved_refs = {"reviewed_subject", "subject"}
+    seen_refs = set()
+    invalid_refs = []
+    for item in context.subjects:
+        if item.ref in reserved_refs or item.ref in seen_refs:
+            invalid_refs.append(item.ref)
+        seen_refs.add(item.ref)
+
+    known_refs = reserved_refs | seen_refs
+    invalid_relationships = []
+    for index, item in enumerate(context.relationships):
+        missing_refs = sorted({
+            ref for ref in (item.source_ref, item.target_ref) if ref not in known_refs
+        })
+        if missing_refs:
+            invalid_relationships.append({
+                "index": index,
+                "source_ref": item.source_ref,
+                "target_ref": item.target_ref,
+                "missing_refs": missing_refs,
+            })
+
+    if invalid_refs or invalid_relationships:
+        return None, _error(
+            "Subject context contains invalid references",
+            {
+                "code": "subject_context_references_invalid",
+                "reserved_or_duplicate_refs": sorted(set(invalid_refs)),
+                "invalid_relationships": invalid_relationships,
+                "instruction": (
+                    "Use a unique non-reserved ref for every related subject and make every "
+                    "relationship refer only to reviewed_subject, subject, or a declared subject ref."
+                ),
+            },
+        )
+
+    unresolved_types = []
+    for item in context.subjects:
+        try:
+            resolved = resolve_subject_type(db, item.subject_type)
+        except ValueError:
+            resolved = None
+        if resolved is None:
+            unresolved_types.append(item.subject_type)
+
+    if unresolved_types:
+        return None, _error(
+            "Subject context contains unresolved subject types",
+            {
+                "code": "subject_context_types_unresolved",
+                "unknown_subject_types": sorted(set(unresolved_types)),
+                "instruction": (
+                    "Inspect vocabulary_index and call resolve_subject_hierarchy for every unknown "
+                    "subject type before retrying the unchanged save or enrichment request."
+                ),
+            },
+        )
+
+    return context, None
+
+
 def _enrich_subject(db, principal, args):
     client_id = f"{principal.client_id}:v3"
     relevant = {k: v for k, v in args.items() if k != "idempotency_key"}
@@ -443,6 +514,11 @@ def _enrich_subject(db, principal, args):
         args.get("subject_context"),
     )):
         return _error("No subject enrichment was supplied")
+    context_payload, context_error = _validate_subject_context(
+        db, args.get("subject_context")
+    )
+    if context_error is not None:
+        return context_error
     subject = ensure_subject(
         db,
         SubjectEnsure(
@@ -453,7 +529,7 @@ def _enrich_subject(db, principal, args):
         client_id, owner_id=principal.user_id,
     )
     context = ensure_subject_context(
-        db, subject, SubjectContextEnsure.model_validate(args.get("subject_context") or {}),
+        db, subject, context_payload,
         client_id=client_id, owner_id=principal.user_id,
     )
     body = {
@@ -599,6 +675,11 @@ def _save_experience(db, principal, args):
             f"Unknown subject type '{args['subject_type']}'",
             {"instruction": "Inspect vocabulary_index and call resolve_subject_hierarchy with a broad-to-specific semantic path before resubmitting this review."},
         )
+    context_payload, context_error = _validate_subject_context(
+        db, args.get("subject_context")
+    )
+    if context_error is not None:
+        return context_error
     subject_provenance = dict(args.get("subject_provenance", {}))
     enrichment_sources = list(subject_provenance.get("enrichment_sources", []))
     for source in enrichment_check.sources:
@@ -617,7 +698,7 @@ def _save_experience(db, principal, args):
         client_id,
     )
     context = ensure_subject_context(
-        db, subject, SubjectContextEnsure.model_validate(args.get("subject_context") or {}),
+        db, subject, context_payload,
         client_id=client_id, owner_id=principal.user_id,
     )
     exp = create_experience(
