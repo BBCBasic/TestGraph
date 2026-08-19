@@ -266,10 +266,10 @@ def ensure_subject_context(
     db: Session, reviewed_subject: V2Subject, payload: SubjectContextEnsure,
     *, client_id: str,
 ) -> dict:
-    refs = {"reviewed_subject": reviewed_subject}
+    refs = {"reviewed_subject": reviewed_subject, "subject": reviewed_subject}
     created_subjects = []
     for item in payload.subjects:
-        if item.ref == "reviewed_subject" or item.ref in refs:
+        if item.ref in refs:
             raise ValueError(f"Duplicate or reserved subject reference '{item.ref}'")
         subject = ensure_subject(
             db,
