@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from copy import deepcopy
+
 
 RELATED_SUBJECT_LIMIT = 500
 RELATED_RELATIONSHIP_LIMIT = 1000
@@ -20,23 +22,63 @@ def apply_chain_ingest_policy(tools: list[dict]) -> None:
         enrich["description"] = (
             "Add missing identifiers, attributes, provenance and related unreviewed subjects to an existing "
             "subject without creating another review. Use this proactively when authoritative information was "
-            "missed during the original save. Search for the official website yourself. When an authoritative "
-            "source exposes a finite collection, submit every discovered member as an unreviewed subject, connect "
-            "each member to the collection, and preserve the directory URL and provenance. Do not omit members "
-            "because they are unreviewed, numerous or may be materialised later. Do not ask the user for a URL or "
-            "routine lookup permission unless automatic lookup is unavailable or identity is genuinely ambiguous. "
-            "Existing conflicting values are preserved rather than silently overwritten."
+            "missed during the original save. Find only authoritative facts with plausible future TestGraph use: "
+            "identity, likely queries, location, classification, relationships, comparison or verification. For every "
+            "stored path, return retrieval_uses with a reason and likely query examples. Do not store facts merely "
+            "because a source publishes them. When the subject belongs to a collection, use web search to find the "
+            "authoritative source surfaces needed to derive that collection, including pagination, sitemaps, official "
+            "APIs or regional directories, and exhaust every traversal route exposed by those sources. "
+            "Submit source_manifest mapping every member to its consulted source pages, then submit every discovered "
+            "member as an unreviewed subject and connect it to the collection. Do not omit members because they are "
+            "unreviewed, numerous or may be materialised later. Do not ask the user for routine lookup permission "
+            "unless automatic lookup is unavailable or identity is genuinely ambiguous. Existing conflicting values "
+            "are preserved rather than silently overwritten."
         )
         _set_context_limits(enrich)
 
     save = by_name.get("save_experience")
+    if enrich and save:
+        enrich_schema = enrich["inputSchema"]
+        enrich_properties = enrich_schema["properties"]
+        save_properties = save["inputSchema"]["properties"]
+        enrich_properties["subject_id"] = {
+            "type": "string", "format": "uuid",
+            "description": "Preferred stable subject locator returned by search, fetch or save_experience.",
+        }
+        enrich_properties["subject_enrichment_check"] = deepcopy(
+            save_properties["subject_enrichment_check"]
+        )
+        enrich_properties["subject_enrichment_check"]["description"] = (
+            "Required evidence check for this enrichment. Reconcile sources against identifiers, "
+            "attributes, provenance or subject_context request paths."
+        )
+        enrich_properties["collection_assessment"] = deepcopy(
+            save_properties["collection_assessment"]
+        )
+        enrich_properties["collection_assessment"]["description"] = (
+            "Required collection assessment for enrichment. For member status, use subject as the existing "
+            "target ref, discover every authoritative source surface, submit an exhaustive source_manifest, "
+            "and submit the target plus every derived sibling."
+        )
+        enrich_schema["required"] = [
+            "idempotency_key", "subject_enrichment_check", "collection_assessment",
+        ]
+        enrich_schema["anyOf"] = [
+            {"required": ["subject_id"]},
+            {"required": ["subject_type", "canonical_key"]},
+        ]
+
     if save:
         current = save.get("description", "")
         if _SAVE_POLICY_MARKER not in current:
             save["description"] = current + (
-                " Every discovered collection member must be submitted. Include reviewed_subject plus every "
-                "discovered sibling in collection_assessment.submitted_member_refs; the server derives the submitted "
-                "count, requires it to equal discovered_count, and verifies that every ref exists and is connected "
+                " Store only discoveries with a declared generic retrieval_uses purpose and likely-query examples; "
+                "facts with no plausible future TestGraph use are not enrichment. For collections, do not stop at one "
+                "landing page: discover the authoritative source surfaces needed to derive the complete collection and "
+                "submit collection_assessment.source_manifest with complete traversal coverage and member-to-source mappings, "
+                "discovery queries, exhaustion evidence and no unresolved source URLs. Every discovered collection "
+                "member must be submitted. Include reviewed_subject plus every derived sibling in submitted_member_refs; "
+                "the server requires it to equal discovered_count and verifies that every ref exists and is connected "
                 "to the collection. Unreviewed status, collection size and future materialisation are not omissions."
             )
         _set_context_limits(save)

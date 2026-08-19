@@ -66,6 +66,18 @@ def _member_assessment(**updates):
         "directory_url": DIRECTORY,
         "discovered_count": 3,
         "submitted_member_refs": ["reviewed_subject", "branch_two", "branch_three"],
+        "source_manifest": {
+            "coverage_method": "single_page",
+            "declared_source_count": 1,
+            "source_pages": [{
+                "url": DIRECTORY,
+                "source_kind": "directory_page",
+                "member_refs": ["reviewed_subject", "branch_two", "branch_three"],
+                "terminal": True,
+            }],
+            "discovery_queries": ["Example Group official locations"],
+            "exhaustion_evidence": "The authoritative directory is a finite single-page list.",
+        },
         "evidence_sources": [DIRECTORY],
     }
     value.update(updates)
@@ -94,7 +106,7 @@ def test_collection_member_requires_identity_directory_counts_and_refs():
     assert payload["details"]["code"] == "collection_member_details_required"
     assert set(payload["details"]["missing_fields"]) == {
         "collection_name", "collection_type", "directory_url",
-        "discovered_count", "submitted_member_refs",
+        "discovered_count", "submitted_member_refs", "source_manifest",
     }
 
 
@@ -118,6 +130,94 @@ def test_valid_member_submits_complete_collection():
     assert assessment.status == "member"
     assert assessment.discovered_count == 3
     assert len(assessment.submitted_member_refs) == 3
+
+
+def test_member_requires_exhaustive_source_manifest():
+    assessment, error = _validate_collection_assessment(
+        _member_assessment(source_manifest=None),
+        _member_args(),
+        _completed_enrichment(DIRECTORY),
+    )
+
+    assert assessment is None
+    assert _payload(error)["details"]["code"] == "collection_member_details_required"
+
+
+def test_source_manifest_must_cover_every_submitted_member():
+    manifest = _member_assessment()["source_manifest"]
+    manifest["source_pages"][0]["member_refs"] = ["reviewed_subject", "branch_two"]
+    assessment, error = _validate_collection_assessment(
+        _member_assessment(source_manifest=manifest),
+        _member_args(),
+        _completed_enrichment(DIRECTORY),
+    )
+
+    assert assessment is None
+    payload = _payload(error)
+    assert payload["details"]["code"] == "collection_source_member_coverage_mismatch"
+    assert payload["details"]["uncovered_member_refs"] == ["branch_three"]
+
+
+def test_paginated_manifest_requires_continuous_pages_and_terminal_link():
+    second = "https://example.test/locations?page=2"
+    manifest = {
+        "coverage_method": "pagination",
+        "declared_source_count": 2,
+        "source_pages": [
+            {
+                "url": DIRECTORY, "source_kind": "directory_page", "sequence": 1,
+                "member_refs": ["reviewed_subject"], "next_url": second,
+            },
+            {
+                "url": second, "source_kind": "directory_page", "sequence": 3,
+                "member_refs": ["branch_two", "branch_three"], "terminal": True,
+            },
+        ],
+        "discovery_queries": ["Example Group official locations"],
+        "exhaustion_evidence": "Followed next links until the directory exposed no next page.",
+    }
+    assessment, error = _validate_collection_assessment(
+        _member_assessment(
+            source_manifest=manifest,
+            evidence_sources=[DIRECTORY, second],
+        ),
+        _member_args(),
+        _completed_enrichment(DIRECTORY, second),
+    )
+
+    assert assessment is None
+    assert _payload(error)["details"]["code"] == "collection_pagination_incomplete"
+
+
+def test_paginated_manifest_accepts_complete_source_chain():
+    second = "https://example.test/locations?page=2"
+    manifest = {
+        "coverage_method": "pagination",
+        "declared_source_count": 2,
+        "source_pages": [
+            {
+                "url": DIRECTORY, "source_kind": "directory_page", "sequence": 1,
+                "member_refs": ["reviewed_subject"], "next_url": second,
+            },
+            {
+                "url": second, "source_kind": "directory_page", "sequence": 2,
+                "member_refs": ["branch_two", "branch_three"], "terminal": True,
+            },
+        ],
+        "discovery_queries": ["Example Group official locations"],
+        "exhaustion_evidence": "Followed next links until the directory exposed no next page.",
+    }
+    assessment, error = _validate_collection_assessment(
+        _member_assessment(
+            source_manifest=manifest,
+            evidence_sources=[DIRECTORY, second],
+        ),
+        _member_args(),
+        _completed_enrichment(DIRECTORY, second),
+    )
+
+    assert error is None
+    assert assessment.source_manifest.declared_source_count == 2
 
 
 @pytest.mark.parametrize(

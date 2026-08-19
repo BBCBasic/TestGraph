@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from copy import deepcopy
+
 import re
 import unicodedata
 import uuid
@@ -197,19 +199,40 @@ def normalise_data(
     return result, log
 
 
-def _fill_missing(existing: dict | None, incoming: dict) -> tuple[dict, bool]:
-    merged = dict(existing or {})
-    changed = False
+def _deep_fill_missing(
+    existing: dict | None, incoming: dict, *, prefix: str = "",
+) -> tuple[dict, list[str], list[dict]]:
+    """Fill missing leaves recursively and report additions and preserved conflicts."""
+    merged = deepcopy(existing or {})
+    added_paths: list[str] = []
+    conflicts: list[dict] = []
     for key, value in incoming.items():
+        path = f"{prefix}.{key}" if prefix else key
         if key not in merged or merged[key] in (None, ""):
-            merged[key] = value
-            changed = True
-    return merged, changed
+            merged[key] = deepcopy(value)
+            added_paths.append(path)
+        elif isinstance(merged[key], dict) and isinstance(value, dict):
+            nested, nested_added, nested_conflicts = _deep_fill_missing(
+                merged[key], value, prefix=path,
+            )
+            merged[key] = nested
+            added_paths.extend(nested_added)
+            conflicts.extend(nested_conflicts)
+        elif merged[key] != value:
+            conflicts.append({
+                "path": path, "existing": deepcopy(merged[key]), "incoming": deepcopy(value),
+            })
+    return merged, added_paths, conflicts
+
+
+def _fill_missing(existing: dict | None, incoming: dict) -> tuple[dict, bool]:
+    merged, added_paths, _ = _deep_fill_missing(existing, incoming)
+    return merged, bool(added_paths)
 
 
 def ensure_subject(
     db: Session, payload: SubjectEnsure, client_id: str = "ai-client",
-    *, owner_id: uuid.UUID | None = None,
+    *, owner_id: uuid.UUID | None = None, commit: bool = True,
 ) -> V2Subject:
     subject_type = resolve_subject_type(db, payload.subject_type)
     if not subject_type:
@@ -227,7 +250,10 @@ def ensure_subject(
             obj.identifiers_json = identifiers
             obj.attributes_json = attributes
             obj.provenance_json = provenance
-            db.commit(); db.refresh(obj)
+            if commit:
+                db.commit(); db.refresh(obj)
+            else:
+                db.flush()
         return obj
     obj = V2Subject(
         subject_type_id=subject_type.id, owner_id=owner_id,
@@ -235,13 +261,17 @@ def ensure_subject(
         identifiers_json=payload.identifiers, attributes_json=payload.attributes,
         provenance_json=payload.provenance,
     )
-    db.add(obj); db.commit(); db.refresh(obj)
+    db.add(obj)
+    if commit:
+        db.commit(); db.refresh(obj)
+    else:
+        db.flush()
     return obj
 
 
 def add_subject_relationship(
     db: Session, source_subject: V2Subject, relationship: str, target_subject: V2Subject,
-    *, provenance: dict | None = None, created_by: str = "ai-client",
+    *, provenance: dict | None = None, created_by: str = "ai-client", commit: bool = True,
 ) -> SubjectRelationship:
     rel = normalise_term(relationship).replace(" ", "_")
     if source_subject.id == target_subject.id:
@@ -255,26 +285,51 @@ def add_subject_relationship(
         merged, changed = _fill_missing(existing.provenance_json, provenance or {})
         if changed:
             existing.provenance_json = merged
-            db.commit(); db.refresh(existing)
+            if commit:
+                db.commit(); db.refresh(existing)
+            else:
+                db.flush()
         return existing
     obj = SubjectRelationship(
         source_subject_id=source_subject.id, relationship=rel,
         target_subject_id=target_subject.id, provenance_json=provenance or {},
         status="active", created_by=created_by,
     )
-    db.add(obj); db.commit(); db.refresh(obj)
+    db.add(obj)
+    if commit:
+        db.commit(); db.refresh(obj)
+    else:
+        db.flush()
     return obj
 
 
 def ensure_subject_context(
     db: Session, reviewed_subject: V2Subject, payload: SubjectContextEnsure,
-    *, client_id: str, owner_id: uuid.UUID | None = None,
+    *, client_id: str, owner_id: uuid.UUID | None = None, commit: bool = True,
 ) -> dict:
     refs = {"reviewed_subject": reviewed_subject, "subject": reviewed_subject}
-    created_subjects = []
+    subject_results = []
     for item in payload.subjects:
         if item.ref in refs:
             raise ValueError(f"Duplicate or reserved subject reference '{item.ref}'")
+        subject_type = resolve_subject_type(db, item.subject_type)
+        existing = db.scalar(select(V2Subject).where(
+            V2Subject.subject_type_id == subject_type.id,
+            V2Subject.canonical_key == item.canonical_key,
+            V2Subject.deleted_at.is_(None),
+        ))
+        before_identifiers = existing.identifiers_json if existing else {}
+        before_attributes = existing.attributes_json if existing else {}
+        before_provenance = existing.provenance_json if existing else {}
+        _, identifier_additions, identifier_conflicts = _deep_fill_missing(
+            before_identifiers, item.identifiers, prefix="identifiers",
+        )
+        _, attribute_additions, attribute_conflicts = _deep_fill_missing(
+            before_attributes, item.attributes, prefix="attributes",
+        )
+        _, provenance_additions, provenance_conflicts = _deep_fill_missing(
+            before_provenance, item.provenance, prefix="provenance",
+        )
         subject = ensure_subject(
             db,
             SubjectEnsure(
@@ -282,31 +337,52 @@ def ensure_subject_context(
                 canonical_key=item.canonical_key, identifiers=item.identifiers,
                 attributes=item.attributes, provenance=item.provenance,
             ),
-            client_id, owner_id=owner_id,
+            client_id, owner_id=owner_id, commit=False,
         )
         refs[item.ref] = subject
-        created_subjects.append(subject)
-    relationships = []
+        subject_results.append({
+            "id": str(subject.id), "ref": item.ref, "name": subject.name,
+            "canonical_key": subject.canonical_key, "created": existing is None,
+            "fields_added": identifier_additions + attribute_additions + provenance_additions,
+            "conflicts_preserved": identifier_conflicts + attribute_conflicts + provenance_conflicts,
+        })
+    relationship_results = []
     for item in payload.relationships:
         if item.source_ref not in refs or item.target_ref not in refs:
             raise ValueError("Subject relationship refers to an unknown context reference")
-        relationships.append(add_subject_relationship(
-            db, refs[item.source_ref], item.relationship, refs[item.target_ref],
-            provenance=item.provenance, created_by=client_id,
+        rel_name = normalise_term(item.relationship).replace(" ", "_")
+        existing = db.scalar(select(SubjectRelationship).where(
+            SubjectRelationship.source_subject_id == refs[item.source_ref].id,
+            SubjectRelationship.relationship == rel_name,
+            SubjectRelationship.target_subject_id == refs[item.target_ref].id,
         ))
-    return {
-        "subjects": [
-            {"id": str(subject.id), "name": subject.name, "canonical_key": subject.canonical_key}
-            for subject in created_subjects
-        ],
-        "relationships": [
-            {
-                "id": str(rel.id), "source_subject_id": str(rel.source_subject_id),
-                "relationship": rel.relationship, "target_subject_id": str(rel.target_subject_id),
-            }
-            for rel in relationships
-        ],
-    }
+        _, provenance_additions, provenance_conflicts = _deep_fill_missing(
+            existing.provenance_json if existing else {},
+            item.provenance,
+            prefix="provenance",
+        )
+        relationship = add_subject_relationship(
+            db, refs[item.source_ref], item.relationship, refs[item.target_ref],
+            provenance=item.provenance, created_by=client_id, commit=False,
+        )
+        relationship_results.append({
+            "id": str(relationship.id),
+            "source_subject_id": str(relationship.source_subject_id),
+            "relationship": relationship.relationship,
+            "target_subject_id": str(relationship.target_subject_id),
+            "created": existing is None,
+            "fields_added": provenance_additions,
+            "conflicts_preserved": provenance_conflicts,
+        })
+    if commit:
+        db.commit()
+        for item in refs.values():
+            db.refresh(item)
+        for item in relationship_results:
+            relationship = db.get(SubjectRelationship, uuid.UUID(item["id"]))
+            if relationship:
+                db.refresh(relationship)
+    return {"subjects": subject_results, "relationships": relationship_results}
 
 
 def _source(db: Session, payload: SourceCreate | None) -> Source | None:
