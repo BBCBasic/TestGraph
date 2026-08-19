@@ -389,7 +389,7 @@ def test_genuine_collection_unavailability_can_continue():
             ],
         },
         {},
-        _completed_enrichment(),
+        _completed_enrichment("https://example.test/locations"),
     )
 
     assert error is None
