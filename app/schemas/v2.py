@@ -42,10 +42,20 @@ class SubjectContextEnsure(StrictModel):
     relationships: list[ContextRelationshipEnsure] = []
 
 
+class EnrichmentRetrievalUse(StrictModel):
+    roles: list[Literal[
+        "identity", "likely_query", "location", "classification",
+        "relationship", "comparison", "verification",
+    ]] = Field(min_length=1)
+    likely_queries: list[str] = []
+    reason: str = Field(min_length=1)
+
+
 class SubjectEnrichmentCheck(StrictModel):
     status: Literal["completed", "unavailable", "not_applicable", "ambiguous"]
     sources: list[str] = []
     applied_fields: dict[str, list[str]] = {}
+    retrieval_uses: dict[str, EnrichmentRetrievalUse] = {}
     unapplied_sources: dict[str, str] = {}
     attempts: list[str] = []
     reason: str | None = Field(default=None, min_length=1)
