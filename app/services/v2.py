@@ -328,12 +328,22 @@ def create_experience(db: Session, payload: ExperienceCreate, client_id: str) ->
         db, subject_type, payload.structured_data, source=client_id,
     )
     source = _source(db, payload.source)
+    enrichment_check = (
+        payload.subject_enrichment_check.model_dump(mode="json")
+        if payload.subject_enrichment_check else None
+    )
+    if enrichment_check is not None:
+        enrichment_check["recorded_at"] = now_utc().isoformat()
     obj = V2Experience(
         owner_id=payload.owner_id, subject_id=subject.id, source_id=source.id if source else None,
         record_type="review", experienced_at=payload.experienced_at or now_utc(), headline=payload.headline,
         summary=payload.summary, raw_text=payload.raw_text, structured_data=canonical_data,
         submitted_data=payload.structured_data, normalization_log=log, visibility=payload.visibility,
-        publication_status="published", provenance={"kind": "direct_user_experience", "source_client": client_id},
+        publication_status="published",
+        provenance={
+            "kind": "direct_user_experience", "source_client": client_id,
+            **({"subject_enrichment_check": enrichment_check} if enrichment_check else {}),
+        },
         created_by_client=client_id,
     )
     db.add(obj); db.commit(); db.refresh(obj)

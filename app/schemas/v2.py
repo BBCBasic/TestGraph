@@ -42,6 +42,14 @@ class SubjectContextEnsure(StrictModel):
     relationships: list[ContextRelationshipEnsure] = []
 
 
+class SubjectEnrichmentCheck(StrictModel):
+    status: Literal["completed", "unavailable", "not_applicable", "ambiguous"]
+    sources: list[str] = []
+    attempts: list[str] = []
+    reason: str | None = Field(default=None, min_length=1)
+    candidate_identities: list[str] = []
+
+
 class SourceCreate(StrictModel):
     source_type: str
     provider: str
@@ -64,6 +72,7 @@ class ExperienceCreate(StrictModel):
     visibility: Literal["private", "unlisted", "public", "aggregate_only"] = "private"
     user_approved: bool = False
     source: SourceCreate | None = None
+    subject_enrichment_check: SubjectEnrichmentCheck | None = None
     source_client: str = "ai-client"
 
 
