@@ -682,6 +682,7 @@ def _enrich_subject(db, principal, args):
     collection_assessment, collection_error = _validate_collection_assessment(
         args.get("collection_assessment"), args, enrichment_check,
         primary_ref="subject", retry_tool="enrich_subject", attribute_key="attributes",
+        provenance_key="provenance",
     )
     if collection_error is not None:
         return collection_error
@@ -705,7 +706,7 @@ def _enrich_subject(db, principal, args):
         subject.attributes_json, args.get("attributes", {}), prefix="attributes",
     )
     _, provenance_additions, provenance_conflicts = _deep_fill_missing(
-        subject.provenance_json, provenance, prefix="provenance",
+        subject.provenance_json, args.get("provenance", {}), prefix="provenance",
     )
 
     subject = ensure_subject(
@@ -828,6 +829,7 @@ def _correct_subject_fact(db, principal, args):
         payload_hash=payload_hash, response_body=body,
     )
     return _result(body)
+
 
 def _request_path_parts(path):
     parts = []
@@ -1010,6 +1012,7 @@ def _collection_action_required(
 def _validate_collection_assessment(
     raw, args, enrichment_check, *, primary_ref="reviewed_subject",
     retry_tool="save_experience", attribute_key="subject_attributes",
+    provenance_key="subject_provenance",
 ):
     def action(code, required_action, **details):
         return _collection_action_required(
@@ -1182,7 +1185,7 @@ def _validate_collection_assessment(
         collection_data = {
             "identifiers": args.get("identifiers", {}),
             "subject_attributes": args.get(attribute_key, {}),
-            "subject_provenance": args.get("subject_provenance", {}),
+            "subject_provenance": args.get(provenance_key, {}),
             "subject_context": args.get("subject_context", {}),
         }
         if _contains_collection_signal(collection_data):
@@ -1207,7 +1210,7 @@ def _validate_collection_assessment(
                 "reason": assessment.reason,
                 "candidate_collections": assessment.candidate_collections,
                 "required_action": "Ask only for the clarification needed to identify the collection.",
-                "retry_tool": "save_experience",
+                "retry_tool": retry_tool,
             },
         )
 
