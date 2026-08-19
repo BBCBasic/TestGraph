@@ -29,7 +29,7 @@ from app.services.write_safety import begin_idempotent_write, finish_idempotent_
 
 router = APIRouter()
 PROTOCOL_VERSION = "2025-06-18"
-SERVER_VERSION = "3.10.2-alpha"
+SERVER_VERSION = "3.11.0-alpha"
 READ_SECURITY = [{"type": "oauth2", "scopes": ["reviews:read"]}]
 WRITE_SECURITY = [{"type": "oauth2", "scopes": ["reviews:write"]}]
 
@@ -68,6 +68,38 @@ TOOLS = [
     {"name": "fetch", "title": "Fetch a review", "description": "Fetch a complete review with its stable subject type, original words and AI assessments.", "inputSchema": {"type": "object", "properties": {"id": {"type": "string", "format": "uuid"}}, "required": ["id"], "additionalProperties": False}, **_security(READ_SECURITY), "annotations": {"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False}},
     {"name": "vocabulary_index", "title": "Inspect standard vocabulary", "description": "List canonical subject types, aliases, flexible relationships and reusable fields. Inspect this before classifying any unknown subject type. There are no DNS storage paths or review leaf concepts.", "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False}, **_security(READ_SECURITY), "annotations": {"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False}},
     {"name": "resolve_subject_type", "title": "Resolve a subject type", "description": "Resolve flexible input to one stable subject-type ID. Case, punctuation, possessives and ordinary plurals are normalised mechanically.", "inputSchema": {"type": "object", "properties": {"term": {"type": "string"}}, "required": ["term"], "additionalProperties": False}, **_security(READ_SECURITY), "annotations": {"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False}},
+    {
+        "name": "resolve_subject",
+        "title": "Resolve an existing subject",
+        "description": (
+            "Look up a reviewed or unreviewed subject before declaring a new one. Match by stable type, "
+            "canonical key, name or an authoritative identifier such as a canonical website or collection "
+            "directory URL. Use this before adding a collection subject so the existing subject_id and "
+            "canonical_key can be reused instead of creating a duplicate."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "subject_type": {"type": "string"},
+                "canonical_key": {"type": "string", "minLength": 1},
+                "name": {"type": "string", "minLength": 1},
+                "identifier_value": {"type": "string", "minLength": 1},
+                "identifier_key": {"type": "string", "minLength": 1},
+                "limit": {"type": "integer", "minimum": 1, "maximum": 20, "default": 10},
+            },
+            "anyOf": [
+                {"required": ["canonical_key"]},
+                {"required": ["name"]},
+                {"required": ["identifier_value"]},
+            ],
+            "additionalProperties": False,
+        },
+        **_security(READ_SECURITY),
+        "annotations": {
+            "readOnlyHint": True, "destructiveHint": False,
+            "idempotentHint": True, "openWorldHint": False,
+        },
+    },
     {"name": "resolve_subject_hierarchy", "title": "Resolve a semantic subject hierarchy", "description": "Use after vocabulary_index when the specific subject type does not yet exist. Submit terms broad-to-specific, for example ['food','recipe']. The server reuses existing dictionary entries, creates only missing provisional nodes in context, adds belongs_to relationships and rejects cycles. Do not include 'review': review is the record type, not a subject category. Semantic placement must be based on meaning, never on which review arrived first.", "inputSchema": {"type": "object", "properties": {"terms": {"type": "array", "minItems": 1, "maxItems": 8, "items": {"type": "string", "minLength": 1}}}, "required": ["terms"], "additionalProperties": False}, **_security(WRITE_SECURITY), "annotations": {"readOnlyHint": False, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False}},
     {"name": "register_subject_type_alias", "title": "Register a subject-type alias", "description": "Map a genuinely equivalent expression to an existing stable subject type. Never use this to express a category relationship.", "inputSchema": {"type": "object", "properties": {"subject_type": {"type": "string"}, "alias": {"type": "string"}}, "required": ["subject_type", "alias"], "additionalProperties": False}, **_security(WRITE_SECURITY), "annotations": {"readOnlyHint": False, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False}},
     {"name": "set_type_relationship", "title": "Connect existing subject types", "description": "Add editable classification metadata between existing subject types, such as ferry belongs_to transportation. Unknown types must first be resolved with resolve_subject_hierarchy. Relationships improve broad search but never determine storage IDs.", "inputSchema": {"type": "object", "properties": {"source_type": {"type": "string"}, "relationship": {"type": "string", "default": "belongs_to"}, "target_type": {"type": "string"}}, "required": ["source_type", "target_type"], "additionalProperties": False}, **_security(WRITE_SECURITY), "annotations": {"readOnlyHint": False, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False}},
@@ -527,6 +559,94 @@ def _resolve(db, args):
     return _result({"found": True, "id": str(obj.id), "canonical_name": obj.canonical_name, "status": obj.status, "aliases": [x.alias for x in aliases], "fields": [x.canonical_name for x in fields_for_type(db, obj)]})
 
 
+def _normalise_identity_value(value):
+    text = str(value).strip().casefold()
+    if text.startswith(("http://", "https://")):
+        text = text.split("#", 1)[0].rstrip("/")
+    return text
+
+
+def _identifier_matches(value, expected, key=None, current_key=None):
+    if isinstance(value, dict):
+        return any(
+            _identifier_matches(item, expected, key, str(item_key))
+            for item_key, item in value.items()
+        )
+    if isinstance(value, list):
+        return any(
+            _identifier_matches(item, expected, key, current_key)
+            for item in value
+        )
+    if key and _normalise_collection_token(current_key or "") != _normalise_collection_token(key):
+        return False
+    return _normalise_identity_value(value) == expected
+
+
+def _resolve_subject(db, args):
+    subject_type = None
+    if args.get("subject_type"):
+        subject_type = resolve_subject_type(db, args["subject_type"])
+        if not subject_type:
+            return _result({
+                "found": False, "count": 0, "results": [],
+                "instruction": "Resolve the subject type before resolving a subject.",
+            })
+
+    stmt = (
+        select(V2Subject, SubjectType)
+        .join(SubjectType, V2Subject.subject_type_id == SubjectType.id)
+        .where(V2Subject.deleted_at.is_(None))
+    )
+    if subject_type:
+        stmt = stmt.where(V2Subject.subject_type_id == subject_type.id)
+
+    canonical_key = str(args.get("canonical_key", "")).strip()
+    name = str(args.get("name", "")).strip().casefold()
+    identifier = (
+        _normalise_identity_value(args["identifier_value"])
+        if args.get("identifier_value") else None
+    )
+    identifier_key = args.get("identifier_key")
+    matches = []
+    for subject, item_type in db.execute(stmt).all():
+        reasons = []
+        if canonical_key and subject.canonical_key == canonical_key:
+            reasons.append("canonical_key")
+        if name and subject.name.strip().casefold() == name:
+            reasons.append("name")
+        if identifier and _identifier_matches(
+            subject.identifiers_json or {}, identifier, identifier_key
+        ):
+            reasons.append("identifier")
+        if not reasons:
+            continue
+        matches.append({
+            "subject_id": str(subject.id),
+            "subject_type": item_type.canonical_name,
+            "name": subject.name,
+            "canonical_key": subject.canonical_key,
+            "identifiers": subject.identifiers_json,
+            "attributes": subject.attributes_json,
+            "matched_by": reasons,
+        })
+
+    priority = {"canonical_key": 0, "identifier": 1, "name": 2}
+    matches.sort(key=lambda item: (
+        min(priority[reason] for reason in item["matched_by"]),
+        item["name"].casefold(),
+    ))
+    limit = max(1, min(int(args.get("limit", 10)), 20))
+    matches = matches[:limit]
+    return _result({
+        "found": bool(matches), "count": len(matches), "results": matches,
+        "instruction": (
+            "Reuse the confirmed subject_id and canonical_key."
+            if matches else
+            "No existing subject matched; a new subject may be declared when the evidence supports it."
+        ),
+    })
+
+
 def _search(db, principal, args):
     stmt = select(V2Experience, V2Subject, SubjectType).join(V2Subject, V2Experience.subject_id == V2Subject.id).join(SubjectType, V2Subject.subject_type_id == SubjectType.id).where(V2Experience.owner_id == principal.user_id, V2Experience.deleted_at.is_(None))
     type_term = str(args.get("subject_type", "")).strip()
@@ -798,7 +918,7 @@ def _enrich_subject(db, principal, args):
     collection_assessment, collection_error = _validate_collection_assessment(
         args.get("collection_assessment"), args, enrichment_check,
         primary_ref="subject", retry_tool="enrich_subject", attribute_key="attributes",
-        provenance_key="provenance",
+        provenance_key="provenance", db=db,
     )
     if collection_error is not None:
         return collection_error
@@ -1148,188 +1268,259 @@ def _contains_exact_value(value, expected):
     return value == expected
 
 
-def _collection_action_required(
-    code, required_action, *, retry_tool="save_experience", **details,
-):
+def _collection_violation(code, required_action, *, field=None, **details):
+    violation = {
+        "code": code,
+        "required_action": required_action,
+        **details,
+    }
+    if field:
+        violation["field"] = field
+    return violation
+
+
+def _collection_violations_error(violations, *, retry_tool="save_experience"):
+    first = violations[0]
     return _error(
         "Collection assessment incomplete",
         {
             "status": "action_required",
-            "code": code,
-            "required_action": required_action,
             "retry_tool": retry_tool,
-            **details,
+            **first,
+            "violations": violations,
         },
     )
 
 
-def _validate_collection_source_manifest(
-    assessment, enrichment_sources, submitted_refs, *, retry_tool,
+def _collection_action_required(
+    code, required_action, *, retry_tool="save_experience", field=None, **details,
 ):
+    return _collection_violations_error(
+        [_collection_violation(
+            code, required_action, field=field, **details,
+        )],
+        retry_tool=retry_tool,
+    )
+
+
+def _validate_collection_source_manifest(
+    assessment, enrichment_sources, submitted_refs,
+):
+    violations = []
     manifest = assessment.source_manifest
     if manifest is None:
-        return _collection_action_required(
+        return [_collection_violation(
             "collection_source_manifest_required",
             (
                 "Use web search to discover every authoritative directory surface for the collection, "
                 "then submit the complete source manifest before deriving members."
             ),
-            retry_tool=retry_tool,
-        )
+            field="collection_assessment.source_manifest",
+        )]
 
     pages = manifest.source_pages
     page_urls = [page.url for page in pages]
-    if len(page_urls) != len(set(page_urls)):
-        return _collection_action_required(
+    page_url_set = set(page_urls)
+    if len(page_urls) != len(page_url_set):
+        violations.append(_collection_violation(
             "collection_source_urls_not_unique",
             "Remove duplicate source-page URLs from the collection source manifest.",
-            retry_tool=retry_tool,
-        )
+            field="collection_assessment.source_manifest.source_pages",
+        ))
     if manifest.declared_source_count != len(pages):
-        return _collection_action_required(
+        violations.append(_collection_violation(
             "collection_source_count_mismatch",
             "Submit every discovered authoritative source page before retrying.",
-            retry_tool=retry_tool,
+            field="collection_assessment.source_manifest.declared_source_count",
             declared_source_count=manifest.declared_source_count,
             submitted_source_count=len(pages),
-        )
+        ))
     if manifest.unresolved_source_urls:
-        return _collection_action_required(
+        violations.append(_collection_violation(
             "collection_sources_unresolved",
             "Inspect every unresolved authoritative source route and resubmit only when none remain.",
-            retry_tool=retry_tool,
+            field="collection_assessment.source_manifest.unresolved_source_urls",
             unresolved_source_urls=manifest.unresolved_source_urls,
-        )
-    if assessment.directory_url not in set(page_urls):
-        return _collection_action_required(
+        ))
+    if assessment.directory_url and assessment.directory_url not in page_url_set:
+        violations.append(_collection_violation(
             "collection_directory_missing_from_manifest",
             "Include the authoritative directory URL in source_manifest.source_pages.",
-            retry_tool=retry_tool,
+            field="collection_assessment.source_manifest.source_pages",
             directory_url=assessment.directory_url,
-        )
+        ))
 
-    unreconciled_pages = sorted(set(page_urls) - enrichment_sources)
+    unreconciled_pages = sorted(page_url_set - enrichment_sources)
     if unreconciled_pages:
-        return _collection_action_required(
+        violations.append(_collection_violation(
             "collection_source_pages_unreconciled",
             "Add every authoritative source page to subject_enrichment_check.sources and reconcile it.",
-            retry_tool=retry_tool,
+            field="subject_enrichment_check.sources",
             unreconciled_source_pages=unreconciled_pages,
-        )
-    missing_evidence_pages = sorted(set(page_urls) - set(assessment.evidence_sources))
+        ))
+    missing_evidence_pages = sorted(
+        page_url_set - set(assessment.evidence_sources)
+    )
     if missing_evidence_pages:
-        return _collection_action_required(
+        violations.append(_collection_violation(
             "collection_source_pages_not_evidence",
             "Include every source-manifest page in collection_assessment.evidence_sources.",
-            retry_tool=retry_tool,
+            field="collection_assessment.evidence_sources",
             missing_evidence_pages=missing_evidence_pages,
-        )
+        ))
 
     empty_pages = [page.url for page in pages if not page.member_refs]
     if empty_pages:
-        return _collection_action_required(
+        violations.append(_collection_violation(
             "collection_source_pages_without_members",
             "Map every authoritative source page to the member refs derived from it.",
-            retry_tool=retry_tool,
+            field="collection_assessment.source_manifest.source_pages",
             source_pages=empty_pages,
-        )
+        ))
     covered_refs = {
         member_ref for page in pages for member_ref in page.member_refs
     }
-    submitted_set = set(submitted_refs)
+    submitted_set = set(submitted_refs or [])
     unknown_refs = sorted(covered_refs - submitted_set)
     missing_refs = sorted(submitted_set - covered_refs)
     if unknown_refs or missing_refs:
-        return _collection_action_required(
+        violations.append(_collection_violation(
             "collection_source_member_coverage_mismatch",
             "Map exactly every submitted collection member to at least one authoritative source page.",
-            retry_tool=retry_tool,
+            field="collection_assessment.source_manifest.source_pages",
             unknown_member_refs=unknown_refs,
             uncovered_member_refs=missing_refs,
-        )
+        ))
 
     if manifest.coverage_method == "pagination":
         sequences = [page.sequence for page in pages]
         expected = list(range(1, len(pages) + 1))
-        if None in sequences or sorted(sequences) != expected:
-            return _collection_action_required(
+        sequences_valid = (
+            None not in sequences and sorted(sequences) == expected
+        )
+        if not sequences_valid:
+            violations.append(_collection_violation(
                 "collection_pagination_incomplete",
                 "Number every pagination source continuously from 1 through the terminal page.",
-                retry_tool=retry_tool,
+                field="collection_assessment.source_manifest.source_pages",
                 submitted_sequences=sequences,
                 expected_sequences=expected,
-            )
-        ordered = sorted(pages, key=lambda page: page.sequence)
-        terminal_pages = [page for page in ordered if page.terminal]
-        if len(terminal_pages) != 1 or terminal_pages[0].sequence != len(ordered):
-            return _collection_action_required(
-                "collection_pagination_terminal_invalid",
-                "Mark exactly the final pagination page as terminal.",
-                retry_tool=retry_tool,
-            )
-        broken_links = []
-        for index, page in enumerate(ordered):
-            expected_next = ordered[index + 1].url if index + 1 < len(ordered) else None
-            if page.next_url != expected_next:
-                broken_links.append({
-                    "sequence": page.sequence,
-                    "url": page.url,
-                    "submitted_next_url": page.next_url,
-                    "expected_next_url": expected_next,
-                })
-        if broken_links:
-            return _collection_action_required(
-                "collection_pagination_links_incomplete",
-                "Follow and record every next-page link through the terminal page.",
-                retry_tool=retry_tool,
-                broken_links=broken_links,
-            )
+            ))
+        if sequences_valid:
+            ordered = sorted(pages, key=lambda page: page.sequence)
+            terminal_pages = [page for page in ordered if page.terminal]
+            if (
+                len(terminal_pages) != 1
+                or terminal_pages[0].sequence != len(ordered)
+            ):
+                violations.append(_collection_violation(
+                    "collection_pagination_terminal_invalid",
+                    "Mark exactly the final pagination page as terminal.",
+                    field="collection_assessment.source_manifest.source_pages",
+                ))
+            broken_links = []
+            for index, page in enumerate(ordered):
+                expected_next = (
+                    ordered[index + 1].url
+                    if index + 1 < len(ordered) else None
+                )
+                if page.next_url != expected_next:
+                    broken_links.append({
+                        "sequence": page.sequence,
+                        "url": page.url,
+                        "submitted_next_url": page.next_url,
+                        "expected_next_url": expected_next,
+                    })
+            if broken_links:
+                violations.append(_collection_violation(
+                    "collection_pagination_links_incomplete",
+                    "Follow and record every next-page link through the terminal page.",
+                    field="collection_assessment.source_manifest.source_pages",
+                    broken_links=broken_links,
+                ))
     else:
         unresolved_links = sorted({
             page.next_url for page in pages
-            if page.next_url and page.next_url not in set(page_urls)
+            if page.next_url and page.next_url not in page_url_set
         })
         if unresolved_links:
-            return _collection_action_required(
+            violations.append(_collection_violation(
                 "collection_source_links_unresolved",
                 "Inspect every discovered next source URL before declaring discovery exhausted.",
-                retry_tool=retry_tool,
+                field="collection_assessment.source_manifest.source_pages",
                 unresolved_source_urls=unresolved_links,
-            )
-    return None
+            ))
+    return violations
+
+
+def _existing_collection_matches(db, collection_subject, directory_url):
+    if db is None or not collection_subject or not directory_url:
+        return []
+    subject_type = resolve_subject_type(
+        db, str(collection_subject.get("subject_type", ""))
+    )
+    if not subject_type:
+        return []
+    canonical_key = collection_subject.get("canonical_key")
+    matches = []
+    candidates = db.scalars(select(V2Subject).where(
+        V2Subject.subject_type_id == subject_type.id,
+        V2Subject.deleted_at.is_(None),
+    )).all()
+    for candidate in candidates:
+        if candidate.canonical_key == canonical_key:
+            continue
+        if _contains_exact_value(
+            {
+                "identifiers": candidate.identifiers_json or {},
+                "attributes": candidate.attributes_json or {},
+                "provenance": candidate.provenance_json or {},
+            },
+            directory_url,
+        ):
+            matches.append({
+                "subject_id": str(candidate.id),
+                "name": candidate.name,
+                "canonical_key": candidate.canonical_key,
+            })
+    return matches
 
 
 def _validate_collection_assessment(
     raw, args, enrichment_check, *, primary_ref="reviewed_subject",
     retry_tool="save_experience", attribute_key="subject_attributes",
-    provenance_key="subject_provenance",
+    provenance_key="subject_provenance", db=None,
 ):
-    def action(code, required_action, **details):
-        return _collection_action_required(
-            code, required_action, retry_tool=retry_tool, **details,
-        )
     if raw is None:
-        return None, action(
+        return None, _collection_action_required(
             "collection_assessment_required",
             "Determine whether the target subject belongs to a wider collection, submit the evidence, and retry.",
+            retry_tool=retry_tool,
+            field="collection_assessment",
         )
     try:
         assessment = CollectionAssessment.model_validate(raw)
     except ValueError as exc:
-        return None, action(
+        return None, _collection_action_required(
             "collection_assessment_invalid",
             "Correct the collection assessment and retry.",
+            retry_tool=retry_tool,
+            field="collection_assessment",
             reason=str(exc),
         )
 
+    violations = []
     enrichment_sources = set(enrichment_check.sources)
-    unknown_evidence = set(assessment.evidence_sources) - enrichment_sources
+    unknown_evidence = sorted(
+        set(assessment.evidence_sources) - enrichment_sources
+    )
     if unknown_evidence:
-        return None, action(
+        violations.append(_collection_violation(
             "collection_evidence_not_reconciled",
             "Include every collection evidence URL in subject_enrichment_check.sources and reconcile it.",
-            unknown_evidence_sources=sorted(unknown_evidence),
-        )
+            field="subject_enrichment_check.sources",
+            unknown_evidence_sources=unknown_evidence,
+        ))
 
     if assessment.status == "member":
         missing = [
@@ -1344,140 +1535,184 @@ def _validate_collection_assessment(
             if value is None or value == []
         ]
         if missing:
-            return None, action(
+            violations.append(_collection_violation(
                 "collection_member_details_required",
                 "Supply the collection identity, authoritative directory URL, discovered count, every submitted member ref and the exhaustive source manifest.",
+                field="collection_assessment",
                 missing_fields=missing,
-            )
-        if assessment.directory_url not in enrichment_sources:
-            return None, action(
+            ))
+        if (
+            assessment.directory_url
+            and assessment.directory_url not in enrichment_sources
+        ):
+            violations.append(_collection_violation(
                 "collection_directory_source_required",
                 "Add the authoritative directory URL to subject_enrichment_check.sources and reconcile it.",
+                field="subject_enrichment_check.sources",
                 directory_url=assessment.directory_url,
-            )
+            ))
 
         context = args.get("subject_context") or {}
         subjects = context.get("subjects") or []
-        collection_subjects = [
-            subject for subject in subjects
-            if str(subject.get("name", "")).strip().casefold()
-            == assessment.collection_name.strip().casefold()
-        ]
-        if not collection_subjects:
-            return None, action(
+        collection_subjects = []
+        if assessment.collection_name:
+            collection_subjects = [
+                subject for subject in subjects
+                if str(subject.get("name", "")).strip().casefold()
+                == assessment.collection_name.strip().casefold()
+            ]
+        collection_subject = (
+            collection_subjects[0] if collection_subjects else None
+        )
+        if assessment.collection_name and not collection_subject:
+            violations.append(_collection_violation(
                 "collection_subject_required",
                 "Add the named collection as an unreviewed subject in subject_context.",
+                field="subject_context.subjects",
                 collection_name=assessment.collection_name,
-            )
-        collection_subject = collection_subjects[0]
-        if not _contains_exact_value(
-            {
-                "identifiers": collection_subject.get("identifiers", {}),
-                "attributes": collection_subject.get("attributes", {}),
-                "provenance": collection_subject.get("provenance", {}),
-            },
-            assessment.directory_url,
-        ):
-            return None, action(
-                "collection_directory_not_stored",
-                "Store the authoritative directory URL on the collection subject.",
-                collection_ref=collection_subject.get("ref"),
-                directory_url=assessment.directory_url,
-            )
+            ))
 
-        if not _contains_exact_value(
-            collection_subject.get("attributes", {}),
-            assessment.discovered_count,
-        ):
-            return None, action(
-                "collection_member_count_not_stored",
-                "Store discovered_count on the collection subject attributes.",
-                collection_ref=collection_subject.get("ref"),
-                discovered_count=assessment.discovered_count,
+        collection_ref = None
+        if collection_subject:
+            collection_ref = collection_subject.get("ref")
+            if (
+                assessment.directory_url
+                and not _contains_exact_value(
+                    {
+                        "identifiers": collection_subject.get("identifiers", {}),
+                        "attributes": collection_subject.get("attributes", {}),
+                        "provenance": collection_subject.get("provenance", {}),
+                    },
+                    assessment.directory_url,
+                )
+            ):
+                violations.append(_collection_violation(
+                    "collection_directory_not_stored",
+                    "Store the authoritative directory URL on the collection subject.",
+                    field="subject_context.subjects[collection].identifiers",
+                    collection_ref=collection_ref,
+                    directory_url=assessment.directory_url,
+                ))
+            if (
+                assessment.discovered_count is not None
+                and not _contains_exact_value(
+                    collection_subject.get("attributes", {}),
+                    assessment.discovered_count,
+                )
+            ):
+                violations.append(_collection_violation(
+                    "collection_member_count_not_stored",
+                    "Store discovered_count on the collection subject attributes.",
+                    field="subject_context.subjects[collection].attributes.discovered_count",
+                    collection_ref=collection_ref,
+                    discovered_count=assessment.discovered_count,
+                ))
+            linked = bool(collection_ref) and any(
+                {relationship.get("source_ref"), relationship.get("target_ref")}
+                == {primary_ref, collection_ref}
+                for relationship in context.get("relationships") or []
             )
-
-        collection_ref = collection_subject.get("ref")
-        linked = bool(collection_ref) and any(
-            {relationship.get("source_ref"), relationship.get("target_ref")}
-            == {primary_ref, collection_ref}
-            for relationship in context.get("relationships") or []
-        )
-        if not linked:
-            return None, action(
-                "collection_relationship_required",
-                "Connect the target subject to the collection subject in subject_context.",
-                collection_ref=collection_ref,
+            if not linked:
+                violations.append(_collection_violation(
+                    "collection_relationship_required",
+                    "Connect the target subject to the collection subject in subject_context.",
+                    field="subject_context.relationships",
+                    collection_ref=collection_ref,
+                ))
+            existing_matches = _existing_collection_matches(
+                db, collection_subject, assessment.directory_url
             )
+            if existing_matches:
+                violations.append(_collection_violation(
+                    "collection_subject_already_exists",
+                    "Reuse the existing collection subject and canonical_key instead of declaring a duplicate.",
+                    field="subject_context.subjects[collection].canonical_key",
+                    existing_matches=existing_matches,
+                ))
 
-        submitted_refs = assessment.submitted_member_refs
-        if not submitted_refs:
-            return None, action(
+        submitted_refs = assessment.submitted_member_refs or []
+        if not submitted_refs and "submitted_member_refs" not in missing:
+            violations.append(_collection_violation(
                 "collection_members_required",
                 "Submit the target subject and every discovered collection member in submitted_member_refs.",
-            )
-        if len(submitted_refs) != len(set(submitted_refs)):
-            return None, action(
+                field="collection_assessment.submitted_member_refs",
+            ))
+        refs_unique = len(submitted_refs) == len(set(submitted_refs))
+        if submitted_refs and not refs_unique:
+            violations.append(_collection_violation(
                 "collection_member_refs_not_unique",
                 "Remove duplicate submitted_member_refs and retry.",
-            )
+                field="collection_assessment.submitted_member_refs",
+            ))
         known_refs = {primary_ref} | {
             subject.get("ref") for subject in subjects if subject.get("ref")
         }
         unknown_refs = sorted(set(submitted_refs) - known_refs)
         if unknown_refs:
-            return None, action(
+            violations.append(_collection_violation(
                 "collection_member_refs_unknown",
                 "Every submitted member ref must be the target subject or a subject_context subject.",
+                field="collection_assessment.submitted_member_refs",
                 unknown_refs=unknown_refs,
-            )
-        if collection_ref in submitted_refs:
-            return None, action(
+            ))
+        if collection_ref and collection_ref in submitted_refs:
+            violations.append(_collection_violation(
                 "collection_subject_is_not_member",
                 "Do not count the collection subject itself as one of its members.",
+                field="collection_assessment.submitted_member_refs",
                 collection_ref=collection_ref,
-            )
-        if primary_ref not in submitted_refs:
-            return None, action(
+            ))
+        if submitted_refs and primary_ref not in submitted_refs:
+            violations.append(_collection_violation(
                 "reviewed_subject_not_counted",
                 "Include the target subject in submitted_member_refs.",
-            )
-        submitted_count = len(submitted_refs)
-        if submitted_count != assessment.discovered_count:
-            return None, action(
+                field="collection_assessment.submitted_member_refs",
+            ))
+        if (
+            assessment.discovered_count is not None
+            and submitted_refs
+            and len(submitted_refs) != assessment.discovered_count
+        ):
+            violations.append(_collection_violation(
                 "collection_member_count_mismatch",
                 "Submit every discovered member before retrying; lazy or future materialisation is not accepted.",
+                field="collection_assessment.submitted_member_refs",
                 discovered_count=assessment.discovered_count,
-                submitted_count=submitted_count,
-                missing_count=assessment.discovered_count - submitted_count,
+                submitted_count=len(submitted_refs),
+                missing_count=assessment.discovered_count - len(submitted_refs),
+            ))
+
+        if assessment.source_manifest is not None:
+            violations.extend(_validate_collection_source_manifest(
+                assessment, enrichment_sources, submitted_refs,
+            ))
+
+        if collection_ref and submitted_refs:
+            relationships = context.get("relationships") or []
+            unlinked_refs = sorted(
+                member_ref for member_ref in submitted_refs
+                if not any(
+                    {relationship.get("source_ref"), relationship.get("target_ref")}
+                    == {member_ref, collection_ref}
+                    for relationship in relationships
+                )
             )
-        manifest_error = _validate_collection_source_manifest(
-            assessment, enrichment_sources, submitted_refs, retry_tool=retry_tool,
-        )
-        if manifest_error is not None:
-            return None, manifest_error
-        relationships = context.get("relationships") or []
-        unlinked_refs = sorted(
-            member_ref for member_ref in submitted_refs
-            if not any(
-                {relationship.get("source_ref"), relationship.get("target_ref")}
-                == {member_ref, collection_ref}
-                for relationship in relationships
-            )
-        )
-        if unlinked_refs:
-            return None, action(
-                "collection_members_not_linked",
-                "Connect every submitted member to the collection.",
-                unlinked_refs=unlinked_refs,
-                collection_ref=collection_ref,
-            )
+            if unlinked_refs:
+                violations.append(_collection_violation(
+                    "collection_members_not_linked",
+                    "Connect every submitted member to the collection.",
+                    field="subject_context.relationships",
+                    unlinked_refs=unlinked_refs,
+                    collection_ref=collection_ref,
+                ))
 
     elif assessment.status == "independent":
         if not assessment.evidence_sources and not assessment.attempts:
-            return None, action(
+            violations.append(_collection_violation(
                 "collection_independent_evidence_required",
                 "Provide an authoritative source or a concise record of the collection-membership searches performed.",
-            )
+                field="collection_assessment",
+            ))
         collection_data = {
             "identifiers": args.get("identifiers", {}),
             "subject_attributes": args.get(attribute_key, {}),
@@ -1485,10 +1720,11 @@ def _validate_collection_assessment(
             "subject_context": args.get("subject_context", {}),
         }
         if _contains_collection_signal(collection_data):
-            return None, action(
+            violations.append(_collection_violation(
                 "collection_assessment_inconsistent",
                 "The save contains collection or parent-organisation signals; classify it as member or remove the inconsistent data.",
-            )
+                field="collection_assessment.status",
+            ))
 
     elif assessment.status == "unavailable":
         if (
@@ -1496,16 +1732,20 @@ def _validate_collection_assessment(
             or not assessment.reason
             or not assessment.attempts
         ):
-            return None, action(
+            violations.append(_collection_violation(
                 "collection_unavailable_details_required",
                 "Record unavailability_kind, attempted searches and the genuine identity or authoritative-source failure.",
-            )
-        explanation = " ".join([assessment.reason, *assessment.attempts])
+                field="collection_assessment",
+            ))
+        explanation = " ".join([
+            assessment.reason or "", *assessment.attempts
+        ])
         if _COLLECTION_OPERATIONAL_EXCUSE_RE.search(explanation):
-            return None, action(
+            violations.append(_collection_violation(
                 "collection_unavailable_operational_excuse",
                 "Collection size, effort, inconvenience, latency, quick-review scope and deferred work are not valid reasons. Complete the collection assessment before saving.",
-            )
+                field="collection_assessment.reason",
+            ))
         collection_data = {
             "identifiers": args.get("identifiers", {}),
             "subject_attributes": args.get(attribute_key, {}),
@@ -1522,24 +1762,25 @@ def _validate_collection_assessment(
             assessment.candidate_collections,
         ])
         if explicit_collection_evidence or _contains_collection_signal(collection_data):
-            return None, action(
+            violations.append(_collection_violation(
                 "collection_unavailable_inconsistent",
                 "Known collection evidence cannot be classified unavailable. Complete member assessment, or use ambiguous if the collection identity genuinely cannot be resolved.",
-            )
+                field="collection_assessment.status",
+            ))
 
     elif assessment.status == "ambiguous":
-        return None, _error(
-            "Collection membership is ambiguous",
-            {
-                "status": "action_required",
-                "code": "collection_membership_ambiguous",
-                "reason": assessment.reason,
-                "candidate_collections": assessment.candidate_collections,
-                "required_action": "Ask only for the clarification needed to identify the collection.",
-                "retry_tool": retry_tool,
-            },
-        )
+        violations.append(_collection_violation(
+            "collection_membership_ambiguous",
+            "Ask only for the clarification needed to identify the collection.",
+            field="collection_assessment.status",
+            reason=assessment.reason,
+            candidate_collections=assessment.candidate_collections,
+        ))
 
+    if violations:
+        return None, _collection_violations_error(
+            violations, retry_tool=retry_tool
+        )
     return assessment, None
 
 
@@ -1554,7 +1795,7 @@ def _save_experience(db, principal, args):
     if check_error is not None:
         return check_error
     collection_assessment, collection_error = _validate_collection_assessment(
-        args.get("collection_assessment"), args, enrichment_check
+        args.get("collection_assessment"), args, enrichment_check, db=db
     )
     if collection_error is not None:
         return collection_error
@@ -1688,6 +1929,7 @@ async def mcp_v2(request: Request, db: Session = Depends(get_db)):
                 elif name == "fetch": result = _fetch(db, principal, args)
                 elif name == "vocabulary_index": result = _result(vocabulary_index(db))
                 elif name == "resolve_subject_type": result = _resolve(db, args)
+                elif name == "resolve_subject": result = _resolve_subject(db, args)
                 elif name == "resolve_subject_hierarchy":
                     hierarchy = resolve_subject_hierarchy(db, args["terms"], created_by=f"{principal.client_id}:v3")
                     result = _result({

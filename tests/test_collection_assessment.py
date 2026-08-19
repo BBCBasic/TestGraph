@@ -472,3 +472,40 @@ def test_ambiguous_collection_stops_for_clarification():
     payload = _payload(error)
     assert payload["details"]["code"] == "collection_membership_ambiguous"
     assert payload["details"]["status"] == "action_required"
+
+
+
+def test_member_validation_returns_all_determinable_violations_together():
+    args = _member_args()
+    collection = args["subject_context"]["subjects"][0]
+    collection["identifiers"] = {}
+    collection["attributes"] = {}
+    args["subject_context"]["relationships"] = []
+
+    manifest = _member_assessment()["source_manifest"]
+    manifest["source_pages"][0]["member_refs"] = [
+        "reviewed_subject", "branch_two"
+    ]
+    raw = _member_assessment(
+        evidence_sources=[],
+        source_manifest=manifest,
+    )
+
+    assessment, error = _validate_collection_assessment(
+        raw, args, _completed_enrichment(DIRECTORY)
+    )
+
+    assert assessment is None
+    payload = _payload(error)
+    details = payload["details"]
+    codes = {item["code"] for item in details["violations"]}
+    assert details["code"] == "collection_directory_not_stored"
+    assert {
+        "collection_directory_not_stored",
+        "collection_member_count_not_stored",
+        "collection_relationship_required",
+        "collection_source_pages_not_evidence",
+        "collection_source_member_coverage_mismatch",
+        "collection_members_not_linked",
+    } <= codes
+    assert details["retry_tool"] == "save_experience"
