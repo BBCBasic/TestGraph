@@ -95,6 +95,11 @@ class CollectionAssessment(StrictModel):
     submitted_member_refs: list[str] = []
     source_manifest: CollectionSourceManifest | None = None
     evidence_sources: list[str] = []
+    unavailability_kind: Literal[
+        "collection_identity_not_found",
+        "authoritative_source_not_found",
+        "authoritative_source_inaccessible",
+    ] | None = None
     attempts: list[str] = []
     reason: str | None = Field(default=None, min_length=1)
     candidate_collections: list[str] = []
