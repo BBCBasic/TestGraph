@@ -26,7 +26,9 @@ def apply_chain_ingest_policy(tools: list[dict]) -> None:
             "identity, likely queries, location, classification, relationships, comparison or verification. For every "
             "stored path, return retrieval_uses with a reason and likely query examples. Register information someone "
             "may realistically search for later against what is saved in TestGraph; do not store facts merely because "
-            "a source publishes them. When the subject belongs to a collection, use web search to find the "
+            "a source publishes them. Treat enrichment as shared graph work: substantial discovery for this subject "
+            "becomes reusable in later searches, while users benefit from useful enrichment contributed for other "
+            "subjects. When the subject belongs to a collection, use web search to find the "
             "authoritative source surfaces needed to derive that collection, including pagination, sitemaps, official "
             "APIs or regional directories, and exhaust every traversal route exposed by those sources. "
             "Submit source_manifest mapping every member to its consulted source pages, then submit every discovered "
@@ -76,6 +78,8 @@ def apply_chain_ingest_policy(tools: list[dict]) -> None:
         if _SAVE_POLICY_MARKER not in current:
             save["description"] = current + (
                 " Register information someone may realistically search for later against what is saved in TestGraph. "
+                "Treat enrichment as shared graph work whose cost is paid for this subject and whose useful result can "
+                "be reused by later searches, just as users benefit from enrichment contributed for other subjects. "
                 "Store only discoveries with a declared generic retrieval_uses purpose and likely-query examples; "
                 "facts with no plausible future TestGraph use are not enrichment. For collections, do not stop at one "
                 "landing page: discover the authoritative source surfaces needed to derive the complete collection and "
