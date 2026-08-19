@@ -29,7 +29,7 @@ from app.services.write_safety import begin_idempotent_write, finish_idempotent_
 
 router = APIRouter()
 PROTOCOL_VERSION = "2025-06-18"
-SERVER_VERSION = "3.8.0-alpha"
+SERVER_VERSION = "3.9.0-alpha"
 READ_SECURITY = [{"type": "oauth2", "scopes": ["reviews:read"]}]
 WRITE_SECURITY = [{"type": "oauth2", "scopes": ["reviews:write"]}]
 
@@ -249,6 +249,64 @@ TOOLS = [
                         "submitted_member_refs": {
                             "type": "array", "minItems": 2, "maxItems": 500,
                             "items": {"type": "string", "minLength": 1},
+                        },
+                        "source_manifest": {
+                            "type": "object",
+                            "description": (
+                                "Exhaustive authoritative source-surface manifest. Discover paginated directories, "
+                                "sitemaps, official APIs, regional directories and member pages before deriving the "
+                                "collection. Every member must map to at least one consulted source and no unresolved "
+                                "source route may remain."
+                            ),
+                            "properties": {
+                                "coverage_method": {
+                                    "type": "string",
+                                    "enum": [
+                                        "single_page", "pagination", "sitemap", "api",
+                                        "multi_source", "search_derived",
+                                    ],
+                                },
+                                "declared_source_count": {"type": "integer", "minimum": 1},
+                                "source_pages": {
+                                    "type": "array", "minItems": 1, "maxItems": 500,
+                                    "items": {
+                                        "type": "object",
+                                        "properties": {
+                                            "url": {"type": "string", "minLength": 1},
+                                            "source_kind": {
+                                                "type": "string",
+                                                "enum": [
+                                                    "directory_page", "sitemap", "api",
+                                                    "official_member_page", "other_authoritative",
+                                                ],
+                                            },
+                                            "sequence": {"type": "integer", "minimum": 1},
+                                            "member_refs": {
+                                                "type": "array", "minItems": 1, "maxItems": 500,
+                                                "items": {"type": "string", "minLength": 1},
+                                            },
+                                            "next_url": {"type": "string", "minLength": 1},
+                                            "terminal": {"type": "boolean", "default": False},
+                                        },
+                                        "required": ["url", "source_kind", "member_refs"],
+                                        "additionalProperties": False,
+                                    },
+                                },
+                                "discovery_queries": {
+                                    "type": "array", "minItems": 1, "maxItems": 50,
+                                    "items": {"type": "string", "minLength": 1},
+                                },
+                                "exhaustion_evidence": {"type": "string", "minLength": 1},
+                                "unresolved_source_urls": {
+                                    "type": "array", "maxItems": 500, "default": [],
+                                    "items": {"type": "string", "minLength": 1},
+                                },
+                            },
+                            "required": [
+                                "coverage_method", "declared_source_count", "source_pages",
+                                "discovery_queries", "exhaustion_evidence",
+                            ],
+                            "additionalProperties": False,
                         },
                         "evidence_sources": {
                             "type": "array", "maxItems": 50, "default": [],
@@ -675,7 +733,10 @@ def _enrich_subject(db, principal, args):
         return context_error
     enrichment_check, enrichment_error = _validate_subject_enrichment_check(
         args.get("subject_enrichment_check"), args,
-        allowed_roots={"identifiers", "attributes", "provenance", "subject_context"},
+        allowed_roots={
+            "identifiers", "attributes", "provenance", "subject_context",
+            "collection_assessment",
+        },
     )
     if enrichment_error is not None:
         return enrichment_error
@@ -847,6 +908,7 @@ def _request_path_exists(args, path, allowed_roots=None):
     parts = _request_path_parts(path)
     allowed_roots = allowed_roots or {
         "identifiers", "subject_attributes", "subject_provenance", "subject_context",
+        "collection_assessment",
     }
     if not parts or parts[0] not in allowed_roots:
         return False
@@ -1009,6 +1071,142 @@ def _collection_action_required(
     )
 
 
+def _validate_collection_source_manifest(
+    assessment, enrichment_sources, submitted_refs, *, retry_tool,
+):
+    manifest = assessment.source_manifest
+    if manifest is None:
+        return _collection_action_required(
+            "collection_source_manifest_required",
+            (
+                "Use web search to discover every authoritative directory surface for the collection, "
+                "then submit the complete source manifest before deriving members."
+            ),
+            retry_tool=retry_tool,
+        )
+
+    pages = manifest.source_pages
+    page_urls = [page.url for page in pages]
+    if len(page_urls) != len(set(page_urls)):
+        return _collection_action_required(
+            "collection_source_urls_not_unique",
+            "Remove duplicate source-page URLs from the collection source manifest.",
+            retry_tool=retry_tool,
+        )
+    if manifest.declared_source_count != len(pages):
+        return _collection_action_required(
+            "collection_source_count_mismatch",
+            "Submit every discovered authoritative source page before retrying.",
+            retry_tool=retry_tool,
+            declared_source_count=manifest.declared_source_count,
+            submitted_source_count=len(pages),
+        )
+    if manifest.unresolved_source_urls:
+        return _collection_action_required(
+            "collection_sources_unresolved",
+            "Inspect every unresolved authoritative source route and resubmit only when none remain.",
+            retry_tool=retry_tool,
+            unresolved_source_urls=manifest.unresolved_source_urls,
+        )
+    if assessment.directory_url not in set(page_urls):
+        return _collection_action_required(
+            "collection_directory_missing_from_manifest",
+            "Include the authoritative directory URL in source_manifest.source_pages.",
+            retry_tool=retry_tool,
+            directory_url=assessment.directory_url,
+        )
+
+    unreconciled_pages = sorted(set(page_urls) - enrichment_sources)
+    if unreconciled_pages:
+        return _collection_action_required(
+            "collection_source_pages_unreconciled",
+            "Add every authoritative source page to subject_enrichment_check.sources and reconcile it.",
+            retry_tool=retry_tool,
+            unreconciled_source_pages=unreconciled_pages,
+        )
+    missing_evidence_pages = sorted(set(page_urls) - set(assessment.evidence_sources))
+    if missing_evidence_pages:
+        return _collection_action_required(
+            "collection_source_pages_not_evidence",
+            "Include every source-manifest page in collection_assessment.evidence_sources.",
+            retry_tool=retry_tool,
+            missing_evidence_pages=missing_evidence_pages,
+        )
+
+    empty_pages = [page.url for page in pages if not page.member_refs]
+    if empty_pages:
+        return _collection_action_required(
+            "collection_source_pages_without_members",
+            "Map every authoritative source page to the member refs derived from it.",
+            retry_tool=retry_tool,
+            source_pages=empty_pages,
+        )
+    covered_refs = {
+        member_ref for page in pages for member_ref in page.member_refs
+    }
+    submitted_set = set(submitted_refs)
+    unknown_refs = sorted(covered_refs - submitted_set)
+    missing_refs = sorted(submitted_set - covered_refs)
+    if unknown_refs or missing_refs:
+        return _collection_action_required(
+            "collection_source_member_coverage_mismatch",
+            "Map exactly every submitted collection member to at least one authoritative source page.",
+            retry_tool=retry_tool,
+            unknown_member_refs=unknown_refs,
+            uncovered_member_refs=missing_refs,
+        )
+
+    if manifest.coverage_method == "pagination":
+        sequences = [page.sequence for page in pages]
+        expected = list(range(1, len(pages) + 1))
+        if None in sequences or sorted(sequences) != expected:
+            return _collection_action_required(
+                "collection_pagination_incomplete",
+                "Number every pagination source continuously from 1 through the terminal page.",
+                retry_tool=retry_tool,
+                submitted_sequences=sequences,
+                expected_sequences=expected,
+            )
+        ordered = sorted(pages, key=lambda page: page.sequence)
+        terminal_pages = [page for page in ordered if page.terminal]
+        if len(terminal_pages) != 1 or terminal_pages[0].sequence != len(ordered):
+            return _collection_action_required(
+                "collection_pagination_terminal_invalid",
+                "Mark exactly the final pagination page as terminal.",
+                retry_tool=retry_tool,
+            )
+        broken_links = []
+        for index, page in enumerate(ordered):
+            expected_next = ordered[index + 1].url if index + 1 < len(ordered) else None
+            if page.next_url != expected_next:
+                broken_links.append({
+                    "sequence": page.sequence,
+                    "url": page.url,
+                    "submitted_next_url": page.next_url,
+                    "expected_next_url": expected_next,
+                })
+        if broken_links:
+            return _collection_action_required(
+                "collection_pagination_links_incomplete",
+                "Follow and record every next-page link through the terminal page.",
+                retry_tool=retry_tool,
+                broken_links=broken_links,
+            )
+    else:
+        unresolved_links = sorted({
+            page.next_url for page in pages
+            if page.next_url and page.next_url not in set(page_urls)
+        })
+        if unresolved_links:
+            return _collection_action_required(
+                "collection_source_links_unresolved",
+                "Inspect every discovered next source URL before declaring discovery exhausted.",
+                retry_tool=retry_tool,
+                unresolved_source_urls=unresolved_links,
+            )
+    return None
+
+
 def _validate_collection_assessment(
     raw, args, enrichment_check, *, primary_ref="reviewed_subject",
     retry_tool="save_experience", attribute_key="subject_attributes",
@@ -1049,13 +1247,14 @@ def _validate_collection_assessment(
                 "directory_url": assessment.directory_url,
                 "discovered_count": assessment.discovered_count,
                 "submitted_member_refs": assessment.submitted_member_refs,
+                "source_manifest": assessment.source_manifest,
             }.items()
             if value is None or value == []
         ]
         if missing:
             return None, action(
                 "collection_member_details_required",
-                "Supply the collection identity, authoritative directory URL, discovered count and every submitted member ref.",
+                "Supply the collection identity, authoritative directory URL, discovered count, every submitted member ref and the exhaustive source manifest.",
                 missing_fields=missing,
             )
         if assessment.directory_url not in enrichment_sources:
@@ -1159,6 +1358,11 @@ def _validate_collection_assessment(
                 submitted_count=submitted_count,
                 missing_count=assessment.discovered_count - submitted_count,
             )
+        manifest_error = _validate_collection_source_manifest(
+            assessment, enrichment_sources, submitted_refs, retry_tool=retry_tool,
+        )
+        if manifest_error is not None:
+            return None, manifest_error
         relationships = context.get("relationships") or []
         unlinked_refs = sorted(
             member_ref for member_ref in submitted_refs
@@ -1344,7 +1548,7 @@ async def mcp_v2(request: Request, db: Session = Depends(get_db)):
     if method and method.startswith("notifications/"):
         return Response(status_code=202)
     if method == "initialize":
-        result = {"protocolVersion": PROTOCOL_VERSION, "capabilities": {"tools": {"listChanged": False}}, "serverInfo": {"name": "TasteGraph v2", "version": SERVER_VERSION}, "instructions": "Before saving an experience, identify exactly what was experienced and inspect vocabulary_index. Reuse an existing canonical type or alias whenever possible. If the specific type is absent, reason from meaning to a broad-to-specific hierarchy and call resolve_subject_hierarchy; never create a type merely because it arrived first. Before saving, perform the generic subject enrichment check and include its result in subject_enrichment_check. Use authoritative or primary sources where available, but do not require a website, location or any domain-specific field. Reconcile every consulted source with the request paths it populated, or explain why it yielded no stored discovery. When the subject has its own canonical URL, store it as an identifier. Perform routine checking and retry automatically; do not ask the user unless identity is genuinely ambiguous. If enrichment cannot be found, use unavailable with a reason and the searches attempted. Save discoveries as unreviewed subject_context with generic relationships and source provenance, while attaching the review only to the exact subject experienced. Always submit collection_assessment. When the subject belongs to a wider collection, save that collection as an unreviewed subject and preserve the authoritative directory URL and discovered count. Submit reviewed_subject plus every member exposed by the finite authoritative directory as unreviewed subject_context, connect every member to the collection, and list those refs in submitted_member_refs. The server derives submitted_count and rejects the save unless it equals discovered_count; unreviewed status, collection size and future materialisation are not valid omissions. On a location-based recommendation, never conclude there is no relevant result from the target-town search alone: also search the relevant subject type without a text query, follow reviewed subjects to parent organisations, inspect their official branch directories for the requested location, and add any discovered branch as an unreviewed related subject. Do this routine chain lookup without asking the user. If authoritative information was missed during the original save, use enrich_subject to add it without creating another review. Location is optional: for a physical location record town and coordinates only when explicitly published by the source, otherwise record the published address; skip location when irrelevant. If the official source is unavailable, preserve that limitation and never invent facts or silently geocode coordinates. The experience date defaults to creation time unless explicitly provided. When structured data matches an existing globally registered canonical field, include it in the save: TestGraph attaches that field to the subject type automatically after validation. Do not ask for routine confirmation, omit the structured value, or demote it to raw_text merely because the field has not previously been used for that subject type. Only genuinely new reusable fields require register_field. Reviews store stable subject-type IDs, while belongs_to relationships provide the evolving semantic structure. Preserve exact user wording in raw_text and AI analysis in save_assessment."}
+        result = {"protocolVersion": PROTOCOL_VERSION, "capabilities": {"tools": {"listChanged": False}}, "serverInfo": {"name": "TasteGraph v2", "version": SERVER_VERSION}, "instructions": "Before saving an experience, identify exactly what was experienced and inspect vocabulary_index. Reuse an existing canonical type or alias whenever possible. If the specific type is absent, reason from meaning to a broad-to-specific hierarchy and call resolve_subject_hierarchy; never create a type merely because it arrived first. Before saving, perform the generic subject enrichment check and include its result in subject_enrichment_check. Use authoritative or primary sources where available, but do not require a website, location or any domain-specific field. Reconcile every consulted source with the request paths it populated, or explain why it yielded no stored discovery. When the subject has its own canonical URL, store it as an identifier. Perform routine checking and retry automatically; do not ask the user unless identity is genuinely ambiguous. If enrichment cannot be found, use unavailable with a reason and the searches attempted. Save discoveries as unreviewed subject_context with generic relationships and source provenance, while attaching the review only to the exact subject experienced. Always submit collection_assessment. When the subject belongs to a wider collection, do not stop at one company landing page. Use web search to discover every authoritative collection surface, including pagination, sitemaps, official APIs, regional directories and member pages. Return a complete source_manifest that maps every member to its consulted source pages, records discovery queries and exhaustion evidence, follows pagination to a terminal page and leaves no unresolved source URL. Save the collection as an unreviewed subject and preserve its authoritative directory URL and discovered count. Submit reviewed_subject plus every derived member as unreviewed subject_context, connect every member to the collection, and list those refs in submitted_member_refs. The server rejects incomplete source coverage and requires submitted_count to equal discovered_count; unreviewed status, collection size and future materialisation are not valid omissions. On a location-based recommendation, never conclude there is no relevant result from the target-town search alone: also search the relevant subject type without a text query, follow reviewed subjects to parent organisations, inspect their official branch directories for the requested location, and add any discovered branch as an unreviewed related subject. Do this routine chain lookup without asking the user. If authoritative information was missed during the original save, use enrich_subject to add it without creating another review. Location is optional: for a physical location record town and coordinates only when explicitly published by the source, otherwise record the published address; skip location when irrelevant. If the official source is unavailable, preserve that limitation and never invent facts or silently geocode coordinates. The experience date defaults to creation time unless explicitly provided. When structured data matches an existing globally registered canonical field, include it in the save: TestGraph attaches that field to the subject type automatically after validation. Do not ask for routine confirmation, omit the structured value, or demote it to raw_text merely because the field has not previously been used for that subject type. Only genuinely new reusable fields require register_field. Reviews store stable subject-type IDs, while belongs_to relationships provide the evolving semantic structure. Preserve exact user wording in raw_text and AI analysis in save_assessment."}
     elif method == "ping":
         result = {}
     elif method == "tools/list":
