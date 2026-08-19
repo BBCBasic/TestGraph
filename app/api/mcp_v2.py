@@ -1517,7 +1517,6 @@ def _validate_collection_assessment(
             assessment.discovered_count is not None,
             assessment.submitted_member_refs,
             assessment.source_manifest is not None,
-            assessment.evidence_sources,
             assessment.candidate_collections,
         ])
         if explicit_collection_evidence or _contains_collection_signal(collection_data):
