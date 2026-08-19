@@ -489,6 +489,7 @@ def _validate_subject_context(db, raw):
 
     return context, None
 
+
 def _enrich_subject(db, principal, args):
     client_id = f"{principal.client_id}:v3"
     relevant = {k: v for k, v in args.items() if k != "idempotency_key"}
