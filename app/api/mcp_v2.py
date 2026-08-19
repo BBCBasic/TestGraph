@@ -29,7 +29,7 @@ from app.services.write_safety import begin_idempotent_write, finish_idempotent_
 
 router = APIRouter()
 PROTOCOL_VERSION = "2025-06-18"
-SERVER_VERSION = "3.10.0-alpha"
+SERVER_VERSION = "3.10.1-alpha"
 READ_SECURITY = [{"type": "oauth2", "scopes": ["reviews:read"]}]
 WRITE_SECURITY = [{"type": "oauth2", "scopes": ["reviews:write"]}]
 
@@ -159,8 +159,11 @@ TOOLS = [
             "source must be reconciled: list the request paths populated from it in applied_fields, or explain in "
             "unapplied_sources why it yielded no stored discovery. Every applied path must declare a generic "
             "retrieval_uses entry explaining how it helps future identity, likely queries, location, classification, "
-            "relationships, comparison or verification. Do not store facts merely because they are available. "
-            "A subject's own canonical URL is a stable "
+            "relationships, comparison or verification. Treat enrichment as preparation for future TestGraph "
+            "searches: register information someone may realistically search for later, and do not store facts "
+            "merely because they are available. Treat this as shared graph building: substantial discovery work for "
+            "this subject becomes reusable for later searches, while this user can benefit from useful enrichment "
+            "contributed for other subjects. A subject's own canonical URL is a stable "
             "identifier and must be stored in identifiers when found. If enrichment cannot be found, use unavailable "
             "with a reason and the searches attempted. Use not_applicable with a "
             "reason when external enrichment has no sensible application. Collection assessment is mandatory: "
@@ -271,8 +274,11 @@ TOOLS = [
                         "authoritative directory URL, discovered count, and submitted_member_refs naming "
                         "reviewed_subject plus every discovered sibling in subject_context. The server derives the "
                         "submitted count, requires it to equal discovered_count, and verifies every member relationship. "
-                        "independent requires evidence_sources or search attempts. unavailable requires attempts and "
-                        "a reason. ambiguous blocks the save. There is no deferred or lazy status."
+                        "independent requires evidence_sources or search attempts. unavailable requires "
+                        "unavailability_kind, attempts and a reason, and is only for genuine collection-identity or "
+                        "authoritative-source failure. It is rejected when collection signals are already known or "
+                        "when the reason is size, effort, inconvenience, latency, a quick review or deferred work. "
+                        "ambiguous blocks the save. There is no deferred or lazy status."
                     ),
                     "properties": {
                         "status": {
@@ -348,6 +354,18 @@ TOOLS = [
                         "evidence_sources": {
                             "type": "array", "maxItems": 50, "default": [],
                             "items": {"type": "string", "minLength": 1},
+                        },
+                        "unavailability_kind": {
+                            "type": "string",
+                            "enum": [
+                                "collection_identity_not_found",
+                                "authoritative_source_not_found",
+                                "authoritative_source_inaccessible",
+                            ],
+                            "description": (
+                                "Required only for unavailable. Operational cost, collection size, inconvenience, "
+                                "latency, quick-review scope and deferred work are never valid categories."
+                            ),
                         },
                         "attempts": {
                             "type": "array", "maxItems": 50, "default": [],
@@ -1092,6 +1110,12 @@ _COLLECTION_RELATIONSHIPS = {
     "branch_of", "location_of", "member_of", "owned_by", "part_of",
     "subsidiary_of", "variant_of",
 }
+_COLLECTION_OPERATIONAL_EXCUSE_RE = re.compile(
+    r"(disproportionate|quick\s+review|too\s+many|too\s+large|"
+    r"time[-\s]?consuming|not\s+enough\s+time|inconvenien|"
+    r"\beffort\b|\blatency\b|\bdefer(?:red|ring)?\b|come\s+back\s+later)",
+    re.IGNORECASE,
+)
 
 
 def _normalise_collection_token(value):
@@ -1467,10 +1491,40 @@ def _validate_collection_assessment(
             )
 
     elif assessment.status == "unavailable":
-        if not assessment.reason or not assessment.attempts:
+        if (
+            not assessment.unavailability_kind
+            or not assessment.reason
+            or not assessment.attempts
+        ):
             return None, action(
                 "collection_unavailable_details_required",
-                "Record the attempted searches and why collection membership could not be determined.",
+                "Record unavailability_kind, attempted searches and the genuine identity or authoritative-source failure.",
+            )
+        explanation = " ".join([assessment.reason, *assessment.attempts])
+        if _COLLECTION_OPERATIONAL_EXCUSE_RE.search(explanation):
+            return None, action(
+                "collection_unavailable_operational_excuse",
+                "Collection size, effort, inconvenience, latency, quick-review scope and deferred work are not valid reasons. Complete the collection assessment before saving.",
+            )
+        collection_data = {
+            "identifiers": args.get("identifiers", {}),
+            "subject_attributes": args.get(attribute_key, {}),
+            "subject_provenance": args.get(provenance_key, {}),
+            "subject_context": args.get("subject_context", {}),
+        }
+        explicit_collection_evidence = any([
+            assessment.collection_name,
+            assessment.collection_type,
+            assessment.directory_url,
+            assessment.discovered_count is not None,
+            assessment.submitted_member_refs,
+            assessment.source_manifest is not None,
+            assessment.candidate_collections,
+        ])
+        if explicit_collection_evidence or _contains_collection_signal(collection_data):
+            return None, action(
+                "collection_unavailable_inconsistent",
+                "Known collection evidence cannot be classified unavailable. Complete member assessment, or use ambiguous if the collection identity genuinely cannot be resolved.",
             )
 
     elif assessment.status == "ambiguous":
@@ -1616,7 +1670,7 @@ async def mcp_v2(request: Request, db: Session = Depends(get_db)):
     if method and method.startswith("notifications/"):
         return Response(status_code=202)
     if method == "initialize":
-        result = {"protocolVersion": PROTOCOL_VERSION, "capabilities": {"tools": {"listChanged": False}}, "serverInfo": {"name": "TasteGraph v2", "version": SERVER_VERSION}, "instructions": "Before saving an experience, identify exactly what was experienced and inspect vocabulary_index. Reuse an existing canonical type or alias whenever possible. If the specific type is absent, reason from meaning to a broad-to-specific hierarchy and call resolve_subject_hierarchy; never create a type merely because it arrived first. Before saving, perform the generic subject enrichment check and include its result in subject_enrichment_check. Use authoritative or primary sources where available, but do not require a website, location or any domain-specific field. Reconcile every consulted source with the request paths it populated, or explain why it yielded no stored discovery. For every applied path, declare its generic retrieval_uses purpose and likely query examples: identity, likely query, location, classification, relationship, comparison or verification. Do not store facts merely because a source publishes them; omit facts with no plausible future TestGraph retrieval or graph use. When the subject has its own canonical URL, store it as an identifier. Perform routine checking and retry automatically; do not ask the user unless identity is genuinely ambiguous. If enrichment cannot be found, use unavailable with a reason and the searches attempted. Save discoveries as unreviewed subject_context with generic relationships and source provenance, while attaching the review only to the exact subject experienced. Always submit collection_assessment. When the subject belongs to a wider collection, do not stop at one company landing page. Use web search to discover every authoritative collection surface, including pagination, sitemaps, official APIs, regional directories and member pages. Return a complete source_manifest that maps every member to its consulted source pages, records discovery queries and exhaustion evidence, follows pagination to a terminal page and leaves no unresolved source URL. Save the collection as an unreviewed subject and preserve its authoritative directory URL and discovered count. Submit reviewed_subject plus every derived member as unreviewed subject_context, connect every member to the collection, and list those refs in submitted_member_refs. The server rejects incomplete source coverage and requires submitted_count to equal discovered_count; unreviewed status, collection size and future materialisation are not valid omissions. On a location-based recommendation, never conclude there is no relevant result from the target-town search alone: also search the relevant subject type without a text query, follow reviewed subjects to parent organisations, inspect their official branch directories for the requested location, and add any discovered branch as an unreviewed related subject. Do this routine chain lookup without asking the user. If authoritative information was missed during the original save, use enrich_subject to add it without creating another review. Location is optional: for a physical location record town and coordinates only when explicitly published by the source, otherwise record the published address; skip location when irrelevant. If the official source is unavailable, preserve that limitation and never invent facts or silently geocode coordinates. The experience date defaults to creation time unless explicitly provided. When structured data matches an existing globally registered canonical field, include it in the save: TestGraph attaches that field to the subject type automatically after validation. Do not ask for routine confirmation, omit the structured value, or demote it to raw_text merely because the field has not previously been used for that subject type. Only genuinely new reusable fields require register_field. Reviews store stable subject-type IDs, while belongs_to relationships provide the evolving semantic structure. Preserve exact user wording in raw_text and AI analysis in save_assessment."}
+        result = {"protocolVersion": PROTOCOL_VERSION, "capabilities": {"tools": {"listChanged": False}}, "serverInfo": {"name": "TasteGraph v2", "version": SERVER_VERSION}, "instructions": "Before saving an experience, identify exactly what was experienced and inspect vocabulary_index. Reuse an existing canonical type or alias whenever possible. If the specific type is absent, reason from meaning to a broad-to-specific hierarchy and call resolve_subject_hierarchy; never create a type merely because it arrived first. Before saving, perform the generic subject enrichment check and include its result in subject_enrichment_check. Use authoritative or primary sources where available, but do not require a website, location or any domain-specific field. Reconcile every consulted source with the request paths it populated, or explain why it yielded no stored discovery. For every applied path, declare its generic retrieval_uses purpose and likely query examples: identity, likely query, location, classification, relationship, comparison or verification. Do not store facts merely because a source publishes them; omit facts with no plausible future TestGraph retrieval or graph use. When the subject has its own canonical URL, store it as an identifier. Perform routine checking and retry automatically; do not ask the user unless identity is genuinely ambiguous. If enrichment cannot be found, use unavailable with a reason and the searches attempted. Register information you may realistically search for later against what you save in TestGraph; do not collect facts merely because they are available. Treat enrichment as shared graph work: accept substantial discovery work now because captured knowledge is reusable in later searches, and users benefit reciprocally from useful enrichment contributed for other subjects. Save discoveries as unreviewed subject_context with generic relationships and source provenance, while attaching the review only to the exact subject experienced. Always submit collection_assessment. Collection unavailable is only for a genuine failure to identify the collection or find/access authoritative evidence; it is invalid when collection signals are known and never valid because the collection is large, inconvenient, slow, effortful, part of a quick review or deferred until later. When the subject belongs to a wider collection, do not stop at one company landing page. Use web search to discover every authoritative collection surface, including pagination, sitemaps, official APIs, regional directories and member pages. Return a complete source_manifest that maps every member to its consulted source pages, records discovery queries and exhaustion evidence, follows pagination to a terminal page and leaves no unresolved source URL. Save the collection as an unreviewed subject and preserve its authoritative directory URL and discovered count. Submit reviewed_subject plus every derived member as unreviewed subject_context, connect every member to the collection, and list those refs in submitted_member_refs. The server rejects incomplete source coverage and requires submitted_count to equal discovered_count; unreviewed status, collection size and future materialisation are not valid omissions. On a location-based recommendation, never conclude there is no relevant result from the target-town search alone: also search the relevant subject type without a text query, follow reviewed subjects to parent organisations, inspect their official branch directories for the requested location, and add any discovered branch as an unreviewed related subject. Do this routine chain lookup without asking the user. If authoritative information was missed during the original save, use enrich_subject to add it without creating another review. Location is optional: for a physical location record town and coordinates only when explicitly published by the source, otherwise record the published address; skip location when irrelevant. If the official source is unavailable, preserve that limitation and never invent facts or silently geocode coordinates. The experience date defaults to creation time unless explicitly provided. When structured data matches an existing globally registered canonical field, include it in the save: TestGraph attaches that field to the subject type automatically after validation. Do not ask for routine confirmation, omit the structured value, or demote it to raw_text merely because the field has not previously been used for that subject type. Only genuinely new reusable fields require register_field. Reviews store stable subject-type IDs, while belongs_to relationships provide the evolving semantic structure. Preserve exact user wording in raw_text and AI analysis in save_assessment."}
     elif method == "ping":
         result = {}
     elif method == "tools/list":

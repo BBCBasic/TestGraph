@@ -375,6 +375,88 @@ def test_unavailable_requires_reason_and_attempts():
     assert _payload(error)["details"]["code"] == "collection_unavailable_details_required"
 
 
+
+def test_genuine_collection_unavailability_can_continue():
+    assessment, error = _validate_collection_assessment(
+        {
+            "status": "unavailable",
+            "unavailability_kind": "authoritative_source_inaccessible",
+            "evidence_sources": ["https://example.test/locations"],
+            "reason": "The official directory returned an access-denied response",
+            "attempts": [
+                "Opened the official directory",
+                "Searched for an official sitemap and locations API",
+            ],
+        },
+        {},
+        _completed_enrichment("https://example.test/locations"),
+    )
+
+    assert error is None
+    assert assessment.status == "unavailable"
+    assert assessment.unavailability_kind == "authoritative_source_inaccessible"
+
+
+@pytest.mark.parametrize(
+    "reason",
+    [
+        "Full enumeration is disproportionate for a quick review",
+        "There are too many branches",
+        "Completing this would require too much effort",
+        "The directory is inconvenient and has high latency",
+        "Deferred until later",
+        "This is too time-consuming",
+    ],
+)
+def test_unavailable_rejects_operational_excuses(reason):
+    assessment, error = _validate_collection_assessment(
+        {
+            "status": "unavailable",
+            "unavailability_kind": "authoritative_source_not_found",
+            "reason": reason,
+            "attempts": ["Searched the subject name"],
+        },
+        {},
+        _completed_enrichment(),
+    )
+
+    assert assessment is None
+    assert _payload(error)["details"]["code"] == "collection_unavailable_operational_excuse"
+
+
+def test_unavailable_rejects_known_collection_signals():
+    assessment, error = _validate_collection_assessment(
+        {
+            "status": "unavailable",
+            "unavailability_kind": "authoritative_source_not_found",
+            "reason": "No authoritative directory was found",
+            "attempts": ["Searched the official website and sitemap"],
+        },
+        {"identifiers": {"brand": "Example Group"}},
+        _completed_enrichment(),
+    )
+
+    assert assessment is None
+    assert _payload(error)["details"]["code"] == "collection_unavailable_inconsistent"
+
+
+def test_unavailable_rejects_candidate_collections():
+    assessment, error = _validate_collection_assessment(
+        {
+            "status": "unavailable",
+            "unavailability_kind": "collection_identity_not_found",
+            "reason": "The collection identity could not be resolved",
+            "attempts": ["Compared the official identities"],
+            "candidate_collections": ["Example Group UK", "Example Group Europe"],
+        },
+        {},
+        _completed_enrichment(),
+    )
+
+    assert assessment is None
+    assert _payload(error)["details"]["code"] == "collection_unavailable_inconsistent"
+
+
 def test_ambiguous_collection_stops_for_clarification():
     assessment, error = _validate_collection_assessment(
         {

@@ -21,7 +21,7 @@ def test_oauth_mcp_v2_resource_flow(client,auth,monkeypatch):
     code=re.search(r"[?&]code=([^&]+)",approved.headers["location"]).group(1)
     access=client.post("/oauth/token",data={"grant_type":"authorization_code","client_id":client_id,"code":code,"redirect_uri":redirect_uri,"code_verifier":verifier,"resource":resource}).json()["access_token"]
     initialized=_rpc(client,"/mcp-v2","initialize",token=access)
-    assert initialized.json()["result"]["serverInfo"]["version"]=="3.10.0-alpha"
+    assert initialized.json()["result"]["serverInfo"]["version"]=="3.10.1-alpha"
     tools=_rpc(client,"/mcp-v2","tools/list",token=access,call_id=2).json()["result"]["tools"]
     assert {tool["name"] for tool in tools}=={"search","fetch","vocabulary_index","resolve_subject_type","resolve_subject_hierarchy","register_subject_type_alias","set_type_relationship","retire_type_relationship","register_field","enrich_subject","correct_subject_fact","save_experience","delete_experience","save_assessment"}
     save_tool=next(tool for tool in tools if tool["name"]=="save_experience")
@@ -38,6 +38,13 @@ def test_oauth_mcp_v2_resource_flow(client,auth,monkeypatch):
     assert "deferred" not in properties["collection_assessment"]["properties"]["status"]["enum"]
     assert "discovered_count" in properties["collection_assessment"]["properties"]
     assert "submitted_member_refs" in properties["collection_assessment"]["properties"]
+    unavailability_kind=properties["collection_assessment"]["properties"]["unavailability_kind"]
+    assert set(unavailability_kind["enum"])=={
+        "collection_identity_not_found",
+        "authoritative_source_not_found",
+        "authoritative_source_inaccessible",
+    }
+    assert "realistically search for later" in save_tool["description"]
     source_manifest=properties["collection_assessment"]["properties"]["source_manifest"]
     assert "source_pages" in source_manifest["properties"]
     assert "discovery_queries" in source_manifest["required"]
