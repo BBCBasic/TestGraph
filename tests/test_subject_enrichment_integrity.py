@@ -176,6 +176,16 @@ def test_collection_mismatch_is_rejected_before_related_subject_write(db, princi
             "status": "member", "collection_name": "Example Group",
             "collection_type": "cafe group", "directory_url": SOURCE,
             "discovered_count": 2, "submitted_member_refs": ["subject"],
+            "source_manifest": {
+                "coverage_method": "single_page",
+                "declared_source_count": 1,
+                "source_pages": [{
+                    "url": SOURCE, "source_kind": "directory_page",
+                    "member_refs": ["subject"], "terminal": True,
+                }],
+                "discovery_queries": ["Example Group official locations"],
+                "exhaustion_evidence": "The authoritative list is finite and single-page.",
+            },
             "evidence_sources": [SOURCE],
         },
         "idempotency_key": "collection-enrichment-1",
