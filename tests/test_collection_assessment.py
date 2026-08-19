@@ -27,6 +27,7 @@ def _member_args():
                     "name": "Example Group",
                     "canonical_key": "example-group",
                     "identifiers": {"branch_directory": DIRECTORY},
+                    "attributes": {"reported_member_count": 44},
                     "provenance": {"source_url": DIRECTORY},
                 }
             ],
@@ -131,11 +132,30 @@ def test_valid_member_saves_collection_lazily():
                         "ref": "brand", "subject_type": "organization",
                         "name": "Example Group", "canonical_key": "example-group",
                         "identifiers": {"branch_directory": DIRECTORY},
+                        "attributes": {"reported_member_count": 44},
                     }],
                     "relationships": [],
                 }
             },
             "collection_relationship_required",
+        ),
+        (
+            {
+                "subject_context": {
+                    "subjects": [{
+                        "ref": "brand", "subject_type": "organization",
+                        "name": "Example Group", "canonical_key": "example-group",
+                        "identifiers": {"branch_directory": DIRECTORY},
+                        "attributes": {},
+                    }],
+                    "relationships": [{
+                        "source_ref": "reviewed_subject",
+                        "relationship": "branch_of",
+                        "target_ref": "brand",
+                    }],
+                }
+            },
+            "collection_member_count_not_stored",
         ),
     ],
 )
