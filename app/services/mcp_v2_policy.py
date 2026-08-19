@@ -24,8 +24,9 @@ def apply_chain_ingest_policy(tools: list[dict]) -> None:
             "subject without creating another review. Use this proactively when authoritative information was "
             "missed during the original save. Find only authoritative facts with plausible future TestGraph use: "
             "identity, likely queries, location, classification, relationships, comparison or verification. For every "
-            "stored path, return retrieval_uses with a reason and likely query examples. Do not store facts merely "
-            "because a source publishes them. When the subject belongs to a collection, use web search to find the "
+            "stored path, return retrieval_uses with a reason and likely query examples. Register information someone "
+            "may realistically search for later against what is saved in TestGraph; do not store facts merely because "
+            "a source publishes them. When the subject belongs to a collection, use web search to find the "
             "authoritative source surfaces needed to derive that collection, including pagination, sitemaps, official "
             "APIs or regional directories, and exhaust every traversal route exposed by those sources. "
             "Submit source_manifest mapping every member to its consulted source pages, then submit every discovered "
@@ -58,7 +59,9 @@ def apply_chain_ingest_policy(tools: list[dict]) -> None:
         enrich_properties["collection_assessment"]["description"] = (
             "Required collection assessment for enrichment. For member status, use subject as the existing "
             "target ref, discover every authoritative source surface, submit an exhaustive source_manifest, "
-            "and submit the target plus every derived sibling."
+            "and submit the target plus every derived sibling. unavailable is only for genuine collection-identity "
+            "or authoritative-source failure; it is invalid when collection evidence is known and cannot be used for "
+            "size, effort, inconvenience, latency, quick-review scope or deferred work."
         )
         enrich_schema["required"] = [
             "idempotency_key", "subject_enrichment_check", "collection_assessment",
@@ -72,14 +75,17 @@ def apply_chain_ingest_policy(tools: list[dict]) -> None:
         current = save.get("description", "")
         if _SAVE_POLICY_MARKER not in current:
             save["description"] = current + (
-                " Store only discoveries with a declared generic retrieval_uses purpose and likely-query examples; "
+                " Register information someone may realistically search for later against what is saved in TestGraph. "
+                "Store only discoveries with a declared generic retrieval_uses purpose and likely-query examples; "
                 "facts with no plausible future TestGraph use are not enrichment. For collections, do not stop at one "
                 "landing page: discover the authoritative source surfaces needed to derive the complete collection and "
                 "submit collection_assessment.source_manifest with complete traversal coverage and member-to-source mappings, "
                 "discovery queries, exhaustion evidence and no unresolved source URLs. Every discovered collection "
                 "member must be submitted. Include reviewed_subject plus every derived sibling in submitted_member_refs; "
                 "the server requires it to equal discovered_count and verifies that every ref exists and is connected "
-                "to the collection. Unreviewed status, collection size and future materialisation are not omissions."
+                "to the collection. unavailable is only for genuine collection-identity or authoritative-source "
+                "failure and is rejected when collection evidence is known. Unreviewed status, collection size, "
+                "effort, inconvenience, latency, quick-review scope and future materialisation are not omissions."
             )
         _set_context_limits(save)
 
