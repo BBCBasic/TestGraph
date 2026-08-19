@@ -7,6 +7,7 @@ AI-native structured review storage with a controlled vocabulary and personalise
 1. **Schema emergence:** Give several AIs unfamiliar experiences and obtain a useful structure without designing the categories beforehand.
 2. **Controlled disagreement:** Conflicting classifications converge through evidence, confidence and server rules instead of flip-flopping.
 3. **Truthful execution:** Models cannot claim that discovery, enrichment or reconciliation happened unless the server can verify it.
+4. **Calling-AI capability:** TestGraph deliberately uses the calling AI as its semantic and discovery engine. The AI should apply its available reasoning, web retrieval and tool capabilities to unfamiliar subjects, derive useful structure and relationships, and reconcile evidence without waiting for TestGraph to prescribe a domain-specific form. TestGraph provides stable graph primitives, persistence and server-side verification; the calling AI provides the open-ended intelligence.
 
 These goals are acceptance criteria for TestGraph's architecture and tests, not merely guidance for individual AI clients.
 
@@ -136,6 +137,7 @@ After the first deployment, run `python -m scripts.seed` from a Railway shell or
 
 ## Architecture implemented
 
+- Calling-AI capability used as the open-ended semantic and discovery engine, with the server as the verification and persistence layer
 - Stable flat subject-type IDs for every review domain
 - Globally standardised canonical terms and aliases
 - Editable type relationships used for search, never storage addresses

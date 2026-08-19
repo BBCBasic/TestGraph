@@ -9,10 +9,11 @@ _SAVE_POLICY_MARKER = "Every discovered collection member must be submitted."
 
 
 def apply_chain_ingest_policy(tools: list[dict]) -> None:
-    """Apply the MCP v2 complete collection-discovery policy idempotently.
+    """Apply the MCP v2 AI-native discovery policy idempotently.
 
-    A finite authoritative directory must be represented completely. The server
-    rejects collection saves whose discovered and submitted member counts differ.
+    The calling AI performs open-ended semantic and discovery work using its
+    available capabilities. The server verifies evidence, completeness and graph
+    consistency. A finite authoritative directory must be represented completely.
     """
 
     by_name = {tool.get("name"): tool for tool in tools}
@@ -20,6 +21,9 @@ def apply_chain_ingest_policy(tools: list[dict]) -> None:
     enrich = by_name.get("enrich_subject")
     if enrich:
         enrich["description"] = (
+            "Use your full available reasoning, web retrieval and tool capabilities as TestGraph's open-ended "
+            "semantic and discovery engine; do not wait for a domain-specific form. TestGraph supplies graph "
+            "primitives and verification while you derive useful structure and reconcile evidence. "
             "Add missing identifiers, attributes, provenance and related unreviewed subjects to an existing "
             "subject without creating another review. Use this proactively when authoritative information was "
             "missed during the original save. Find only authoritative facts with plausible future TestGraph use: "
@@ -77,7 +81,10 @@ def apply_chain_ingest_policy(tools: list[dict]) -> None:
         current = save.get("description", "")
         if _SAVE_POLICY_MARKER not in current:
             save["description"] = current + (
-                " Register information someone may realistically search for later against what is saved in TestGraph. "
+                " Use your full available reasoning, web retrieval and tool capabilities as TestGraph's open-ended "
+                "semantic and discovery engine. Derive useful structure from meaning and evidence instead of waiting "
+                "for a domain-specific form; the server supplies stable primitives and verifies your claims. "
+                "Register information someone may realistically search for later against what is saved in TestGraph. "
                 "Treat enrichment as shared graph work whose cost is paid for this subject and whose useful result can "
                 "be reused by later searches, just as users benefit from enrichment contributed for other subjects. "
                 "Store only discoveries with a declared generic retrieval_uses purpose and likely-query examples; "
