@@ -52,6 +52,30 @@ class SubjectEnrichmentCheck(StrictModel):
     candidate_identities: list[str] = []
 
 
+class CollectionSourcePage(StrictModel):
+    url: str = Field(min_length=1)
+    source_kind: Literal[
+        "directory_page", "sitemap", "api", "official_member_page",
+        "other_authoritative",
+    ]
+    sequence: int | None = Field(default=None, ge=1)
+    member_refs: list[str] = []
+    next_url: str | None = Field(default=None, min_length=1)
+    terminal: bool = False
+
+
+class CollectionSourceManifest(StrictModel):
+    coverage_method: Literal[
+        "single_page", "pagination", "sitemap", "api",
+        "multi_source", "search_derived",
+    ]
+    declared_source_count: int = Field(ge=1)
+    source_pages: list[CollectionSourcePage] = Field(min_length=1)
+    discovery_queries: list[str] = Field(min_length=1)
+    exhaustion_evidence: str = Field(min_length=1)
+    unresolved_source_urls: list[str] = []
+
+
 class CollectionAssessment(StrictModel):
     status: Literal["member", "independent", "unavailable", "ambiguous"]
     collection_name: str | None = Field(default=None, min_length=1, max_length=240)
@@ -59,6 +83,7 @@ class CollectionAssessment(StrictModel):
     directory_url: str | None = Field(default=None, min_length=1)
     discovered_count: int | None = Field(default=None, ge=2)
     submitted_member_refs: list[str] = []
+    source_manifest: CollectionSourceManifest | None = None
     evidence_sources: list[str] = []
     attempts: list[str] = []
     reason: str | None = Field(default=None, min_length=1)
