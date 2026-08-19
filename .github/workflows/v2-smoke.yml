@@ -3,7 +3,7 @@ name: TasteGraph v2 smoke
 on:
   push:
     branches:
-      - agent/tastegraph-v2-concepts
+      - master
   pull_request:
     branches:
       - master
