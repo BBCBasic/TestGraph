@@ -1470,13 +1470,13 @@ def _existing_collection_matches(db, collection_subject, directory_url):
     for candidate in candidates:
         if candidate.canonical_key == canonical_key:
             continue
-        if _contains_exact_value(
+        if _identifier_matches(
             {
                 "identifiers": candidate.identifiers_json or {},
                 "attributes": candidate.attributes_json or {},
                 "provenance": candidate.provenance_json or {},
             },
-            directory_url,
+            _normalise_identity_value(directory_url),
         ):
             matches.append({
                 "subject_id": str(candidate.id),
