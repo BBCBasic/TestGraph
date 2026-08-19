@@ -6,7 +6,7 @@ import uuid
 
 from jsonschema import Draft202012Validator
 from jsonschema.exceptions import SchemaError, ValidationError
-from sqlalchemy import or_, select
+from sqlalchemy import delete as sql_delete, or_, select
 from sqlalchemy.orm import Session
 
 from app.models.v2 import (
@@ -207,7 +207,10 @@ def _fill_missing(existing: dict | None, incoming: dict) -> tuple[dict, bool]:
     return merged, changed
 
 
-def ensure_subject(db: Session, payload: SubjectEnsure, client_id: str = "ai-client") -> V2Subject:
+def ensure_subject(
+    db: Session, payload: SubjectEnsure, client_id: str = "ai-client",
+    *, owner_id: uuid.UUID | None = None,
+) -> V2Subject:
     subject_type = resolve_subject_type(db, payload.subject_type)
     if not subject_type:
         raise ValueError(f"Unknown subject type '{payload.subject_type}'")
@@ -227,7 +230,8 @@ def ensure_subject(db: Session, payload: SubjectEnsure, client_id: str = "ai-cli
             db.commit(); db.refresh(obj)
         return obj
     obj = V2Subject(
-        subject_type_id=subject_type.id, name=payload.name, canonical_key=payload.canonical_key,
+        subject_type_id=subject_type.id, owner_id=owner_id,
+        name=payload.name, canonical_key=payload.canonical_key,
         identifiers_json=payload.identifiers, attributes_json=payload.attributes,
         provenance_json=payload.provenance,
     )
@@ -264,7 +268,7 @@ def add_subject_relationship(
 
 def ensure_subject_context(
     db: Session, reviewed_subject: V2Subject, payload: SubjectContextEnsure,
-    *, client_id: str,
+    *, client_id: str, owner_id: uuid.UUID | None = None,
 ) -> dict:
     refs = {"reviewed_subject": reviewed_subject, "subject": reviewed_subject}
     created_subjects = []
@@ -278,7 +282,7 @@ def ensure_subject_context(
                 canonical_key=item.canonical_key, identifiers=item.identifiers,
                 attributes=item.attributes, provenance=item.provenance,
             ),
-            client_id,
+            client_id, owner_id=owner_id,
         )
         refs[item.ref] = subject
         created_subjects.append(subject)
@@ -348,6 +352,48 @@ def create_experience(db: Session, payload: ExperienceCreate, client_id: str) ->
     )
     db.add(obj); db.commit(); db.refresh(obj)
     return obj
+
+
+def delete_owned_experience(
+    db: Session, experience_id: uuid.UUID, owner_id: uuid.UUID,
+    *, delete_orphan_subject: bool = True,
+) -> dict:
+    experience = db.scalar(select(V2Experience).where(
+        V2Experience.id == experience_id,
+        V2Experience.owner_id == owner_id,
+        V2Experience.deleted_at.is_(None),
+    ))
+    if not experience:
+        raise ValueError("Experience not found")
+    subject = db.get(V2Subject, experience.subject_id)
+    assessment_ids = list(db.scalars(select(Assessment.id).where(
+        Assessment.experience_id == experience.id
+    )).all())
+    db.execute(sql_delete(Assessment).where(Assessment.experience_id == experience.id))
+    db.delete(experience)
+    db.flush()
+
+    subject_deleted = False
+    if delete_orphan_subject and subject and subject.owner_id == owner_id:
+        remaining_experience = db.scalar(select(V2Experience.id).where(
+            V2Experience.subject_id == subject.id,
+            V2Experience.deleted_at.is_(None),
+        ).limit(1))
+        connected_relationship = db.scalar(select(SubjectRelationship.id).where(or_(
+            SubjectRelationship.source_subject_id == subject.id,
+            SubjectRelationship.target_subject_id == subject.id,
+        )).limit(1))
+        if not remaining_experience and not connected_relationship:
+            db.delete(subject)
+            subject_deleted = True
+    db.commit()
+    return {
+        "deleted": True,
+        "experience_id": str(experience_id),
+        "assessment_ids": [str(item) for item in assessment_ids],
+        "subject_id": str(subject.id) if subject else None,
+        "subject_deleted": subject_deleted,
+    }
 
 
 def create_assessment(db: Session, payload: AssessmentCreate, *, client_id: str, user_id: uuid.UUID | None) -> Assessment:

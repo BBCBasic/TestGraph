@@ -9,7 +9,8 @@ from app.schemas.v2 import (
     ExperienceCreate, FieldEnsure, SubjectContextEnsure, SubjectEnrichmentCheck, SubjectEnsure,
 )
 from app.services.v2 import (
-    add_subject_type_alias, add_type_relationship, create_experience, descendant_type_ids,
+    add_subject_type_alias, add_type_relationship, create_experience, delete_owned_experience,
+    descendant_type_ids,
     ensure_field, ensure_subject, ensure_subject_context, ensure_subject_type, normalise_term,
     resolve_subject_type,
 )
@@ -240,3 +241,57 @@ def test_subject_enrichment_check_is_saved_in_review_provenance(db):
     assert check["status"]=="completed"
     assert check["sources"]==["https://example.test/about"]
     assert "recorded_at" in check
+
+
+
+def test_user_can_delete_only_their_own_review_and_owned_orphan_subject(db):
+    owner=User(display_name="Owner",profile_data={})
+    other=User(display_name="Other",profile_data={})
+    db.add_all([owner,other]);db.commit();db.refresh(owner);db.refresh(other)
+    ensure_subject_type(db,"cafe",created_by="test")
+    subject=ensure_subject(
+        db,SubjectEnsure(subject_type="cafe",name="Owned Cafe",canonical_key="owned-cafe"),
+        "test-client",owner_id=owner.id,
+    )
+    experience=create_experience(
+        db,ExperienceCreate(
+            owner_id=owner.id,subject_id=subject.id,headline="Review",summary="Review",
+            raw_text="My review.",user_approved=True,
+        ),"test-client",
+    )
+
+    with pytest.raises(ValueError,match="Experience not found"):
+        delete_owned_experience(db,experience.id,other.id)
+
+    result=delete_owned_experience(db,experience.id,owner.id)
+    assert result["subject_deleted"] is True
+    assert db.get(V2Experience,experience.id) is None
+    assert db.get(type(subject),subject.id) is None
+
+
+def test_deleting_own_review_preserves_a_shared_subject(db):
+    first=User(display_name="First",profile_data={})
+    second=User(display_name="Second",profile_data={})
+    db.add_all([first,second]);db.commit();db.refresh(first);db.refresh(second)
+    ensure_subject_type(db,"cafe",created_by="test")
+    subject=ensure_subject(
+        db,SubjectEnsure(subject_type="cafe",name="Shared Cafe",canonical_key="shared-cafe"),
+        "test-client",owner_id=first.id,
+    )
+    first_review=create_experience(
+        db,ExperienceCreate(
+            owner_id=first.id,subject_id=subject.id,headline="First",summary="First",
+            raw_text="First review.",user_approved=True,
+        ),"test-client",
+    )
+    second_review=create_experience(
+        db,ExperienceCreate(
+            owner_id=second.id,subject_id=subject.id,headline="Second",summary="Second",
+            raw_text="Second review.",user_approved=True,
+        ),"test-client",
+    )
+
+    result=delete_owned_experience(db,first_review.id,first.id)
+    assert result["subject_deleted"] is False
+    assert db.get(type(subject),subject.id) is not None
+    assert db.get(V2Experience,second_review.id) is not None
