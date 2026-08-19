@@ -93,3 +93,61 @@ def test_source_can_be_explicitly_unapplied_with_a_reason():
     )
     assert error is None
     assert check.unapplied_sources[source].startswith("Only corroborated")
+
+def test_applied_source_can_point_to_nested_subject_context_data():
+    source = "https://example.test/locations"
+    path = "subject_context.subjects[0].identifiers.branch_directory"
+    check, error = _validate_subject_enrichment_check(
+        {
+            "status": "completed",
+            "sources": [source],
+            "applied_fields": {source: [path]},
+        },
+        {
+            "subject_context": {
+                "subjects": [
+                    {
+                        "ref": "chain",
+                        "subject_type": "restaurant chain",
+                        "name": "Example Restaurants",
+                        "canonical_key": "example-restaurants",
+                        "identifiers": {"branch_directory": source},
+                    }
+                ],
+                "relationships": [],
+            }
+        },
+    )
+
+    assert error is None
+    assert check.applied_fields[source] == [path]
+
+
+def test_nested_subject_context_path_must_point_to_existing_data():
+    source = "https://example.test/locations"
+    check, error = _validate_subject_enrichment_check(
+        {
+            "status": "completed",
+            "sources": [source],
+            "applied_fields": {
+                source: ["subject_context.subjects[1].identifiers.branch_directory"]
+            },
+        },
+        {
+            "subject_context": {
+                "subjects": [
+                    {
+                        "identifiers": {"branch_directory": source},
+                    }
+                ]
+            }
+        },
+    )
+
+    assert check is None
+    payload = _payload(error)
+    assert payload["details"]["code"] == "subject_enrichment_reconciliation_invalid"
+    assert payload["details"]["invalid_paths"][source] == [
+        "subject_context.subjects[1].identifiers.branch_directory"
+    ]
+
