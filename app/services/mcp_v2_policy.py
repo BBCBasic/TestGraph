@@ -22,12 +22,14 @@ def apply_chain_ingest_policy(tools: list[dict]) -> None:
         enrich["description"] = (
             "Add missing identifiers, attributes, provenance and related unreviewed subjects to an existing "
             "subject without creating another review. Use this proactively when authoritative information was "
-            "missed during the original save. Search for the official website yourself. When an authoritative "
-            "source exposes a finite collection, submit every discovered member as an unreviewed subject, connect "
-            "each member to the collection, and preserve the directory URL and provenance. Do not omit members "
-            "because they are unreviewed, numerous or may be materialised later. Do not ask the user for a URL or "
-            "routine lookup permission unless automatic lookup is unavailable or identity is genuinely ambiguous. "
-            "Existing conflicting values are preserved rather than silently overwritten."
+            "missed during the original save. Do not stop at one company landing page. Use web search to discover "
+            "every authoritative collection surface, including pagination, sitemaps, official APIs, regional "
+            "directories and member pages. Derive the complete collection only after every route is exhausted. "
+            "Submit source_manifest mapping every member to its consulted source pages, then submit every discovered "
+            "member as an unreviewed subject and connect it to the collection. Do not omit members because they are "
+            "unreviewed, numerous or may be materialised later. Do not ask the user for routine lookup permission "
+            "unless automatic lookup is unavailable or identity is genuinely ambiguous. Existing conflicting values "
+            "are preserved rather than silently overwritten."
         )
         _set_context_limits(enrich)
 
@@ -51,8 +53,9 @@ def apply_chain_ingest_policy(tools: list[dict]) -> None:
             save_properties["collection_assessment"]
         )
         enrich_properties["collection_assessment"]["description"] = (
-            "Required collection assessment for enrichment. For member status, use subject as the "
-            "existing target ref and submit it plus every discovered sibling."
+            "Required collection assessment for enrichment. For member status, use subject as the existing "
+            "target ref, discover every authoritative source surface, submit an exhaustive source_manifest, "
+            "and submit the target plus every derived sibling."
         )
         enrich_schema["required"] = [
             "idempotency_key", "subject_enrichment_check", "collection_assessment",
@@ -66,9 +69,11 @@ def apply_chain_ingest_policy(tools: list[dict]) -> None:
         current = save.get("description", "")
         if _SAVE_POLICY_MARKER not in current:
             save["description"] = current + (
-                " Every discovered collection member must be submitted. Include reviewed_subject plus every "
-                "discovered sibling in collection_assessment.submitted_member_refs; the server derives the submitted "
-                "count, requires it to equal discovered_count, and verifies that every ref exists and is connected "
+                " Do not stop at one company landing page. Discover every authoritative collection surface and "
+                "submit collection_assessment.source_manifest with complete page coverage, member-to-source mappings, "
+                "discovery queries, exhaustion evidence and no unresolved source URLs. Every discovered collection "
+                "member must be submitted. Include reviewed_subject plus every derived sibling in submitted_member_refs; "
+                "the server requires it to equal discovered_count and verifies that every ref exists and is connected "
                 "to the collection. Unreviewed status, collection size and future materialisation are not omissions."
             )
         _set_context_limits(save)
