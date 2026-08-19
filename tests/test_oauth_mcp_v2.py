@@ -21,7 +21,7 @@ def test_oauth_mcp_v2_resource_flow(client,auth,monkeypatch):
     code=re.search(r"[?&]code=([^&]+)",approved.headers["location"]).group(1)
     access=client.post("/oauth/token",data={"grant_type":"authorization_code","client_id":client_id,"code":code,"redirect_uri":redirect_uri,"code_verifier":verifier,"resource":resource}).json()["access_token"]
     initialized=_rpc(client,"/mcp-v2","initialize",token=access)
-    assert initialized.json()["result"]["serverInfo"]["version"]=="3.6.0-alpha"
+    assert initialized.json()["result"]["serverInfo"]["version"]=="3.7.0-alpha"
     tools=_rpc(client,"/mcp-v2","tools/list",token=access,call_id=2).json()["result"]["tools"]
     assert {tool["name"] for tool in tools}=={"search","fetch","vocabulary_index","resolve_subject_type","resolve_subject_hierarchy","register_subject_type_alias","set_type_relationship","retire_type_relationship","register_field","enrich_subject","save_experience","delete_experience","save_assessment"}
     save_tool=next(tool for tool in tools if tool["name"]=="save_experience")
@@ -32,7 +32,7 @@ def test_oauth_mcp_v2_resource_flow(client,auth,monkeypatch):
     assert "subject_enrichment_check" in save_tool["inputSchema"]["required"]
     assert "collection_assessment" in properties
     assert "collection_assessment" in save_tool["inputSchema"]["required"]
-    assert "deferred" not in properties["collection_assessment"]["properties"]["status"]["enum"]
+    assert "deferred" not in properties["collection_assessment"]["properties"]["status"]["enum"]\n    assert "discovered_count" in properties["collection_assessment"]["properties"]\n    assert "submitted_member_refs" in properties["collection_assessment"]["properties"]
     delete_tool=next(tool for tool in tools if tool["name"]=="delete_experience")
     assert delete_tool["annotations"]["destructiveHint"] is True
     assert "confirm_deletion" in delete_tool["inputSchema"]["required"]
