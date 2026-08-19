@@ -24,10 +24,15 @@ def upgrade() -> None:
     bind = op.get_bind()
     rows = bind.execute(sa.text(
         """
-        SELECT subject_id, MIN(owner_id) AS owner_id
-        FROM v2_experiences
-        GROUP BY subject_id
-        HAVING COUNT(DISTINCT owner_id) = 1
+        SELECT e.subject_id, e.owner_id
+        FROM v2_experiences AS e
+        JOIN (
+            SELECT subject_id
+            FROM v2_experiences
+            GROUP BY subject_id
+            HAVING COUNT(DISTINCT owner_id) = 1
+        ) AS single_owner ON single_owner.subject_id = e.subject_id
+        GROUP BY e.subject_id, e.owner_id
         """
     )).fetchall()
     for subject_id, owner_id in rows:
