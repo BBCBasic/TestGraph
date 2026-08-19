@@ -22,9 +22,12 @@ def apply_chain_ingest_policy(tools: list[dict]) -> None:
         enrich["description"] = (
             "Add missing identifiers, attributes, provenance and related unreviewed subjects to an existing "
             "subject without creating another review. Use this proactively when authoritative information was "
-            "missed during the original save. Do not stop at one company landing page. Use web search to discover "
-            "every authoritative collection surface, including pagination, sitemaps, official APIs, regional "
-            "directories and member pages. Derive the complete collection only after every route is exhausted. "
+            "missed during the original save. Find only authoritative facts with plausible future TestGraph use: "
+            "identity, likely queries, location, classification, relationships, comparison or verification. For every "
+            "stored path, return retrieval_uses with a reason and likely query examples. Do not store facts merely "
+            "because a source publishes them. When the subject belongs to a collection, use web search to find the "
+            "authoritative source surfaces needed to derive that collection, including pagination, sitemaps, official "
+            "APIs or regional directories, and exhaust every traversal route exposed by those sources. "
             "Submit source_manifest mapping every member to its consulted source pages, then submit every discovered "
             "member as an unreviewed subject and connect it to the collection. Do not omit members because they are "
             "unreviewed, numerous or may be materialised later. Do not ask the user for routine lookup permission "
@@ -69,8 +72,10 @@ def apply_chain_ingest_policy(tools: list[dict]) -> None:
         current = save.get("description", "")
         if _SAVE_POLICY_MARKER not in current:
             save["description"] = current + (
-                " Do not stop at one company landing page. Discover every authoritative collection surface and "
-                "submit collection_assessment.source_manifest with complete page coverage, member-to-source mappings, "
+                " Store only discoveries with a declared generic retrieval_uses purpose and likely-query examples; "
+                "facts with no plausible future TestGraph use are not enrichment. For collections, do not stop at one "
+                "landing page: discover the authoritative source surfaces needed to derive the complete collection and "
+                "submit collection_assessment.source_manifest with complete traversal coverage and member-to-source mappings, "
                 "discovery queries, exhaustion evidence and no unresolved source URLs. Every discovered collection "
                 "member must be submitted. Include reviewed_subject plus every derived sibling in submitted_member_refs; "
                 "the server requires it to equal discovered_count and verifies that every ref exists and is connected "
