@@ -11,6 +11,7 @@ from app.api.routes import router
 from app.api.v2 import router as v2_router
 from app.api.oauth import router as oauth_router
 from app.api.mcp import router as mcp_router
+from app.api import mcp_v2 as mcp_v2_module
 from app.api.mcp_v2 import router as mcp_v2_router
 from app.api.capability import router as capability_router
 from app.api.integrations import router as integrations_router
@@ -19,8 +20,10 @@ from app.api.actions_v2 import router as actions_v2_router
 from app.api.development import router as development_router
 from app.api.uci_reviews import router as uci_reviews_router
 from app.core.config import get_settings
+from app.services.mcp_v2_policy import apply_chain_ingest_policy
 
 settings=get_settings()
+apply_chain_ingest_policy(mcp_v2_module.TOOLS)
 REVIEWS_HTML = Path(__file__).parent / "static" / "reviews.html"
 app=FastAPI(title="TasteGraph",version="3.0.0-alpha",description="Standardised review storage with stable subject-type IDs, aliases and flexible relationships.")
 
