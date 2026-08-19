@@ -4,7 +4,7 @@ from sqlalchemy.orm import Session
 
 from app.db.base import Base
 from app.models.entities import User
-from app.models.v2 import SubjectRelationship, SubjectType, V2Experience
+from app.models.v2 import SubjectRelationship, SubjectType, SubjectTypeField, V2Experience
 from app.schemas.v2 import ExperienceCreate, FieldEnsure, SubjectContextEnsure, SubjectEnsure
 from app.services.v2 import (
     add_subject_type_alias, add_type_relationship, create_experience, descendant_type_ids,
@@ -62,7 +62,7 @@ def test_unknown_structured_field_does_not_create_schema_from_one_review(db):
     user=User(display_name="Test",profile_data={});db.add(user);db.commit();db.refresh(user)
     ensure_subject_type(db,"ferry",created_by="test")
     subject=ensure_subject(db,SubjectEnsure(subject_type="ferry",name="Crossing",canonical_key="crossing"))
-    with pytest.raises(ValueError,match="Preserve it in raw_text"):
+    with pytest.raises(ValueError,match="Preserve a one-off detail in raw_text"):
         create_experience(db,ExperienceCreate(owner_id=user.id,subject_id=subject.id,headline="Trip",summary="Trip",raw_text="Nice café.",structured_data={"cafe wallpaper colour":"blue"},user_approved=True),"test")
 
 
@@ -126,3 +126,45 @@ def test_review_can_add_generic_unreviewed_subject_context(db):
     assert len(context["relationships"])==2
     assert len(db.scalars(select(SubjectRelationship)).all())==2
     assert len(db.scalars(select(V2Experience)).all())==1
+
+
+def test_existing_global_field_auto_attaches_on_first_valid_use(db):
+    user=User(display_name="Test",profile_data={});db.add(user);db.commit();db.refresh(user)
+    estate_agent,_,_=ensure_subject_type(db,"estate agent",created_by="test")
+    rating=ensure_field(
+        db,
+        FieldEnsure(
+            canonical_name="rating",
+            json_schema={"type":"integer","minimum":1,"maximum":5},
+            subject_types=[],
+        ),
+        source="test",
+    )
+    subject=ensure_subject(
+        db,
+        SubjectEnsure(
+            subject_type="estate agent",name="Example Estate Agents",
+            canonical_key="example-estate-agents",
+        ),
+    )
+
+    exp=create_experience(
+        db,
+        ExperienceCreate(
+            owner_id=user.id,subject_id=subject.id,headline="Disappointing service",
+            summary="Poor communication",raw_text="Two stars.",structured_data={"rating":2},
+            user_approved=True,
+        ),
+        "test-client",
+    )
+
+    attachment=db.scalar(select(SubjectTypeField).where(
+        SubjectTypeField.subject_type_id==estate_agent.id,
+        SubjectTypeField.field_id==rating.id,
+    ))
+    assert attachment is not None
+    assert exp.structured_data=={"rating":2}
+    assert exp.normalization_log==[{
+        "submitted":"rating","canonical":"rating","field_id":str(rating.id),
+        "method":"canonical","attached_to_subject_type":True,
+    }]
