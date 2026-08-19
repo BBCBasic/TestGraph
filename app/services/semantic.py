@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import uuid
+from datetime import datetime, timezone
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -18,6 +19,7 @@ def _has_belongs_to_path(db: Session, source_type_id: uuid.UUID, target_type_id:
     while frontier:
         rows = list(db.scalars(select(TypeRelationship).where(
             TypeRelationship.relationship == "belongs_to",
+            TypeRelationship.status == "active",
             TypeRelationship.source_type_id.in_(frontier),
         )).all())
         parents = {row.target_type_id for row in rows}
@@ -52,6 +54,11 @@ def add_semantic_relationship(
         TypeRelationship.target_type_id == target_type.id,
     ))
     if existing:
+        if existing.status == "retired":
+            raise ValueError(
+                f"Relationship was previously rejected: '{source_type.canonical_name}' {rel} "
+                f"'{target_type.canonical_name}'. It cannot be recreated automatically."
+            )
         return existing
     obj = TypeRelationship(
         source_type_id=source_type.id,
@@ -65,6 +72,41 @@ def add_semantic_relationship(
         db.refresh(obj)
     else:
         db.flush()
+    return obj
+
+
+def retire_semantic_relationship(
+    db: Session,
+    source_type: SubjectType,
+    relationship: str,
+    target_type: SubjectType,
+    *,
+    reason: str,
+    retired_by: str,
+) -> TypeRelationship:
+    """Retire an exact edge while preserving a tombstone against AI flip-flopping."""
+    rel = normalise_term(relationship).replace(" ", "_")
+    obj = db.scalar(select(TypeRelationship).where(
+        TypeRelationship.source_type_id == source_type.id,
+        TypeRelationship.relationship == rel,
+        TypeRelationship.target_type_id == target_type.id,
+    ))
+    if not obj:
+        raise ValueError(
+            f"Relationship does not exist: '{source_type.canonical_name}' {rel} "
+            f"'{target_type.canonical_name}'"
+        )
+    if obj.status == "retired":
+        return obj
+    clean_reason = reason.strip()
+    if not clean_reason:
+        raise ValueError("A reason is required when retiring a relationship")
+    obj.status = "retired"
+    obj.retired_reason = clean_reason
+    obj.retired_by = retired_by
+    obj.retired_at = datetime.now(timezone.utc)
+    db.commit()
+    db.refresh(obj)
     return obj
 
 
