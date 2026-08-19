@@ -714,8 +714,8 @@ _COLLECTION_SIGNAL_KEYS = {
     "parent_organization", "parent_organisation",
 }
 _COLLECTION_RELATIONSHIPS = {
-    "belongs_to", "branch_of", "location_of", "member_of", "owned_by", "part_of",
-    "subsidiary_of",
+    "branch_of", "location_of", "member_of", "owned_by", "part_of",
+    "subsidiary_of", "variant_of",
 }
 
 
@@ -839,7 +839,7 @@ def _validate_collection_assessment(raw, args, enrichment_check):
             )
 
         collection_ref = collection_subject.get("ref")
-        linked = any(
+        linked = bool(collection_ref) and any(
             {relationship.get("source_ref"), relationship.get("target_ref")}
             == {"reviewed_subject", collection_ref}
             for relationship in context.get("relationships") or []
