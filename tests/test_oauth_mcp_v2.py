@@ -21,9 +21,9 @@ def test_oauth_mcp_v2_resource_flow(client,auth,monkeypatch):
     code=re.search(r"[?&]code=([^&]+)",approved.headers["location"]).group(1)
     access=client.post("/oauth/token",data={"grant_type":"authorization_code","client_id":client_id,"code":code,"redirect_uri":redirect_uri,"code_verifier":verifier,"resource":resource}).json()["access_token"]
     initialized=_rpc(client,"/mcp-v2","initialize",token=access)
-    assert initialized.json()["result"]["serverInfo"]["version"]=="3.7.0-alpha"
+    assert initialized.json()["result"]["serverInfo"]["version"]=="3.8.0-alpha"
     tools=_rpc(client,"/mcp-v2","tools/list",token=access,call_id=2).json()["result"]["tools"]
-    assert {tool["name"] for tool in tools}=={"search","fetch","vocabulary_index","resolve_subject_type","resolve_subject_hierarchy","register_subject_type_alias","set_type_relationship","retire_type_relationship","register_field","enrich_subject","save_experience","delete_experience","save_assessment"}
+    assert {tool["name"] for tool in tools}=={"search","fetch","vocabulary_index","resolve_subject_type","resolve_subject_hierarchy","register_subject_type_alias","set_type_relationship","retire_type_relationship","register_field","enrich_subject","correct_subject_fact","save_experience","delete_experience","save_assessment"}
     save_tool=next(tool for tool in tools if tool["name"]=="save_experience")
     properties=save_tool["inputSchema"]["properties"]
     assert "experienced_at" in properties
@@ -39,4 +39,12 @@ def test_oauth_mcp_v2_resource_flow(client,auth,monkeypatch):
     assert delete_tool["annotations"]["destructiveHint"] is True
     assert "confirm_deletion" in delete_tool["inputSchema"]["required"]
     enrich_tool=next(tool for tool in tools if tool["name"]=="enrich_subject")
-    assert "subject_context" in enrich_tool["inputSchema"]["properties"]
+    enrich_schema=enrich_tool["inputSchema"]
+    assert "subject_context" in enrich_schema["properties"]
+    assert "subject_id" in enrich_schema["properties"]
+    assert "subject_enrichment_check" in enrich_schema["required"]
+    assert "collection_assessment" in enrich_schema["required"]
+    assert {"required":["subject_id"]} in enrich_schema["anyOf"]
+    correction_tool=next(tool for tool in tools if tool["name"]=="correct_subject_fact")
+    assert correction_tool["annotations"]["destructiveHint"] is True
+    assert "expected_value" in correction_tool["inputSchema"]["required"]
