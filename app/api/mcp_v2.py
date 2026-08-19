@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from copy import deepcopy
+from datetime import datetime, timezone
 import json
 import re
 import uuid
@@ -21,13 +23,13 @@ from app.services.semantic import add_semantic_relationship, resolve_subject_hie
 from app.services.v2 import (
     add_subject_type_alias, create_assessment, create_experience, delete_owned_experience,
     descendant_type_ids, ensure_field, ensure_subject, ensure_subject_context,
-    fields_for_type, resolve_subject_type, vocabulary_index,
+    _deep_fill_missing, fields_for_type, resolve_subject_type, vocabulary_index,
 )
 from app.services.write_safety import begin_idempotent_write, finish_idempotent_write
 
 router = APIRouter()
 PROTOCOL_VERSION = "2025-06-18"
-SERVER_VERSION = "3.7.0-alpha"
+SERVER_VERSION = "3.8.0-alpha"
 READ_SECURITY = [{"type": "oauth2", "scopes": ["reviews:read"]}]
 WRITE_SECURITY = [{"type": "oauth2", "scopes": ["reviews:write"]}]
 
@@ -361,6 +363,45 @@ TOOLS = [
             "idempotentHint": True, "openWorldHint": False,
         },
     },
+    {
+        "name": "correct_subject_fact",
+        "title": "Correct an existing subject fact",
+        "description": (
+            "Replace one incorrect identifier or attribute using the stable subject ID. The current value must "
+            "match expected_value, authoritative evidence and a reason are mandatory, and the server preserves "
+            "an immutable correction record in subject provenance. Use enrich_subject for missing facts; never use "
+            "this operation merely to add a value."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "subject_id": {"type": "string", "format": "uuid"},
+                "field_root": {"type": "string", "enum": ["identifiers", "attributes"]},
+                "field_path": {
+                    "type": "string", "pattern": "^[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*$",
+                    "description": "Dot-separated path below field_root.",
+                },
+                "expected_value": {},
+                "corrected_value": {},
+                "evidence_sources": {
+                    "type": "array", "minItems": 1, "maxItems": 20,
+                    "items": {"type": "string", "minLength": 1},
+                },
+                "reason": {"type": "string", "minLength": 1},
+                "idempotency_key": {"type": "string", "minLength": 8, "maxLength": 200},
+            },
+            "required": [
+                "subject_id", "field_root", "field_path", "expected_value", "corrected_value",
+                "evidence_sources", "reason", "idempotency_key",
+            ],
+            "additionalProperties": False,
+        },
+        **_security(WRITE_SECURITY),
+        "annotations": {
+            "readOnlyHint": False, "destructiveHint": True,
+            "idempotentHint": True, "openWorldHint": False,
+        },
+    },
     {"name": "save_assessment", "title": "Save AI-derived assessment", "description": "Save separately attributed AI analysis against the exact review it evaluates.", "inputSchema": {"type": "object", "properties": {"experience_id": {"type": "string", "format": "uuid"}, "assessment_type": {"type": "string"}, "evidence": {"type": "object", "additionalProperties": True, "default": {}}, "analysis": {"type": "object", "additionalProperties": True, "default": {}}, "conclusion": {"type": "string"}, "confidence": {"type": "number", "minimum": 0, "maximum": 1}, "source_model": {"type": "string"}, "idempotency_key": {"type": "string", "minLength": 8, "maxLength": 200}}, "required": ["experience_id", "assessment_type", "idempotency_key"], "additionalProperties": False}, **_security(WRITE_SECURITY), "annotations": {"readOnlyHint": False, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False}},
 ]
 
@@ -539,6 +580,75 @@ def _validate_subject_context(db, raw):
     return context, None
 
 
+def _subject_candidates(db, subject_type, canonical_key):
+    term = str(canonical_key or "").strip()
+    if not term:
+        return []
+    pattern = f"%{term}%"
+    rows = list(db.scalars(
+        select(V2Subject).where(
+            V2Subject.subject_type_id == subject_type.id,
+            V2Subject.deleted_at.is_(None),
+            or_(V2Subject.canonical_key.ilike(pattern), V2Subject.name.ilike(pattern)),
+        ).order_by(V2Subject.name).limit(5)
+    ).all())
+    return [
+        {"subject_id": str(item.id), "name": item.name, "canonical_key": item.canonical_key}
+        for item in rows
+    ]
+
+
+def _locate_subject_for_write(db, args):
+    raw_subject_id = args.get("subject_id")
+    if raw_subject_id:
+        try:
+            subject_id = uuid.UUID(str(raw_subject_id))
+        except ValueError:
+            return None, None, _error(
+                "Invalid subject ID", {"code": "subject_id_invalid"}
+            )
+        subject = db.get(V2Subject, subject_id)
+        if not subject or subject.deleted_at:
+            return None, None, _error(
+                "Subject not found", {"code": "subject_not_found", "subject_id": str(subject_id)}
+            )
+        subject_type = db.get(SubjectType, subject.subject_type_id)
+        return subject, subject_type, None
+
+    type_term = args.get("subject_type")
+    canonical_key = args.get("canonical_key")
+    if not type_term or not canonical_key:
+        return None, None, _error(
+            "Stable subject locator required",
+            {
+                "code": "subject_locator_required",
+                "instruction": (
+                    "Supply subject_id from search, fetch or save_experience. The legacy "
+                    "subject_type plus canonical_key pair is also accepted."
+                ),
+            },
+        )
+    subject_type = resolve_subject_type(db, type_term)
+    if not subject_type:
+        return None, None, _error("Subject type not found", {"code": "subject_type_not_found"})
+    subject = db.scalar(select(V2Subject).where(
+        V2Subject.subject_type_id == subject_type.id,
+        V2Subject.canonical_key == canonical_key,
+        V2Subject.deleted_at.is_(None),
+    ))
+    if not subject:
+        return None, None, _error(
+            "Subject not found",
+            {
+                "code": "subject_not_found",
+                "canonical_key": canonical_key,
+                "candidates": _subject_candidates(db, subject_type, canonical_key),
+                "instruction": "Select only a confirmed candidate and retry using its subject_id.",
+            },
+        )
+    return subject, subject_type, None
+
+
 def _enrich_subject(db, principal, args):
     client_id = f"{principal.client_id}:v3"
     relevant = {k: v for k, v in args.items() if k != "idempotency_key"}
@@ -548,44 +658,83 @@ def _enrich_subject(db, principal, args):
     )
     if prior is not None:
         return _result(prior)
-    subject_type = resolve_subject_type(db, args["subject_type"])
-    if not subject_type:
-        return _error("Subject type not found")
-    subject = db.scalar(select(V2Subject).where(
-        V2Subject.subject_type_id == subject_type.id,
-        V2Subject.canonical_key == args["canonical_key"],
-        V2Subject.deleted_at.is_(None),
-    ))
-    if not subject:
-        return _error("Subject not found")
+
+    subject, subject_type, locator_error = _locate_subject_for_write(db, args)
+    if locator_error is not None:
+        return locator_error
     if not any((
         args.get("identifiers"), args.get("attributes"), args.get("provenance"),
         args.get("subject_context"),
     )):
-        return _error("No subject enrichment was supplied")
+        return _error("No subject enrichment was supplied", {"code": "subject_enrichment_empty"})
+
     context_payload, context_error = _validate_subject_context(
         db, args.get("subject_context")
     )
     if context_error is not None:
         return context_error
+    enrichment_check, enrichment_error = _validate_subject_enrichment_check(
+        args.get("subject_enrichment_check"), args,
+        allowed_roots={"identifiers", "attributes", "provenance", "subject_context"},
+    )
+    if enrichment_error is not None:
+        return enrichment_error
+    collection_assessment, collection_error = _validate_collection_assessment(
+        args.get("collection_assessment"), args, enrichment_check,
+        primary_ref="subject", retry_tool="enrich_subject", attribute_key="attributes",
+    )
+    if collection_error is not None:
+        return collection_error
+
+    check_record = {
+        "status": enrichment_check.status,
+        "sources": enrichment_check.sources,
+        "applied_fields": enrichment_check.applied_fields,
+        "unapplied_sources": enrichment_check.unapplied_sources,
+        "collection_assessment": collection_assessment.model_dump(mode="json"),
+        "recorded_at": datetime.now(timezone.utc).isoformat(),
+        "source_client": client_id,
+    }
+    provenance = deepcopy(args.get("provenance", {}))
+    provenance.setdefault("enrichment_checks", {})[args["idempotency_key"]] = check_record
+
+    _, identifier_additions, identifier_conflicts = _deep_fill_missing(
+        subject.identifiers_json, args.get("identifiers", {}), prefix="identifiers",
+    )
+    _, attribute_additions, attribute_conflicts = _deep_fill_missing(
+        subject.attributes_json, args.get("attributes", {}), prefix="attributes",
+    )
+    _, provenance_additions, provenance_conflicts = _deep_fill_missing(
+        subject.provenance_json, provenance, prefix="provenance",
+    )
+
     subject = ensure_subject(
         db,
         SubjectEnsure(
             subject_type=subject_type.canonical_name, name=subject.name,
             canonical_key=subject.canonical_key, identifiers=args.get("identifiers", {}),
-            attributes=args.get("attributes", {}), provenance=args.get("provenance", {}),
+            attributes=args.get("attributes", {}), provenance=provenance,
         ),
-        client_id, owner_id=principal.user_id,
+        client_id, owner_id=principal.user_id, commit=False,
     )
     context = ensure_subject_context(
         db, subject, context_payload,
-        client_id=client_id, owner_id=principal.user_id,
+        client_id=client_id, owner_id=principal.user_id, commit=False,
     )
+    related_changed = any(
+        item.get("created") or item.get("fields_added")
+        for item in context["subjects"] + context["relationships"]
+    )
+    fields_added = identifier_additions + attribute_additions + provenance_additions
+    conflicts = identifier_conflicts + attribute_conflicts + provenance_conflicts
+    changed = bool(fields_added or related_changed)
     body = {
-        "enriched": True, "subject_id": str(subject.id), "subject_type": subject_type.canonical_name,
-        "canonical_key": subject.canonical_key, "identifiers": subject.identifiers_json,
-        "attributes": subject.attributes_json, "provenance": subject.provenance_json,
-        "subject_context": context,
+        "enriched": changed, "changed": changed,
+        "subject_id": str(subject.id), "subject_type": subject_type.canonical_name,
+        "canonical_key": subject.canonical_key, "fields_added": fields_added,
+        "conflicts_preserved": conflicts,
+        "identifiers": subject.identifiers_json, "attributes": subject.attributes_json,
+        "provenance": subject.provenance_json, "subject_context": context,
     }
     finish_idempotent_write(
         db, client_id=client_id, key=f"subject-enrichment:{args['idempotency_key']}",
@@ -593,6 +742,92 @@ def _enrich_subject(db, principal, args):
     )
     return _result(body)
 
+
+def _nested_value(root, parts):
+    value = root
+    for part in parts:
+        if not isinstance(value, dict) or part not in value:
+            return False, None
+        value = value[part]
+    return True, value
+
+
+def _correct_subject_fact(db, principal, args):
+    client_id = f"{principal.client_id}:v3"
+    relevant = {k: v for k, v in args.items() if k != "idempotency_key"}
+    payload_hash, prior = begin_idempotent_write(
+        db, client_id=client_id, key=f"subject-correction:{args['idempotency_key']}",
+        payload=relevant,
+    )
+    if prior is not None:
+        return _result(prior)
+    subject, subject_type, locator_error = _locate_subject_for_write(
+        db, {"subject_id": args.get("subject_id")}
+    )
+    if locator_error is not None:
+        return locator_error
+
+    parts = args["field_path"].split(".")
+    root_name = args["field_root"]
+    root = deepcopy(
+        subject.identifiers_json if root_name == "identifiers" else subject.attributes_json
+    )
+    exists, current = _nested_value(root, parts)
+    if not exists:
+        return _error(
+            "Subject fact does not exist",
+            {
+                "code": "subject_fact_missing",
+                "instruction": "Use enrich_subject to add a missing fact.",
+                "field": f"{root_name}.{args['field_path']}",
+            },
+        )
+    if current != args["expected_value"]:
+        return _error(
+            "Subject correction conflict",
+            {
+                "code": "subject_correction_conflict",
+                "field": f"{root_name}.{args['field_path']}",
+                "expected_value": args["expected_value"],
+                "current_value": current,
+                "instruction": "Reassess the current value and evidence before retrying.",
+            },
+        )
+    target = root
+    for part in parts[:-1]:
+        target = target[part]
+    target[parts[-1]] = deepcopy(args["corrected_value"])
+
+    provenance = deepcopy(subject.provenance_json or {})
+    corrections = deepcopy(provenance.get("subject_corrections") or {})
+    corrections[args["idempotency_key"]] = {
+        "field": f"{root_name}.{args['field_path']}",
+        "previous_value": current,
+        "corrected_value": deepcopy(args["corrected_value"]),
+        "evidence_sources": list(args["evidence_sources"]),
+        "reason": args["reason"],
+        "corrected_at": datetime.now(timezone.utc).isoformat(),
+        "corrected_by": client_id,
+    }
+    provenance["subject_corrections"] = corrections
+    if root_name == "identifiers":
+        subject.identifiers_json = root
+    else:
+        subject.attributes_json = root
+    subject.provenance_json = provenance
+    db.flush()
+    body = {
+        "corrected": True, "subject_id": str(subject.id),
+        "subject_type": subject_type.canonical_name,
+        "field": f"{root_name}.{args['field_path']}",
+        "previous_value": current, "corrected_value": args["corrected_value"],
+        "correction_record": corrections[args["idempotency_key"]],
+    }
+    finish_idempotent_write(
+        db, client_id=client_id, key=f"subject-correction:{args['idempotency_key']}",
+        payload_hash=payload_hash, response_body=body,
+    )
+    return _result(body)
 
 def _request_path_parts(path):
     parts = []
@@ -606,11 +841,12 @@ def _request_path_parts(path):
     return parts
 
 
-def _request_path_exists(args, path):
+def _request_path_exists(args, path, allowed_roots=None):
     parts = _request_path_parts(path)
-    if not parts or parts[0] not in {
+    allowed_roots = allowed_roots or {
         "identifiers", "subject_attributes", "subject_provenance", "subject_context",
-    }:
+    }
+    if not parts or parts[0] not in allowed_roots:
         return False
     value = args.get(parts[0])
     for part in parts[1:]:
@@ -623,7 +859,7 @@ def _request_path_exists(args, path):
     return value is not None
 
 
-def _validate_subject_enrichment_check(raw, args=None):
+def _validate_subject_enrichment_check(raw, args=None, allowed_roots=None):
     if raw is None:
         return None, _error(
             "Subject enrichment check required",
@@ -675,7 +911,7 @@ def _validate_subject_enrichment_check(raw, args=None):
         invalid_paths = {
             source: [
                 path for path in paths
-                if not _request_path_exists(args or {}, path)
+                if not _request_path_exists(args or {}, path, allowed_roots)
             ]
             for source, paths in check.applied_fields.items()
         }
@@ -756,29 +992,38 @@ def _contains_exact_value(value, expected):
     return value == expected
 
 
-def _collection_action_required(code, required_action, **details):
+def _collection_action_required(
+    code, required_action, *, retry_tool="save_experience", **details,
+):
     return _error(
         "Collection assessment incomplete",
         {
             "status": "action_required",
             "code": code,
             "required_action": required_action,
-            "retry_tool": "save_experience",
+            "retry_tool": retry_tool,
             **details,
         },
     )
 
 
-def _validate_collection_assessment(raw, args, enrichment_check):
+def _validate_collection_assessment(
+    raw, args, enrichment_check, *, primary_ref="reviewed_subject",
+    retry_tool="save_experience", attribute_key="subject_attributes",
+):
+    def action(code, required_action, **details):
+        return _collection_action_required(
+            code, required_action, retry_tool=retry_tool, **details,
+        )
     if raw is None:
-        return None, _collection_action_required(
+        return None, action(
             "collection_assessment_required",
-            "Determine whether the reviewed subject belongs to a wider collection, submit the evidence, and retry.",
+            "Determine whether the target subject belongs to a wider collection, submit the evidence, and retry.",
         )
     try:
         assessment = CollectionAssessment.model_validate(raw)
     except ValueError as exc:
-        return None, _collection_action_required(
+        return None, action(
             "collection_assessment_invalid",
             "Correct the collection assessment and retry.",
             reason=str(exc),
@@ -787,7 +1032,7 @@ def _validate_collection_assessment(raw, args, enrichment_check):
     enrichment_sources = set(enrichment_check.sources)
     unknown_evidence = set(assessment.evidence_sources) - enrichment_sources
     if unknown_evidence:
-        return None, _collection_action_required(
+        return None, action(
             "collection_evidence_not_reconciled",
             "Include every collection evidence URL in subject_enrichment_check.sources and reconcile it.",
             unknown_evidence_sources=sorted(unknown_evidence),
@@ -805,13 +1050,13 @@ def _validate_collection_assessment(raw, args, enrichment_check):
             if value is None or value == []
         ]
         if missing:
-            return None, _collection_action_required(
+            return None, action(
                 "collection_member_details_required",
                 "Supply the collection identity, authoritative directory URL, discovered count and every submitted member ref.",
                 missing_fields=missing,
             )
         if assessment.directory_url not in enrichment_sources:
-            return None, _collection_action_required(
+            return None, action(
                 "collection_directory_source_required",
                 "Add the authoritative directory URL to subject_enrichment_check.sources and reconcile it.",
                 directory_url=assessment.directory_url,
@@ -825,7 +1070,7 @@ def _validate_collection_assessment(raw, args, enrichment_check):
             == assessment.collection_name.strip().casefold()
         ]
         if not collection_subjects:
-            return None, _collection_action_required(
+            return None, action(
                 "collection_subject_required",
                 "Add the named collection as an unreviewed subject in subject_context.",
                 collection_name=assessment.collection_name,
@@ -839,7 +1084,7 @@ def _validate_collection_assessment(raw, args, enrichment_check):
             },
             assessment.directory_url,
         ):
-            return None, _collection_action_required(
+            return None, action(
                 "collection_directory_not_stored",
                 "Store the authoritative directory URL on the collection subject.",
                 collection_ref=collection_subject.get("ref"),
@@ -850,7 +1095,7 @@ def _validate_collection_assessment(raw, args, enrichment_check):
             collection_subject.get("attributes", {}),
             assessment.discovered_count,
         ):
-            return None, _collection_action_required(
+            return None, action(
                 "collection_member_count_not_stored",
                 "Store discovered_count on the collection subject attributes.",
                 collection_ref=collection_subject.get("ref"),
@@ -860,51 +1105,51 @@ def _validate_collection_assessment(raw, args, enrichment_check):
         collection_ref = collection_subject.get("ref")
         linked = bool(collection_ref) and any(
             {relationship.get("source_ref"), relationship.get("target_ref")}
-            == {"reviewed_subject", collection_ref}
+            == {primary_ref, collection_ref}
             for relationship in context.get("relationships") or []
         )
         if not linked:
-            return None, _collection_action_required(
+            return None, action(
                 "collection_relationship_required",
-                "Connect reviewed_subject to the collection subject in subject_context.",
+                "Connect the target subject to the collection subject in subject_context.",
                 collection_ref=collection_ref,
             )
 
         submitted_refs = assessment.submitted_member_refs
         if not submitted_refs:
-            return None, _collection_action_required(
+            return None, action(
                 "collection_members_required",
-                "Submit reviewed_subject and every discovered collection member in submitted_member_refs.",
+                "Submit the target subject and every discovered collection member in submitted_member_refs.",
             )
         if len(submitted_refs) != len(set(submitted_refs)):
-            return None, _collection_action_required(
+            return None, action(
                 "collection_member_refs_not_unique",
                 "Remove duplicate submitted_member_refs and retry.",
             )
-        known_refs = {"reviewed_subject"} | {
+        known_refs = {primary_ref} | {
             subject.get("ref") for subject in subjects if subject.get("ref")
         }
         unknown_refs = sorted(set(submitted_refs) - known_refs)
         if unknown_refs:
-            return None, _collection_action_required(
+            return None, action(
                 "collection_member_refs_unknown",
-                "Every submitted member ref must be reviewed_subject or a subject_context subject.",
+                "Every submitted member ref must be the target subject or a subject_context subject.",
                 unknown_refs=unknown_refs,
             )
         if collection_ref in submitted_refs:
-            return None, _collection_action_required(
+            return None, action(
                 "collection_subject_is_not_member",
                 "Do not count the collection subject itself as one of its members.",
                 collection_ref=collection_ref,
             )
-        if "reviewed_subject" not in submitted_refs:
-            return None, _collection_action_required(
+        if primary_ref not in submitted_refs:
+            return None, action(
                 "reviewed_subject_not_counted",
-                "Include reviewed_subject in submitted_member_refs.",
+                "Include the target subject in submitted_member_refs.",
             )
         submitted_count = len(submitted_refs)
         if submitted_count != assessment.discovered_count:
-            return None, _collection_action_required(
+            return None, action(
                 "collection_member_count_mismatch",
                 "Submit every discovered member before retrying; lazy or future materialisation is not accepted.",
                 discovered_count=assessment.discovered_count,
@@ -921,7 +1166,7 @@ def _validate_collection_assessment(raw, args, enrichment_check):
             )
         )
         if unlinked_refs:
-            return None, _collection_action_required(
+            return None, action(
                 "collection_members_not_linked",
                 "Connect every submitted member to the collection.",
                 unlinked_refs=unlinked_refs,
@@ -930,25 +1175,25 @@ def _validate_collection_assessment(raw, args, enrichment_check):
 
     elif assessment.status == "independent":
         if not assessment.evidence_sources and not assessment.attempts:
-            return None, _collection_action_required(
+            return None, action(
                 "collection_independent_evidence_required",
                 "Provide an authoritative source or a concise record of the collection-membership searches performed.",
             )
         collection_data = {
             "identifiers": args.get("identifiers", {}),
-            "subject_attributes": args.get("subject_attributes", {}),
+            "subject_attributes": args.get(attribute_key, {}),
             "subject_provenance": args.get("subject_provenance", {}),
             "subject_context": args.get("subject_context", {}),
         }
         if _contains_collection_signal(collection_data):
-            return None, _collection_action_required(
+            return None, action(
                 "collection_assessment_inconsistent",
                 "The save contains collection or parent-organisation signals; classify it as member or remove the inconsistent data.",
             )
 
     elif assessment.status == "unavailable":
         if not assessment.reason or not assessment.attempts:
-            return None, _collection_action_required(
+            return None, action(
                 "collection_unavailable_details_required",
                 "Record the attempted searches and why collection membership could not be determined.",
             )
@@ -1103,7 +1348,7 @@ async def mcp_v2(request: Request, db: Session = Depends(get_db)):
         result = {"tools": TOOLS}
     elif method == "tools/call":
         params = body.get("params") or {}; name = params.get("name"); args = params.get("arguments") or {}
-        write_names = {"resolve_subject_hierarchy", "register_subject_type_alias", "set_type_relationship", "retire_type_relationship", "register_field", "enrich_subject", "save_experience", "delete_experience", "save_assessment"}
+        write_names = {"resolve_subject_hierarchy", "register_subject_type_alias", "set_type_relationship", "retire_type_relationship", "register_field", "enrich_subject", "correct_subject_fact", "save_experience", "delete_experience", "save_assessment"}
         try:
             principal = _principal(request, "reviews:write" if name in write_names else "reviews:read")
         except TokenError as exc:
@@ -1152,6 +1397,7 @@ async def mcp_v2(request: Request, db: Session = Depends(get_db)):
                     field = ensure_field(db, FieldEnsure.model_validate(args), source=f"{principal.client_id}:v3")
                     result = _result({"registered": True, "field_id": str(field.id), "canonical_name": field.canonical_name})
                 elif name == "enrich_subject": result = _enrich_subject(db, principal, args)
+                elif name == "correct_subject_fact": result = _correct_subject_fact(db, principal, args)
                 elif name == "save_experience": result = _save_experience(db, principal, args)
                 elif name == "delete_experience": result = _delete_experience(db, principal, args)
                 elif name == "save_assessment": result = _save_assessment(db, principal, args)
