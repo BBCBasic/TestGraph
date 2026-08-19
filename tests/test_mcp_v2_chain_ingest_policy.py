@@ -16,11 +16,15 @@ def test_collection_policy_requires_complete_finite_sets():
     enrich = by_name["enrich_subject"]
     save = by_name["save_experience"]
 
-    assert "submit every discovered member" in enrich["description"]
-    assert "Do not omit members" in enrich["description"]
-    assert "Every discovered collection member must be submitted" in save["description"]
+    assert "Do not stop at one company landing page" in enrich["description"]
+    assert "every authoritative collection surface" in enrich["description"]
+    assert "source_manifest" in enrich["description"]
+    assert "Do not stop at one company landing page" in save["description"]
+    assert "source_manifest" in save["description"]
     assert "requires it to equal discovered_count" in save["description"]
     assert "lazily" not in save["description"]
+    enrich_collection = enrich["inputSchema"]["properties"]["collection_assessment"]
+    assert "source_manifest" in enrich_collection["properties"]
 
     for tool in (enrich, save):
         context = tool["inputSchema"]["properties"]["subject_context"]["properties"]
