@@ -3,7 +3,7 @@ from __future__ import annotations
 
 RELATED_SUBJECT_LIMIT = 50
 RELATED_RELATIONSHIP_LIMIT = 100
-_SAVE_POLICY_MARKER = "Collection assessment is mandatory"
+_SAVE_POLICY_MARKER = "Other members are created lazily, not bulk-ingested."
 
 
 def apply_chain_ingest_policy(tools: list[dict]) -> None:
