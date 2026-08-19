@@ -260,7 +260,8 @@ def test_collection_assessment_is_saved_in_review_provenance(db):
                 status="member",collection_name="Example Group",
                 collection_type="business_chain",
                 directory_url="https://example.test/locations",
-                reported_member_count=44,
+                discovered_count=44,
+                submitted_member_refs=["reviewed_subject"],
                 evidence_sources=["https://example.test/locations"],
             ),
         ),
@@ -269,7 +270,8 @@ def test_collection_assessment_is_saved_in_review_provenance(db):
 
     assessment=exp.provenance["collection_assessment"]
     assert assessment["status"]=="member"
-    assert assessment["reported_member_count"]==44
+    assert assessment["discovered_count"]==44
+    assert assessment["submitted_member_refs"]==["reviewed_subject"]
     assert "recorded_at" in assessment
 
 

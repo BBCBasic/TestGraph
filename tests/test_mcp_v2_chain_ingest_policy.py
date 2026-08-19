@@ -8,7 +8,7 @@ from app.services.mcp_v2_policy import (
 )
 
 
-def test_collection_policy_keeps_only_relevant_members():
+def test_collection_policy_requires_complete_finite_sets():
     tools = deepcopy(TOOLS)
     apply_chain_ingest_policy(tools)
 
@@ -16,15 +16,16 @@ def test_collection_policy_keeps_only_relevant_members():
     enrich = by_name["enrich_subject"]
     save = by_name["save_experience"]
 
-    assert "Do not bulk-ingest every published member" in enrich["description"]
-    assert "materialise another member" in enrich["description"]
-    assert "Collection assessment is mandatory" in save["description"]
-    assert "Other members are created lazily" in save["description"]
+    assert "submit every discovered member" in enrich["description"]
+    assert "Do not omit members" in enrich["description"]
+    assert "Every discovered collection member must be submitted" in save["description"]
+    assert "requires it to equal discovered_count" in save["description"]
+    assert "lazily" not in save["description"]
 
     for tool in (enrich, save):
         context = tool["inputSchema"]["properties"]["subject_context"]["properties"]
-        assert context["subjects"]["maxItems"] == RELATED_SUBJECT_LIMIT == 50
-        assert context["relationships"]["maxItems"] == RELATED_RELATIONSHIP_LIMIT == 100
+        assert context["subjects"]["maxItems"] == RELATED_SUBJECT_LIMIT == 500
+        assert context["relationships"]["maxItems"] == RELATED_RELATIONSHIP_LIMIT == 1000
 
 
 def test_collection_policy_is_idempotent():
