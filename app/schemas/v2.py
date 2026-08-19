@@ -52,6 +52,19 @@ class SubjectEnrichmentCheck(StrictModel):
     candidate_identities: list[str] = []
 
 
+class CollectionAssessment(StrictModel):
+    status: Literal["member", "independent", "unavailable", "ambiguous"]
+    collection_name: str | None = Field(default=None, min_length=1, max_length=240)
+    collection_type: str | None = Field(default=None, min_length=1, max_length=160)
+    directory_url: str | None = Field(default=None, min_length=1)
+    reported_member_count: int | None = Field(default=None, ge=2)
+    evidence_sources: list[str] = []
+    attempts: list[str] = []
+    reason: str | None = Field(default=None, min_length=1)
+    candidate_collections: list[str] = []
+    checked_at: datetime | None = None
+
+
 class SourceCreate(StrictModel):
     source_type: str
     provider: str
@@ -75,6 +88,7 @@ class ExperienceCreate(StrictModel):
     user_approved: bool = False
     source: SourceCreate | None = None
     subject_enrichment_check: SubjectEnrichmentCheck | None = None
+    collection_assessment: CollectionAssessment | None = None
     source_client: str = "ai-client"
 
 
