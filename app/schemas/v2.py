@@ -45,6 +45,8 @@ class SubjectContextEnsure(StrictModel):
 class SubjectEnrichmentCheck(StrictModel):
     status: Literal["completed", "unavailable", "not_applicable", "ambiguous"]
     sources: list[str] = []
+    applied_fields: dict[str, list[str]] = {}
+    unapplied_sources: dict[str, str] = {}
     attempts: list[str] = []
     reason: str | None = Field(default=None, min_length=1)
     candidate_identities: list[str] = []

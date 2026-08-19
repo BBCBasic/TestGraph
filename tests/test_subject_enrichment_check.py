@@ -37,11 +37,13 @@ def test_valid_non_ambiguous_checks_can_continue(status):
     raw={"status":status}
     if status=="completed":
         raw["sources"]=["https://example.test/about"]
+        raw["applied_fields"]={"https://example.test/about":["identifiers.website"]}
     elif status=="unavailable":
         raw.update(reason="No reliable source found",attempts=["Searched subject name and publisher"])
     else:
         raw["reason"]="The reviewed subject is a private, user-defined item"
-    check,error=_validate_subject_enrichment_check(raw)
+    args={"identifiers":{"website":"https://example.test/about"}} if status=="completed" else {}
+    check,error=_validate_subject_enrichment_check(raw,args)
     assert error is None
     assert check.status==status
 
@@ -55,3 +57,39 @@ def test_ambiguous_check_stops_for_targeted_user_clarification():
     payload=_payload(error)
     assert payload["details"]["code"]=="subject_identity_ambiguous"
     assert "Ask the user only" in payload["details"]["instruction"]
+
+
+
+def test_completed_check_rejects_a_source_that_was_not_reconciled():
+    check,error=_validate_subject_enrichment_check(
+        {"status":"completed","sources":["https://example.test/about"]},
+        {"identifiers":{}},
+    )
+    assert check is None
+    assert _payload(error)["details"]["code"]=="subject_enrichment_sources_unreconciled"
+
+
+def test_applied_source_must_point_to_data_present_in_save_request():
+    source="https://example.test/about"
+    check,error=_validate_subject_enrichment_check(
+        {
+            "status":"completed","sources":[source],
+            "applied_fields":{source:["identifiers.website"]},
+        },
+        {"identifiers":{}},
+    )
+    assert check is None
+    assert _payload(error)["details"]["code"]=="subject_enrichment_reconciliation_invalid"
+
+
+def test_source_can_be_explicitly_unapplied_with_a_reason():
+    source="https://directory.example/listing"
+    check,error=_validate_subject_enrichment_check(
+        {
+            "status":"completed","sources":[source],
+            "unapplied_sources":{source:"Only corroborated the already-known subject name"},
+        },
+        {},
+    )
+    assert error is None
+    assert check.unapplied_sources[source].startswith("Only corroborated")
