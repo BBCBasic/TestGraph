@@ -6,6 +6,27 @@ from copy import deepcopy
 RELATED_SUBJECT_LIMIT = 500
 RELATED_RELATIONSHIP_LIMIT = 1000
 _SAVE_POLICY_MARKER = "Every discovered collection member must be submitted."
+_SEARCH_GUIDANCE_MARKER = "Search is lexical rather than semantic."
+_BATCH_GUIDANCE_MARKER = "concurrently in batches of up to 10"
+
+_SEARCH_GUIDANCE = (
+    " Search is lexical rather than semantic. For an ordinary user question, try one discriminating "
+    "keyword at a time and retry with a subject-type-only search when necessary. A keyword hit is only "
+    "a discovery step: search each candidate's exact subject name, then fetch every returned review "
+    "before answering so reviews that omit the original keyword are not missed."
+)
+_BATCH_GUIDANCE = (
+    " When the client supports concurrent tool calls, submit independent writes concurrently in batches "
+    "of up to 10. Do not batch dependent operations until their prerequisites are confirmed. Reuse the "
+    "same canonical key for the same subject and derive deterministic idempotency keys from a stable run "
+    "identifier, target and operation so retries and restarted conversations safely return existing writes "
+    "instead of creating duplicates."
+)
+
+
+def _append_guidance(tool: dict | None, guidance: str, marker: str) -> None:
+    if tool and marker not in tool.get("description", ""):
+        tool["description"] = tool.get("description", "") + guidance
 
 
 def apply_chain_ingest_policy(tools: list[dict]) -> None:
@@ -17,6 +38,8 @@ def apply_chain_ingest_policy(tools: list[dict]) -> None:
     """
 
     by_name = {tool.get("name"): tool for tool in tools}
+
+    _append_guidance(by_name.get("search"), _SEARCH_GUIDANCE, _SEARCH_GUIDANCE_MARKER)
 
     enrich = by_name.get("enrich_subject")
     if enrich:
@@ -99,6 +122,9 @@ def apply_chain_ingest_policy(tools: list[dict]) -> None:
                 "effort, inconvenience, latency, quick-review scope and future materialisation are not omissions."
             )
         _set_context_limits(save)
+
+    for write_name in ("enrich_subject", "save_experience", "save_assessment"):
+        _append_guidance(by_name.get(write_name), _BATCH_GUIDANCE, _BATCH_GUIDANCE_MARKER)
 
 
 def _set_context_limits(tool: dict) -> None:
