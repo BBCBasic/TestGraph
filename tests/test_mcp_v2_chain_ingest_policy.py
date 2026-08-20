@@ -32,6 +32,25 @@ def test_collection_policy_requires_complete_finite_sets():
         assert context["relationships"]["maxItems"] == RELATED_RELATIONSHIP_LIMIT == 1000
 
 
+def test_policy_teaches_complete_search_and_safe_write_batching():
+    tools = deepcopy(TOOLS)
+    apply_chain_ingest_policy(tools)
+
+    by_name = {tool["name"]: tool for tool in tools}
+    search_description = by_name["search"]["description"]
+    assert "Search is lexical rather than semantic" in search_description
+    assert "one discriminating keyword at a time" in search_description
+    assert "exact subject name" in search_description
+    assert "fetch every returned review" in search_description
+
+    for name in ("enrich_subject", "save_experience", "save_assessment"):
+        description = by_name[name]["description"]
+        assert "concurrently in batches of up to 10" in description
+        assert "Do not batch dependent operations" in description
+        assert "deterministic idempotency keys" in description
+        assert "restarted conversations" in description
+
+
 def test_collection_policy_is_idempotent():
     tools = deepcopy(TOOLS)
     apply_chain_ingest_policy(tools)
