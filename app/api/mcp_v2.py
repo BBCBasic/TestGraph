@@ -26,11 +26,13 @@ from app.services.v2 import (
     descendant_type_ids, ensure_field, ensure_subject, ensure_subject_context,
     _deep_fill_missing, fields_for_type, resolve_subject_type, vocabulary_index,
 )
-from app.services.write_safety import begin_idempotent_write, finish_idempotent_write
+from app.services.write_safety import (
+    IdempotencyKeyConflictError, begin_idempotent_write, finish_idempotent_write,
+)
 
 router = APIRouter()
 PROTOCOL_VERSION = "2025-06-18"
-SERVER_VERSION = "3.12.0-alpha"
+SERVER_VERSION = "3.12.1-alpha"
 READ_SECURITY = [{"type": "oauth2", "scopes": ["reviews:read"]}]
 WRITE_SECURITY = [{"type": "oauth2", "scopes": ["reviews:write"]}]
 
@@ -51,6 +53,27 @@ def _error(message, details=None):
     payload = {"error": message}
     if details is not None:
         payload["details"] = details
+    return {**_result(payload), "isError": True}
+
+
+def _idempotency_conflict_error(exc: IdempotencyKeyConflictError):
+    payload = {
+        "error": "Idempotency key conflicts with an earlier write",
+        "error_code": "IDEMPOTENCY_KEY_CONFLICT",
+        "details": {
+            "meaning": "This idempotency key is already bound to different content.",
+            "operation_scope": exc.operation_scope,
+            "retry_current_request_with_same_key": False,
+            "safe_to_retry_original_request": True,
+            "action_required": {
+                "if_retry": "Resend the exact original payload unchanged with the same idempotency_key.",
+                "if_content_changed": (
+                    "Generate a new deterministic idempotency_key from the stable run identifier, "
+                    "target and operation, then resubmit the changed payload."
+                ),
+            },
+        },
+    }
     return {**_result(payload), "isError": True}
 
 
@@ -2324,6 +2347,8 @@ async def mcp_v2(request: Request, db: Session = Depends(get_db)):
                 elif name == "delete_experience": result = _delete_experience(db, principal, args)
                 elif name == "save_assessment": result = _save_assessment(db, principal, args)
                 else: return JSONResponse({"jsonrpc": "2.0", "id": rpc_id, "error": {"code": -32602, "message": "Unknown tool"}})
+            except IdempotencyKeyConflictError as exc:
+                db.rollback(); result = _idempotency_conflict_error(exc)
             except Exception as exc:
                 db.rollback(); result = _error("TasteGraph server error", {"type": type(exc).__name__, "message": str(exc)})
     else:

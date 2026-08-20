@@ -7,6 +7,14 @@ from app.models.entities import IdempotencyRecord
 from app.services.core import request_hash
 
 
+class IdempotencyKeyConflictError(ValueError):
+    """Raised when an idempotency key is already bound to another payload."""
+
+    def __init__(self, key: str):
+        self.operation_scope = key.split(":", 1)[0]
+        super().__init__("Idempotency key is already bound to different content")
+
+
 def begin_idempotent_write(db: Session, *, client_id: str, key: str, payload: dict):
     if not key or len(key) < 8 or len(key) > 200:
         raise ValueError("idempotency_key must be 8-200 characters")
@@ -17,7 +25,7 @@ def begin_idempotent_write(db: Session, *, client_id: str, key: str, payload: di
     ))
     if existing:
         if existing.request_hash != payload_hash:
-            raise ValueError("Idempotency key was reused for different content")
+            raise IdempotencyKeyConflictError(key)
         return payload_hash, existing.response_body
     return payload_hash, None
 
