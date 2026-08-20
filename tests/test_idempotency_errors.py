@@ -66,6 +66,7 @@ def test_mcp_conflict_response_tells_ai_how_to_recover(db):
 
     assert result["isError"] is True
     assert payload["error_code"] == "IDEMPOTENCY_KEY_CONFLICT"
+    assert details["code"] == "IDEMPOTENCY_KEY_CONFLICT"
     assert details["operation_scope"] == "assessment"
     assert details["retry_current_request_with_same_key"] is False
     assert details["safe_to_retry_original_request"] is True

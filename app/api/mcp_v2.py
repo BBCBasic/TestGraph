@@ -32,7 +32,7 @@ from app.services.write_safety import (
 
 router = APIRouter()
 PROTOCOL_VERSION = "2025-06-18"
-SERVER_VERSION = "3.12.1-alpha"
+SERVER_VERSION = "3.12.2-alpha"
 READ_SECURITY = [{"type": "oauth2", "scopes": ["reviews:read"]}]
 WRITE_SECURITY = [{"type": "oauth2", "scopes": ["reviews:write"]}]
 
@@ -61,6 +61,7 @@ def _idempotency_conflict_error(exc: IdempotencyKeyConflictError):
         "error": "Idempotency key conflicts with an earlier write",
         "error_code": "IDEMPOTENCY_KEY_CONFLICT",
         "details": {
+            "code": "IDEMPOTENCY_KEY_CONFLICT",
             "meaning": "This idempotency key is already bound to different content.",
             "operation_scope": exc.operation_scope,
             "retry_current_request_with_same_key": False,
