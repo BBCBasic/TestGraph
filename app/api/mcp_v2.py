@@ -16,19 +16,23 @@ from sqlalchemy.orm import Session
 from app.core.config import get_settings
 from app.core.security import Principal, TokenError, principal_from_authorization
 from app.db.session import get_db
-from app.models.v2 import Assessment, SubjectRelationship, SubjectType, SubjectTypeAlias, V2Experience, V2Subject
+from app.models.v2 import Assessment, LocationAssertion, SubjectRelationship, SubjectType, SubjectTypeAlias, V2Experience, V2Subject
 from app.schemas.deliberation import (
     DeliberationClaim, DeliberationContributionCreate, DeliberationCreate,
     DeliberationResolutionCreate,
 )
 from app.schemas.v2 import (
-    AssessmentCreate, CollectionAssessment, ExperienceCreate, FieldEnsure, SubjectContextEnsure,
-    SubjectEnrichmentCheck, SubjectEnsure,
+    AssessmentCreate, CollectionAssessment, ExperienceCreate, FieldEnsure, LocationAssertionCreate,
+    LocationResolutionCreate, SubjectContextEnsure, SubjectEnrichmentCheck, SubjectEnsure,
 )
 from app.services.deliberation import (
     DeliberationError, claim_deliberation, contribution_body, create_deliberation,
     deliberation_body, get_deliberation, list_open_deliberations,
     record_resolution, submit_contribution,
+)
+from app.services.location import (
+    LocationError, assertion_body, assertions_for_subject, create_location_assertion,
+    location_matches, resolve_location_assertion,
 )
 from app.services.semantic import add_semantic_relationship, resolve_subject_hierarchy, retire_semantic_relationship
 from app.services.v2 import (
@@ -42,7 +46,7 @@ from app.services.write_safety import (
 
 router = APIRouter()
 PROTOCOL_VERSION = "2025-06-18"
-SERVER_VERSION = "3.16.0-alpha"
+SERVER_VERSION = "3.17.0-alpha"
 READ_SECURITY = [{"type": "oauth2", "scopes": ["reviews:read"]}]
 WRITE_SECURITY = [{"type": "oauth2", "scopes": ["reviews:write"]}]
 
@@ -89,6 +93,12 @@ def _idempotency_conflict_error(exc: IdempotencyKeyConflictError):
 
 
 def _deliberation_error(exc: DeliberationError):
+    details = {"code": exc.code, **exc.details}
+    payload = {"error": exc.message, "error_code": exc.code, "details": details}
+    return {**_result(payload), "isError": True}
+
+
+def _location_error(exc: LocationError):
     details = {"code": exc.code, **exc.details}
     payload = {"error": exc.message, "error_code": exc.code, "details": details}
     return {**_result(payload), "isError": True}
@@ -745,7 +755,44 @@ TOOLS = [
         **_security(WRITE_SECURITY),
         "annotations": {"readOnlyHint": False, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
     },
-    {"name": "save_assessment", "title": "Save AI-derived assessment", "description": "Save separately attributed AI analysis against the exact review it evaluates.", "inputSchema": {"type": "object", "properties": {"experience_id": {"type": "string", "format": "uuid"}, "assessment_type": {"type": "string"}, "evidence": {"type": "object", "additionalProperties": True, "default": {}}, "analysis": {"type": "object", "additionalProperties": True, "default": {}}, "conclusion": {"type": "string"}, "confidence": {"type": "number", "minimum": 0, "maximum": 1}, "source_model": {"type": "string"}, "idempotency_key": {"type": "string", "minLength": 8, "maxLength": 200}}, "required": ["experience_id", "assessment_type", "idempotency_key"], "additionalProperties": False}, **_security(WRITE_SECURITY), "annotations": {"readOnlyHint": False, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False}},
+    {"name": "save_assessment", "title": "Save AI-derived assessment", "description": "Save separately attributed AI analysis against the exact review it evaluates.", "inputSchema": {"type": "object", "properties": {"experience_id": {"type": "string", "format": "uuid"}, "assessment_type": {"type": "string"}, "evidence": {"type": "object", "additionalProperties": True, "default": {}}, "analysis": {"type": "object", "additionalProperties": True, "default": {}}, "conclusion": {"type": "string"}, "confidence": {"type": "number", "minimum": 0, "maximum": 1}, "source_model": {"type": "string"}, "idempotency_key": {"type": "string", "minLength": 8, "maxLength": 200}}, "required": ["experience_id", "assessment_type", "idempotency_key"], "additionalProperties": False}, **_security(WRITE_SECURITY), "annotations": {"readOnlyHint": False, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False}},,
+    {
+        "name": "assert_location", "title": "Assert an evidence-backed location",
+        "description": "Add a governed location assertion for an existing eligible subject. Resolve the subject and any existing Place first. New Places require a stable canonical key plus a durable identifier. Every assertion requires source provenance. Coordinates are WGS84 only and are never silently geocoded.",
+        "inputSchema": {"type": "object", "properties": {
+            "subject_id": {"type": "string", "format": "uuid"},
+            "predicate": {"type": "string", "enum": ["located_in", "contained_in", "published_address", "postcode", "position"]},
+            "object_place": {"type": "object", "properties": {
+                "subject_id": {"type": "string", "format": "uuid"}, "name": {"type": "string"},
+                "canonical_key": {"type": "string"}, "identifiers": {"type": "object", "additionalProperties": True},
+                "place_kind": {"type": "string"}
+            }, "additionalProperties": False},
+            "value": {}, "qualifiers": {"type": "object", "additionalProperties": True, "default": {}},
+            "source": {"type": "object", "additionalProperties": True},
+            "observed_at": {"type": "string", "format": "date-time"},
+            "valid_from": {"type": "string", "format": "date-time"}, "valid_to": {"type": "string", "format": "date-time"},
+            "visibility": {"type": "string", "enum": ["private", "unlisted", "public"], "default": "private"},
+            "idempotency_key": {"type": "string", "minLength": 8, "maxLength": 200}
+        }, "required": ["subject_id", "predicate", "source", "idempotency_key"], "additionalProperties": False},
+        **_security(WRITE_SECURITY), "annotations": {"readOnlyHint": False, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
+    },
+    {
+        "name": "get_location_assertions", "title": "Get governed location assertions",
+        "description": "Return all visible location assertions for one subject, including provenance, conflict state, Place identity and legacy-field migration drift.",
+        "inputSchema": {"type": "object", "properties": {"subject_id": {"type": "string", "format": "uuid"}}, "required": ["subject_id"], "additionalProperties": False},
+        **_security(READ_SECURITY), "annotations": {"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
+    },
+    {
+        "name": "resolve_location_assertion", "title": "Resolve a contested location assertion",
+        "description": "Accept or reject a contested location assertion. The submitting client cannot resolve its own contested claim without explicit user approval.",
+        "inputSchema": {"type": "object", "properties": {
+            "assertion_id": {"type": "string", "format": "uuid"},
+            "decision": {"type": "string", "enum": ["accepted", "rejected"]},
+            "rationale": {"type": "string", "minLength": 1}, "user_approved": {"type": "boolean", "default": false},
+            "idempotency_key": {"type": "string", "minLength": 8, "maxLength": 200}
+        }, "required": ["assertion_id", "decision", "rationale", "idempotency_key"], "additionalProperties": False},
+        **_security(WRITE_SECURITY), "annotations": {"readOnlyHint": False, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
+    }
 ]
 
 
@@ -927,6 +974,7 @@ def _search_provenance(provenance):
 
 def _search(db, principal, args):
     q = str(args.get("query", "")).strip()
+    location_match_map, location_ambiguities = location_matches(db, q, owner_id=principal.user_id) if q else ({}, [])
     type_term = str(args.get("subject_type", "")).strip()
     include_related = bool(args.get("include_related", True))
     limit = max(1, min(int(args.get("limit", 10)), 50))
@@ -959,7 +1007,10 @@ def _search(db, principal, args):
         stmt = stmt.where(SubjectType.id.in_(ids))
     if q:
         p = f"%{q}%"
-        stmt = stmt.where(or_(V2Subject.name.ilike(p), V2Subject.canonical_key.ilike(p), V2Experience.headline.ilike(p), V2Experience.summary.ilike(p), V2Experience.raw_text.ilike(p)))
+        review_terms = [V2Subject.name.ilike(p), V2Subject.canonical_key.ilike(p), V2Experience.headline.ilike(p), V2Experience.summary.ilike(p), V2Experience.raw_text.ilike(p)]
+        if location_match_map:
+            review_terms.append(V2Subject.id.in_(location_match_map))
+        stmt = stmt.where(or_(*review_terms))
     review_page = db.execute(
         stmt.order_by(V2Experience.created_at.desc(), V2Experience.id.desc())
         .offset(review_offset).limit(limit + 1)
@@ -978,11 +1029,14 @@ def _search(db, principal, args):
         if type_term:
             subject_stmt = subject_stmt.where(SubjectType.id.in_(ids))
         if q:
-            subject_stmt = subject_stmt.where(or_(
+            subject_terms = [
                 V2Subject.name.ilike(p), V2Subject.canonical_key.ilike(p),
                 cast(V2Subject.identifiers_json, String).ilike(p),
                 cast(V2Subject.attributes_json, String).ilike(p),
-            ))
+            ]
+            if location_match_map:
+                subject_terms.append(V2Subject.id.in_(location_match_map))
+            subject_stmt = subject_stmt.where(or_(*subject_terms))
         duplicate_names = subject_stmt.with_only_columns(
             func.lower(V2Subject.name)
         ).group_by(func.lower(V2Subject.name)).having(func.count(V2Subject.id) > 1)
@@ -1043,6 +1097,7 @@ def _search(db, principal, args):
                 "review_count": review_count,
                 "review_status": "reviewed" if review_count else "unreviewed",
                 "connections": connections,
+                "location_matches": location_match_map.get(known.id, []),
             })
     next_review_offset = review_offset + len(rows)
     next_subject_offset = subject_offset + len(known_subjects)
@@ -1073,6 +1128,7 @@ def _search(db, principal, args):
         "has_more": has_more,
         "next_cursor": next_cursor,
         "identity_collisions": collisions,
+        "location_ambiguities": location_ambiguities,
         "identity_rule": "Group and compare by subject_id and subject_type; never merge records solely because subject_name matches.",
     })
 
@@ -1087,7 +1143,7 @@ def _fetch(db, principal, args):
         return _error("Experience not found")
     e, s, t = row
     assessments = list(db.scalars(select(Assessment).where(Assessment.experience_id == e.id).order_by(Assessment.created_at)).all())
-    return _result({"id": str(e.id), "record_type": e.record_type, "subject": {"id": str(s.id), "name": s.name, "canonical_key": s.canonical_key, "subject_type_id": str(t.id), "subject_type": t.canonical_name, "identifiers": s.identifiers_json, "attributes": s.attributes_json, "provenance": s.provenance_json}, "headline": e.headline, "summary": e.summary, "raw_text": e.raw_text, "structured_data": e.structured_data, "submitted_data": e.submitted_data, "normalization_log": e.normalization_log, "provenance": e.provenance, "assessments": [{"id": str(a.id), "assessment_type": a.assessment_type, "evidence": a.evidence_json, "analysis": a.analysis_json, "conclusion": a.conclusion, "confidence": a.confidence, "provenance": a.provenance} for a in assessments], "created_at": e.created_at.isoformat()})
+    return _result({"id": str(e.id), "record_type": e.record_type, "subject": {"id": str(s.id), "name": s.name, "canonical_key": s.canonical_key, "subject_type_id": str(t.id), "subject_type": t.canonical_name, "identifiers": s.identifiers_json, "attributes": s.attributes_json, "provenance": s.provenance_json}, "headline": e.headline, "summary": e.summary, "raw_text": e.raw_text, "structured_data": e.structured_data, "submitted_data": e.submitted_data, "normalization_log": e.normalization_log, "provenance": e.provenance, "assessments": [{"id": str(a.id), "assessment_type": a.assessment_type, "evidence": a.evidence_json, "analysis": a.analysis_json, "conclusion": a.conclusion, "confidence": a.confidence, "provenance": a.provenance} for a in assessments], "location": assertions_for_subject(db, s.id, owner_id=principal.user_id), "created_at": e.created_at.isoformat()})
 
 
 
@@ -2760,6 +2816,60 @@ def _record_resolution(db, principal, args):
     return _result(body)
 
 
+def _assert_location(db, principal, args):
+    if principal.user_id is None:
+        return _error("Authenticated TestGraph user is required")
+    client_id = f"{principal.client_id}:v3"
+    relevant = {k: v for k, v in args.items() if k != "idempotency_key"}
+    payload_hash, prior = begin_idempotent_write(
+        db, client_id=client_id, key=f"location-assertion:{args['idempotency_key']}", payload=relevant,
+    )
+    if prior is not None:
+        return _result(prior)
+    item = create_location_assertion(
+        db, LocationAssertionCreate.model_validate(relevant),
+        owner_id=principal.user_id, client_id=client_id,
+    )
+    body = {"saved": True, "assertion": assertion_body(db, item)}
+    finish_idempotent_write(
+        db, client_id=client_id, key=f"location-assertion:{args['idempotency_key']}",
+        payload_hash=payload_hash, response_body=body,
+    )
+    return _result(body)
+
+
+def _get_location_assertions(db, principal, args):
+    if principal.user_id is None:
+        return _error("Authenticated TestGraph user is required")
+    try:
+        subject_id = uuid.UUID(str(args.get("subject_id", "")))
+    except ValueError:
+        return _error("Invalid subject ID", {"code": "subject_id_invalid"})
+    return _result(assertions_for_subject(db, subject_id, owner_id=principal.user_id))
+
+
+def _resolve_location_assertion(db, principal, args):
+    if principal.user_id is None:
+        return _error("Authenticated TestGraph user is required")
+    client_id = f"{principal.client_id}:v3"
+    relevant = {k: v for k, v in args.items() if k != "idempotency_key"}
+    payload_hash, prior = begin_idempotent_write(
+        db, client_id=client_id, key=f"location-resolution:{args['idempotency_key']}", payload=relevant,
+    )
+    if prior is not None:
+        return _result(prior)
+    item = resolve_location_assertion(
+        db, LocationResolutionCreate.model_validate(relevant),
+        owner_id=principal.user_id, client_id=client_id,
+    )
+    body = {"resolved": True, "assertion": assertion_body(db, item)}
+    finish_idempotent_write(
+        db, client_id=client_id, key=f"location-resolution:{args['idempotency_key']}",
+        payload_hash=payload_hash, response_body=body,
+    )
+    return _result(body)
+
+
 def _save_assessment(db, principal, args):
     client_id = f"{principal.client_id}:v3"
     relevant = {k: v for k, v in args.items() if k != "idempotency_key"}
@@ -2778,14 +2888,14 @@ async def mcp_v2(request: Request, db: Session = Depends(get_db)):
     if method and method.startswith("notifications/"):
         return Response(status_code=202)
     if method == "initialize":
-        result = {"protocolVersion": PROTOCOL_VERSION, "capabilities": {"tools": {"listChanged": False}}, "serverInfo": {"name": "TasteGraph v2", "version": SERVER_VERSION}, "instructions": "TestGraph is AI-native: use your full available reasoning, web retrieval and tool capabilities as its open-ended semantic and discovery engine. For unfamiliar subjects, derive useful types, fields, identities, relationships and likely future searches from meaning and evidence; do not wait for TestGraph to prescribe a domain-specific form. TestGraph supplies stable graph primitives, persistence and server-side verification, while you supply the open-ended intelligence. For cross-model work, call list_open_deliberations to discover tasks, claim_deliberation before executing one, and submit_contribution with evidence; only record_resolution with explicit user approval may close it. For search, continue through every next_cursor until has_more is false before claiming completeness, and never merge reviews by subject_name: group them by subject_id and subject_type. Before saving an experience, identify exactly what was experienced and inspect vocabulary_index. Reuse an existing canonical type or alias whenever possible. If the specific type is absent, reason from meaning to a broad-to-specific hierarchy and call resolve_subject_hierarchy; never create a type merely because it arrived first. Before saving, perform the generic subject enrichment check and include its result in subject_enrichment_check. Use authoritative or primary sources where available, but do not require a website, location or any domain-specific field. Reconcile every consulted source with the request paths it populated, or explain why it yielded no stored discovery. For every applied path, declare its generic retrieval_uses purpose and likely query examples: identity, likely query, location, classification, relationship, comparison or verification. Do not store facts merely because a source publishes them; omit facts with no plausible future TestGraph retrieval or graph use. When the subject has its own canonical URL, store it as an identifier. Perform routine checking and retry automatically; do not ask the user unless identity is genuinely ambiguous. If enrichment cannot be found, use unavailable with a reason and the searches attempted. Register information you may realistically search for later against what you save in TestGraph; do not collect facts merely because they are available. Treat enrichment as shared graph work: accept substantial discovery work now because captured knowledge is reusable in later searches, and users benefit reciprocally from useful enrichment contributed for other subjects. Save discoveries as unreviewed subject_context with generic relationships and source provenance, while attaching the review only to the exact subject experienced. Always submit collection_assessment. Collection unavailable is only for a genuine failure to identify the collection or find/access authoritative evidence; it is invalid when collection signals are known and never valid because the collection is large, inconvenient, slow, effortful, part of a quick review or deferred until later. When the subject belongs to a wider collection, first resolve the collection and reuse its stored collection_id and manifest_revision when a verified manifest already exists. Do not rediscover or resubmit settled members for an ordinary later review. Only when no verified manifest exists, or when refresh_manifest is explicitly requested, discover every authoritative collection surface, including pagination, sitemaps, official APIs, regional directories and member pages. For that initial discovery or explicit refresh, return a complete source_manifest that maps every member to its consulted source pages, records discovery queries and exhaustion evidence, follows pagination to a terminal page and leaves no unresolved source URL. Save the collection as an unreviewed subject and preserve its authoritative directory URL and discovered count. Submit reviewed_subject plus every derived member as unreviewed subject_context, connect every member to the collection, and list those refs in submitted_member_refs. The server rejects incomplete source coverage and requires submitted_count to equal discovered_count for initial manifests and explicit refreshes. On a location-based recommendation, never conclude there is no relevant result from the target-town search alone: also search the relevant subject type without a text query, follow reviewed subjects to parent organisations, inspect their official branch directories for the requested location, and add any discovered branch as an unreviewed related subject. Treat verification_status and coverage_status separately: only coverage_status=complete permits a conclusion that a location or member is absent; partial or unknown coverage is evidence of uncertainty and must be reported with its warning. Do this routine chain lookup without asking the user. If authoritative information was missed during the original save, use enrich_subject to add it without creating another review. Location is optional: for a physical location record town and coordinates only when explicitly published by the source, otherwise record the published address; skip location when irrelevant. If the official source is unavailable, preserve that limitation and never invent facts or silently geocode coordinates. The experience date defaults to creation time unless explicitly provided. When structured data matches an existing globally registered canonical field, include it in the save: TestGraph attaches that field to the subject type automatically after validation. Do not ask for routine confirmation, omit the structured value, or demote it to raw_text merely because the field has not previously been used for that subject type. Only genuinely new reusable fields require register_field. Reviews store stable subject-type IDs, while belongs_to relationships provide the evolving semantic structure. Preserve exact user wording in raw_text and AI analysis in save_assessment."}
+        result = {"protocolVersion": PROTOCOL_VERSION, "capabilities": {"tools": {"listChanged": False}}, "serverInfo": {"name": "TasteGraph v2", "version": SERVER_VERSION}, "instructions": "TestGraph is AI-native: use your full available reasoning, web retrieval and tool capabilities as its open-ended semantic and discovery engine. For unfamiliar subjects, derive useful types, fields, identities, relationships and likely future searches from meaning and evidence; do not wait for TestGraph to prescribe a domain-specific form. TestGraph supplies stable graph primitives, persistence and server-side verification, while you supply the open-ended intelligence. For cross-model work, call list_open_deliberations to discover tasks, claim_deliberation before executing one, and submit_contribution with evidence; only record_resolution with explicit user approval may close it. For search, continue through every next_cursor until has_more is false before claiming completeness, and never merge reviews by subject_name: group them by subject_id and subject_type. Before saving an experience, identify exactly what was experienced and inspect vocabulary_index. Reuse an existing canonical type or alias whenever possible. If the specific type is absent, reason from meaning to a broad-to-specific hierarchy and call resolve_subject_hierarchy; never create a type merely because it arrived first. Before saving, perform the generic subject enrichment check and include its result in subject_enrichment_check. Use authoritative or primary sources where available, but do not require a website, location or any domain-specific field. Reconcile every consulted source with the request paths it populated, or explain why it yielded no stored discovery. For every applied path, declare its generic retrieval_uses purpose and likely query examples: identity, likely query, location, classification, relationship, comparison or verification. Do not store facts merely because a source publishes them; omit facts with no plausible future TestGraph retrieval or graph use. When the subject has its own canonical URL, store it as an identifier. Perform routine checking and retry automatically; do not ask the user unless identity is genuinely ambiguous. If enrichment cannot be found, use unavailable with a reason and the searches attempted. Register information you may realistically search for later against what you save in TestGraph; do not collect facts merely because they are available. Treat enrichment as shared graph work: accept substantial discovery work now because captured knowledge is reusable in later searches, and users benefit reciprocally from useful enrichment contributed for other subjects. Save discoveries as unreviewed subject_context with generic relationships and source provenance, while attaching the review only to the exact subject experienced. Always submit collection_assessment. Collection unavailable is only for a genuine failure to identify the collection or find/access authoritative evidence; it is invalid when collection signals are known and never valid because the collection is large, inconvenient, slow, effortful, part of a quick review or deferred until later. When the subject belongs to a wider collection, first resolve the collection and reuse its stored collection_id and manifest_revision when a verified manifest already exists. Do not rediscover or resubmit settled members for an ordinary later review. Only when no verified manifest exists, or when refresh_manifest is explicitly requested, discover every authoritative collection surface, including pagination, sitemaps, official APIs, regional directories and member pages. For that initial discovery or explicit refresh, return a complete source_manifest that maps every member to its consulted source pages, records discovery queries and exhaustion evidence, follows pagination to a terminal page and leaves no unresolved source URL. Save the collection as an unreviewed subject and preserve its authoritative directory URL and discovered count. Submit reviewed_subject plus every derived member as unreviewed subject_context, connect every member to the collection, and list those refs in submitted_member_refs. The server rejects incomplete source coverage and requires submitted_count to equal discovered_count for initial manifests and explicit refreshes. On a location-based recommendation, never conclude there is no relevant result from the target-town search alone: also search the relevant subject type without a text query, follow reviewed subjects to parent organisations, inspect their official branch directories for the requested location, and add any discovered branch as an unreviewed related subject. Treat verification_status and coverage_status separately: only coverage_status=complete permits a conclusion that a location or member is absent; partial or unknown coverage is evidence of uncertainty and must be reported with its warning. Do this routine chain lookup without asking the user. If authoritative information was missed during the original save, use enrich_subject to add it without creating another review. Location is optional. When relevant, use assert_location for the five governed predicates and evidence provenance; create stable Places only from durable identifiers, return ambiguity candidates without guessing, and never silently geocode coordinates. Use contained_in with an explicit scheme; v1 search traverses administrative containment by default. If the official source is unavailable, preserve that limitation and never invent facts or silently geocode coordinates. The experience date defaults to creation time unless explicitly provided. When structured data matches an existing globally registered canonical field, include it in the save: TestGraph attaches that field to the subject type automatically after validation. Do not ask for routine confirmation, omit the structured value, or demote it to raw_text merely because the field has not previously been used for that subject type. Only genuinely new reusable fields require register_field. Reviews store stable subject-type IDs, while belongs_to relationships provide the evolving semantic structure. Preserve exact user wording in raw_text and AI analysis in save_assessment."}
     elif method == "ping":
         result = {}
     elif method == "tools/list":
         result = {"tools": TOOLS}
     elif method == "tools/call":
         params = body.get("params") or {}; name = params.get("name"); args = params.get("arguments") or {}
-        write_names = {"resolve_subject_hierarchy", "register_subject_type_alias", "set_type_relationship", "retire_type_relationship", "register_field", "enrich_subject", "correct_subject_fact", "save_experience", "delete_experience", "save_assessment", "create_deliberation", "claim_deliberation", "submit_contribution", "record_resolution"}
+        write_names = {"resolve_subject_hierarchy", "register_subject_type_alias", "set_type_relationship", "retire_type_relationship", "register_field", "enrich_subject", "correct_subject_fact", "save_experience", "delete_experience", "save_assessment", "create_deliberation", "claim_deliberation", "submit_contribution", "record_resolution", "assert_location", "resolve_location_assertion"}
         try:
             principal = _principal(request, "reviews:write" if name in write_names else "reviews:read")
         except TokenError as exc:
@@ -2839,6 +2949,9 @@ async def mcp_v2(request: Request, db: Session = Depends(get_db)):
                 elif name == "save_experience": result = _save_experience(db, principal, args)
                 elif name == "delete_experience": result = _delete_experience(db, principal, args)
                 elif name == "save_assessment": result = _save_assessment(db, principal, args)
+                elif name == "assert_location": result = _assert_location(db, principal, args)
+                elif name == "get_location_assertions": result = _get_location_assertions(db, principal, args)
+                elif name == "resolve_location_assertion": result = _resolve_location_assertion(db, principal, args)
                 elif name == "create_deliberation": result = _create_deliberation(db, principal, args)
                 elif name == "get_deliberation": result = _get_deliberation(db, principal, args)
                 elif name == "list_open_deliberations": result = _list_open_deliberations(db, principal, args)
@@ -2848,6 +2961,8 @@ async def mcp_v2(request: Request, db: Session = Depends(get_db)):
                 else: return JSONResponse({"jsonrpc": "2.0", "id": rpc_id, "error": {"code": -32602, "message": "Unknown tool"}})
             except DeliberationError as exc:
                 db.rollback(); result = _deliberation_error(exc)
+            except LocationError as exc:
+                db.rollback(); result = _location_error(exc)
             except IdempotencyKeyConflictError as exc:
                 db.rollback(); result = _idempotency_conflict_error(exc)
             except Exception as exc:
