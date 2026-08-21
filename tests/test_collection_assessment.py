@@ -427,6 +427,29 @@ def test_unavailable_rejects_operational_excuses(reason):
     assert _payload(error)["details"]["code"] == "collection_unavailable_operational_excuse"
 
 
+
+def test_partial_collection_coverage_is_rejected_for_reusable_manifest():
+    raw = _member_assessment()
+    raw["source_manifest"]["coverage_status"] = "partial"
+    raw["source_manifest"]["exhaustion_evidence"] = (
+        "Only a known-partial subset was discoverable; the directory was not exhaustive."
+    )
+
+    assessment, error = _validate_collection_assessment(
+        raw, _member_args(), _completed_enrichment(DIRECTORY)
+    )
+
+    assert assessment is None
+    details = _payload(error)["details"]
+    violations = details.get("violations") or [details]
+    coverage = next(
+        item for item in violations
+        if item["code"] == "collection_coverage_incomplete"
+    )
+    assert coverage["coverage_status"] == "partial"
+    assert coverage["absence_claim_allowed"] is False
+
+
 def test_unavailable_rejects_known_collection_signals():
     assessment, error = _validate_collection_assessment(
         {
