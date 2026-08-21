@@ -229,12 +229,25 @@ def claim_deliberation(
     return deliberation
 
 
+def _query_text(value: Any) -> str | None:
+    if isinstance(value, str):
+        return value.strip() or None
+    if isinstance(value, dict) and isinstance(value.get("query"), str):
+        return value["query"].strip() or None
+    return None
+
+
+def _normalise_query(value: str) -> str:
+    return " ".join(value.casefold().split())
+
+
 def _completion_verification(
     db: Session,
     *,
     deliberation: Deliberation,
     evidence: dict[str, Any],
     owner_id: uuid.UUID,
+    client_id: str,
     idempotency_key: str | None,
 ) -> dict[str, Any]:
     criteria = deliberation.acceptance_criteria_json or {}
@@ -247,40 +260,138 @@ def _completion_verification(
         checks["probes_attempted"] = {
             "passed": len(probes) == expected, "expected": expected, "observed": len(probes)
         }
-    field_checks = {
-        "search_query_log_required": "queries",
-        "exact_subject_followup_required": "exact_name_followups",
-        "fetch_all_reviews_required": "reviews_fetched",
+
+    if criteria.get("search_query_log_required") is True:
+        checks["search_query_log_required"] = {
+            "passed": bool(probes) and all(
+                isinstance(probe, dict)
+                and isinstance(probe.get("queries"), list)
+                and bool(probe["queries"])
+                for probe in probes
+            ),
+            "checked_field": "queries",
+        }
+
+    fetched_by_subject: dict[str, set[str]] = {}
+    raw_ids = [
+        value for probe in probes if isinstance(probe, dict)
+        for value in (probe.get("reviews_fetched") or [])
+    ]
+    parsed_ids: list[uuid.UUID] = []
+    invalid_ids: list[str] = []
+    for value in raw_ids:
+        try:
+            parsed_ids.append(uuid.UUID(str(value)))
+        except (ValueError, TypeError, AttributeError):
+            invalid_ids.append(str(value))
+    if parsed_ids:
+        rows = db.execute(
+            select(V2Experience.id, V2Experience.subject_id).where(
+                V2Experience.owner_id == owner_id,
+                V2Experience.deleted_at.is_(None),
+                V2Experience.id.in_(parsed_ids),
+            )
+        ).all()
+        for experience_id, subject_id in rows:
+            fetched_by_subject.setdefault(str(subject_id), set()).add(str(experience_id))
+    found_ids = {
+        experience_id for values in fetched_by_subject.values() for experience_id in values
     }
-    for criterion, field in field_checks.items():
-        if criteria.get(criterion) is True:
-            checks[criterion] = {
-                "passed": bool(probes) and all(isinstance(p, dict) and isinstance(p.get(field), list) and bool(p[field]) for p in probes),
-                "checked_field": field,
+    missing = sorted(str(value) for value in parsed_ids if str(value) not in found_ids)
+
+    if criteria.get("exact_subject_followup_required") is True:
+        prior_exact_subjects: set[str] = set()
+        missing_followups: list[dict[str, Any]] = []
+        checked_subjects = 0
+        for probe_index, probe in enumerate(probes):
+            if not isinstance(probe, dict):
+                continue
+            identities = probe.get("subject_identities")
+            identities = identities if isinstance(identities, list) else []
+            exact_queries = {
+                _normalise_query(text)
+                for value in (probe.get("queries") or [])
+                if (text := _query_text(value))
             }
+            exact_queries.update(
+                _normalise_query(text)
+                for value in (probe.get("exact_name_followups") or [])
+                if (text := _query_text(value))
+            )
+            current_exact_subjects: set[str] = set()
+            for identity in identities:
+                if not isinstance(identity, dict):
+                    continue
+                subject_id = str(identity.get("subject_id") or "").strip()
+                subject_name = str(identity.get("subject_name") or "").strip()
+                if not subject_id or not subject_name:
+                    continue
+                checked_subjects += 1
+                review_count = identity.get("review_count")
+                fetched_count = len(fetched_by_subject.get(subject_id, set()))
+                fully_retrieved = (
+                    isinstance(review_count, int)
+                    and review_count >= 0
+                    and fetched_count >= review_count
+                )
+                searched_now = _normalise_query(subject_name) in exact_queries
+                reused = subject_id in prior_exact_subjects and fully_retrieved
+                if searched_now and fully_retrieved:
+                    current_exact_subjects.add(subject_id)
+                elif not reused:
+                    missing_followups.append({
+                        "probe_index": probe_index,
+                        "subject_id": subject_id,
+                        "subject_name": subject_name,
+                        "subject_type": identity.get("subject_type"),
+                        "review_count": review_count,
+                        "reviews_fetched_for_subject": fetched_count,
+                        "reason": (
+                            "exact_name_search_missing"
+                            if not searched_now
+                            else "exact_name_search_not_fully_retrieved"
+                        ),
+                    })
+            prior_exact_subjects.update(current_exact_subjects)
+        checks["exact_subject_followup_required"] = {
+            "passed": bool(probes) and checked_subjects > 0 and not missing_followups,
+            "checked_field": "subject_identities",
+            "checked_subject_count": checked_subjects,
+            "missing_followups": missing_followups,
+            "reuse_policy": (
+                "An earlier exact-name search satisfies a later probe only for the same "
+                "subject_id after all declared reviews for that identity were fetched."
+            ),
+        }
 
     if criteria.get("fetch_all_reviews_required") is True:
-        raw_ids = [value for probe in probes if isinstance(probe, dict)
-                   for value in (probe.get("reviews_fetched") or [])]
-        parsed_ids: list[uuid.UUID] = []
-        invalid_ids: list[str] = []
-        for value in raw_ids:
-            try:
-                parsed_ids.append(uuid.UUID(str(value)))
-            except (ValueError, TypeError, AttributeError):
-                invalid_ids.append(str(value))
-        found = set(db.scalars(select(V2Experience.id).where(
-            V2Experience.owner_id == owner_id,
-            V2Experience.deleted_at.is_(None),
-            V2Experience.id.in_(parsed_ids),
-        )).all()) if parsed_ids else set()
-        missing = sorted(str(value) for value in parsed_ids if value not in found)
+        checks["fetch_all_reviews_required"] = {
+            "passed": bool(probes) and all(
+                isinstance(probe, dict)
+                and isinstance(probe.get("reviews_fetched"), list)
+                and bool(probe["reviews_fetched"])
+                for probe in probes
+            ),
+            "checked_field": "reviews_fetched",
+        }
         checks["referenced_reviews_exist"] = {
             "passed": bool(parsed_ids) and not invalid_ids and not missing,
             "referenced_count": len(parsed_ids), "invalid_ids": invalid_ids,
             "missing_or_unowned_ids": missing,
         }
 
+    if criteria.get("claim_required") is True:
+        checks["claim_required"] = {
+            "passed": bool(deliberation.claimed_at)
+            and deliberation.claimed_by_client == client_id,
+            "claimed_by_client": deliberation.claimed_by_client,
+            "contributing_client": client_id,
+            "claimed_by_model": deliberation.claimed_by_model,
+            "claimed_at": (
+                deliberation.claimed_at.isoformat()
+                if deliberation.claimed_at else None
+            ),
+        }
     if criteria.get("final_contribution_required") is True:
         checks["final_contribution_required"] = {"passed": True}
     if criteria.get("deterministic_idempotency_key_required") is True:
@@ -289,8 +400,13 @@ def _completion_verification(
             "note": "Presence is verified; semantic determinism cannot be inferred from the key text.",
         }
 
-    supported = set(field_checks) | {
-        "probes_attempted", "final_contribution_required",
+    supported = {
+        "probes_attempted",
+        "search_query_log_required",
+        "exact_subject_followup_required",
+        "fetch_all_reviews_required",
+        "claim_required",
+        "final_contribution_required",
         "deterministic_idempotency_key_required",
     }
     unsupported = sorted(key for key, required in criteria.items()
@@ -336,7 +452,8 @@ def submit_contribution(
 
     verification = _completion_verification(
         db, deliberation=deliberation, evidence=payload.evidence,
-        owner_id=owner_id, idempotency_key=idempotency_key,
+        owner_id=owner_id, client_id=client_id,
+        idempotency_key=idempotency_key,
     )
     item = DeliberationContribution(
         deliberation_id=deliberation.id,
