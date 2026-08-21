@@ -1,4 +1,5 @@
 from app.api import development
+from app.models.deliberation import Deliberation, DeliberationContribution
 from app.models.entities import (
     CapabilityCredential,
     OAuthAuthorizationCode,
@@ -72,3 +73,9 @@ def test_development_reset_calls_shared_reset_service(client, monkeypatch):
     assert calls == [True]
     assert "Deleted 3 records" in response.text
     assert "OAuth connections and API credentials were preserved" in response.text
+
+
+def test_development_reset_deletes_deliberation_children_before_parents():
+    assert DeliberationContribution in CONTENT_MODELS
+    assert Deliberation in CONTENT_MODELS
+    assert CONTENT_MODELS.index(DeliberationContribution) < CONTENT_MODELS.index(Deliberation)
