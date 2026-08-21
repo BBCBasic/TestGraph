@@ -320,7 +320,9 @@ def create_location_assertion(
     ):
         subject_type.public_location_eligible = True
         db.flush()
-    if not subject_type or not subject_type.public_location_eligible:
+    if payload.predicate != "contained_in" and (
+        not subject_type or not subject_type.public_location_eligible
+    ):
         raise LocationError(
             "LOCATION_SUBJECT_INELIGIBLE",
             "This subject type is not eligible for public-location assertions in v1",
