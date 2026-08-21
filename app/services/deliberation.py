@@ -8,6 +8,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.models.deliberation import Deliberation, DeliberationContribution
+from app.models.entities import AuditEvent, IdempotencyRecord
 from app.models.v2 import V2Experience, now_utc
 from app.schemas.deliberation import (
     DeliberationContributionCreate,
@@ -260,6 +261,144 @@ def _normalise_query(value: str) -> str:
     return " ".join(value.casefold().split())
 
 
+def _idempotency_verification(
+    db: Session,
+    *,
+    deliberation: Deliberation,
+    client_id: str,
+    criteria: dict[str, Any],
+) -> dict[str, dict[str, Any]]:
+    records = list(db.scalars(
+        select(IdempotencyRecord).where(
+            IdempotencyRecord.client_id == client_id,
+            IdempotencyRecord.key.like("deliberation-%"),
+        )
+    ).all())
+    deliberation_id = str(deliberation.id)
+    claim_records = [
+        record for record in records
+        if record.key.startswith("deliberation-claim:")
+        and isinstance(record.response_body, dict)
+        and str(record.response_body.get("id")) == deliberation_id
+    ]
+    contribution_records = [
+        record for record in records
+        if record.key.startswith("deliberation-contribution:")
+        and isinstance(record.response_body, dict)
+        and str(record.response_body.get("deliberation_id")) == deliberation_id
+    ]
+    relevant_keys = {
+        record.key for record in claim_records + contribution_records
+    }
+    events = list(db.scalars(
+        select(AuditEvent).where(
+            AuditEvent.client_id == client_id,
+            AuditEvent.object_type == "idempotency_key",
+            AuditEvent.object_id.in_(relevant_keys),
+            AuditEvent.action.in_(["idempotency.replay", "idempotency.conflict"]),
+        )
+    ).all()) if relevant_keys else []
+    replay_keys = {
+        event.object_id for event in events if event.action == "idempotency.replay"
+    }
+    conflict_events = [
+        event for event in events if event.action == "idempotency.conflict"
+    ]
+    conflict_keys = {event.object_id for event in conflict_events}
+    claim_replay_keys = sorted(
+        record.key for record in claim_records if record.key in replay_keys
+    )
+    contribution_replay_records = [
+        record for record in contribution_records if record.key in replay_keys
+    ]
+    contribution_replay_keys = sorted(
+        record.key for record in contribution_replay_records
+    )
+    contribution_conflict_keys = sorted(
+        record.key for record in contribution_records if record.key in conflict_keys
+    )
+    contribution_ids = sorted({
+        str(record.response_body.get("contribution", {}).get("id"))
+        for record in contribution_replay_records
+        if isinstance(record.response_body.get("contribution"), dict)
+        and record.response_body["contribution"].get("id")
+    })
+    stored_contribution_ids = set()
+    if contribution_ids:
+        parsed_ids = []
+        for value in contribution_ids:
+            try:
+                parsed_ids.append(uuid.UUID(value))
+            except (ValueError, TypeError, AttributeError):
+                continue
+        stored_contribution_ids = {
+            str(value) for value in db.scalars(
+                select(DeliberationContribution.id).where(
+                    DeliberationContribution.deliberation_id == deliberation.id,
+                    DeliberationContribution.id.in_(parsed_ids),
+                )
+            ).all()
+        }
+    claim_replayed = bool(claim_replay_keys)
+    contribution_replayed = (
+        bool(contribution_replay_keys)
+        and bool(contribution_ids)
+        and set(contribution_ids) == stored_contribution_ids
+    )
+    conflict_rejected = bool(contribution_conflict_keys)
+    checks: dict[str, dict[str, Any]] = {}
+
+    if criteria.get("identical_claim_replay_required") is True:
+        checks["identical_claim_replay_required"] = {
+            "passed": claim_replayed,
+            "verified_from": "idempotency_records_and_audit_events",
+            "replayed_keys": claim_replay_keys,
+        }
+    if criteria.get("identical_contribution_replay_required") is True:
+        checks["identical_contribution_replay_required"] = {
+            "passed": contribution_replayed,
+            "verified_from": "idempotency_records_and_audit_events",
+            "replayed_keys": contribution_replay_keys,
+            "contribution_ids": contribution_ids,
+        }
+    if criteria.get("replay_identity_preserved") is True:
+        checks["replay_identity_preserved"] = {
+            "passed": claim_replayed and contribution_replayed,
+            "verified_from": "idempotency_records_and_audit_events",
+            "claim_replayed_keys": claim_replay_keys,
+            "contribution_replayed_keys": contribution_replay_keys,
+            "contribution_ids": contribution_ids,
+        }
+    if criteria.get("changed_payload_rejected") is True:
+        checks["changed_payload_rejected"] = {
+            "passed": conflict_rejected,
+            "verified_from": "idempotency_conflict_audit_events",
+            "conflicting_keys": contribution_conflict_keys,
+        }
+    expected_code = criteria.get("expected_error_code")
+    if expected_code:
+        observed_codes = sorted({
+            str(event.details.get("error_code"))
+            for event in conflict_events
+            if isinstance(event.details, dict) and event.details.get("error_code")
+        })
+        checks["expected_error_code"] = {
+            "passed": expected_code in observed_codes and conflict_rejected,
+            "expected": expected_code,
+            "observed": observed_codes,
+            "verified_from": "idempotency_conflict_audit_events",
+        }
+    if criteria.get("duplicate_contributions_for_replay_forbidden") is True:
+        checks["duplicate_contributions_for_replay_forbidden"] = {
+            "passed": contribution_replayed,
+            "verified_from": "idempotency_records_and_audit_events",
+            "replayed_keys": contribution_replay_keys,
+            "stored_contribution_ids": sorted(stored_contribution_ids),
+            "duplicate_count": 0 if contribution_replayed else None,
+        }
+    return checks
+
+
 def _completion_verification(
     db: Session,
     *,
@@ -419,6 +558,13 @@ def _completion_verification(
             "note": "Presence is verified; semantic determinism cannot be inferred from the key text.",
         }
 
+    checks.update(_idempotency_verification(
+        db,
+        deliberation=deliberation,
+        client_id=client_id,
+        criteria=criteria,
+    ))
+
     supported = {
         "probes_attempted",
         "search_query_log_required",
@@ -427,6 +573,12 @@ def _completion_verification(
         "claim_required",
         "final_contribution_required",
         "deterministic_idempotency_key_required",
+        "identical_claim_replay_required",
+        "identical_contribution_replay_required",
+        "replay_identity_preserved",
+        "changed_payload_rejected",
+        "expected_error_code",
+        "duplicate_contributions_for_replay_forbidden",
     }
     unsupported = sorted(key for key, required in criteria.items()
                          if required and key not in supported)
