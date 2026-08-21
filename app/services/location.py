@@ -242,11 +242,19 @@ def _resolve_or_create_place(
     )
 
 
+def _utc_bound(value: datetime | None, fallback: datetime) -> datetime:
+    if value is None:
+        return fallback
+    return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+
+
 def _overlaps(a: LocationAssertion, b: LocationAssertion) -> bool:
-    a_start = a.valid_from or datetime.min.replace(tzinfo=timezone.utc)
-    b_start = b.valid_from or datetime.min.replace(tzinfo=timezone.utc)
-    a_end = a.valid_to or datetime.max.replace(tzinfo=timezone.utc)
-    b_end = b.valid_to or datetime.max.replace(tzinfo=timezone.utc)
+    minimum = datetime.min.replace(tzinfo=timezone.utc)
+    maximum = datetime.max.replace(tzinfo=timezone.utc)
+    a_start = _utc_bound(a.valid_from, minimum)
+    b_start = _utc_bound(b.valid_from, minimum)
+    a_end = _utc_bound(a.valid_to, maximum)
+    b_end = _utc_bound(b.valid_to, maximum)
     return a_start <= b_end and b_start <= a_end
 
 
