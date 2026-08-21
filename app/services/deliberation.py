@@ -52,7 +52,7 @@ def _owned_deliberation(
     return deliberation
 
 
-def _contribution_body(item: DeliberationContribution) -> dict[str, Any]:
+def contribution_body(item: DeliberationContribution) -> dict[str, Any]:
     return {
         "id": str(item.id),
         "contribution_type": item.contribution_type,
@@ -95,7 +95,7 @@ def deliberation_body(
             .where(DeliberationContribution.deliberation_id == deliberation.id)
             .order_by(DeliberationContribution.created_at, DeliberationContribution.id)
         ).all())
-        body["contributions"] = [_contribution_body(row) for row in rows]
+        body["contributions"] = [contribution_body(row) for row in rows]
     return body
 
 
