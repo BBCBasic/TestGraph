@@ -1,4 +1,5 @@
 import uuid
+from datetime import datetime, timezone
 
 import pytest
 
@@ -131,7 +132,7 @@ def test_contested_claim_requires_independent_resolution_or_user_approval():
             db,
             LocationAssertionCreate(
                 subject_id=venue.id, predicate="postcode", value="BS2 2BB",
-                source=_source("source two"),
+                source=_source("source two"), valid_from=datetime.now(timezone.utc),
             ),
             owner_id=owner.id, client_id="claude:v3",
         )
