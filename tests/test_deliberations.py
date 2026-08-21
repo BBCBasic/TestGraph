@@ -384,6 +384,8 @@ def test_gpt_and_chatgpt_share_one_open_inbox_target():
         )
 
         assert deliberation.target_model == "chatgpt"
+        deliberation.target_model = "gpt"
+        db.commit()
         for label in ("gpt", "chatgpt", "ChatGPT"):
             listed = list_open_deliberations(
                 db, owner_id=owner.id, target_model=label, unclaimed_only=True
