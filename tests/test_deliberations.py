@@ -1,19 +1,25 @@
 import uuid
 
 import pytest
+from sqlalchemy import select
 
-from app.api.mcp_v2 import SERVER_VERSION, TOOLS
+from app.api.mcp_v2 import SERVER_VERSION, TOOLS, _search
+from app.core.security import Principal
 from app.db.session import SessionLocal
 from app.models.entities import User
+from app.models.v2 import SubjectType, V2Experience, V2Subject
 from app.schemas.deliberation import (
+    DeliberationClaim,
     DeliberationContributionCreate,
     DeliberationCreate,
     DeliberationResolutionCreate,
 )
 from app.services.deliberation import (
     DeliberationError,
+    claim_deliberation,
     create_deliberation,
     get_deliberation,
+    list_open_deliberations,
     record_resolution,
     submit_contribution,
 )
@@ -153,12 +159,131 @@ def test_deliberation_is_private_to_its_owner():
         assert hidden.value.code == "DELIBERATION_NOT_FOUND"
 
 
+def test_open_inbox_claiming_and_machine_completion_verification():
+    with SessionLocal() as db:
+        owner = _user(db, "coordination-owner")
+        subject_type = SubjectType(
+            canonical_name=f"coordination-{uuid.uuid4()}",
+            normalized_name=f"coordination-{uuid.uuid4()}",
+            status="provisional", created_by="pytest",
+        )
+        db.add(subject_type); db.flush()
+        subject = V2Subject(
+            subject_type_id=subject_type.id, owner_id=owner.id,
+            name="Coordination evidence", canonical_key=f"evidence:{uuid.uuid4()}",
+        )
+        db.add(subject); db.flush()
+        experience = V2Experience(
+            owner_id=owner.id, subject_id=subject.id,
+            headline="Evidence", summary="Evidence", raw_text="Evidence",
+            created_by_client="pytest:v3",
+        )
+        db.add(experience); db.commit()
+
+        deliberation = create_deliberation(
+            db,
+            DeliberationCreate(
+                canonical_key=f"claude-task:{uuid.uuid4()}",
+                title="Claude task", question="Run one probe", target_model="claude",
+                acceptance_criteria={
+                    "probes_attempted": 1,
+                    "search_query_log_required": True,
+                    "exact_subject_followup_required": True,
+                    "fetch_all_reviews_required": True,
+                    "final_contribution_required": True,
+                    "deterministic_idempotency_key_required": True,
+                    "conflicts_and_dates_preserved": True,
+                },
+            ),
+            owner_id=owner.id, client_id="chatgpt:v3",
+        )
+        listed = list_open_deliberations(
+            db, owner_id=owner.id, target_model="claude", unclaimed_only=True
+        )
+        assert [item["id"] for item in listed] == [str(deliberation.id)]
+
+        claimed = claim_deliberation(
+            db, DeliberationClaim(deliberation_id=deliberation.id, source_model="claude-sonnet"),
+            owner_id=owner.id, client_id="claude:v3",
+        )
+        assert claimed.claimed_by_client == "claude:v3"
+        assert list_open_deliberations(
+            db, owner_id=owner.id, target_model="claude", unclaimed_only=True
+        ) == []
+        with pytest.raises(DeliberationError) as conflict:
+            claim_deliberation(
+                db, DeliberationClaim(deliberation_id=deliberation.id, source_model="gpt"),
+                owner_id=owner.id, client_id="other:v3",
+            )
+        assert conflict.value.code == "DELIBERATION_ALREADY_CLAIMED"
+
+        contribution = submit_contribution(
+            db,
+            DeliberationContributionCreate(
+                deliberation_id=deliberation.id, contribution_type="critique",
+                content="Probe complete", source_model="claude-sonnet",
+                evidence={"probe_log": [{
+                    "queries": ["evidence"],
+                    "exact_name_followups": ["Coordination evidence"],
+                    "reviews_fetched": [str(experience.id)],
+                }]},
+            ),
+            owner_id=owner.id, client_id="claude:v3",
+            idempotency_key="claude-task-stable-1",
+        )
+        verification = contribution.verification_json
+        assert verification["all_machine_checks_passed"] is True
+        assert verification["machine_checks"]["referenced_reviews_exist"]["passed"] is True
+        assert verification["not_machine_verifiable"] == ["conflicts_and_dates_preserved"]
+
+
+def test_search_paginates_and_reports_same_name_identity_collision():
+    with SessionLocal() as db:
+        owner = _user(db, "search-owner")
+        types = []
+        for label in ("app", "software"):
+            unique = uuid.uuid4().hex
+            item = SubjectType(
+                canonical_name=f"{label}-{unique}", normalized_name=f"{label}-{unique}",
+                status="provisional", created_by="pytest",
+            )
+            db.add(item); types.append(item)
+        db.flush()
+        for index, subject_type in enumerate(types):
+            subject = V2Subject(
+                subject_type_id=subject_type.id, owner_id=owner.id,
+                name="Same Name Product", canonical_key=f"same-name:{index}:{uuid.uuid4()}",
+            )
+            db.add(subject); db.flush()
+            db.add(V2Experience(
+                owner_id=owner.id, subject_id=subject.id,
+                headline=f"Review {index}", summary="same name", raw_text="same name",
+                created_by_client="pytest:v3",
+            ))
+        db.commit()
+        principal = Principal(
+            subject="pytest", client_id="pytest", scopes={"reviews:read"}, user_id=owner.id
+        )
+        first = _search(db, principal, {"query": "Same Name Product", "limit": 1})["structuredContent"]
+        assert first["has_more"] is True
+        assert first["next_cursor"]
+        assert len(first["identity_collisions"]) == 1
+        assert len(first["identity_collisions"][0]) == 2
+        second = _search(db, principal, {
+            "query": "Same Name Product", "limit": 1, "cursor": first["next_cursor"]
+        })["structuredContent"]
+        assert {first["results"][0]["id"], second["results"][0]["id"]}
+        assert first["results"][0]["subject_id"] != second["results"][0]["subject_id"]
+
+
 def test_deliberation_tools_publish_strict_schemas_and_new_version():
     tools = {tool["name"]: tool for tool in TOOLS}
-    assert SERVER_VERSION == "3.13.0-alpha"
+    assert SERVER_VERSION == "3.14.0-alpha"
     assert {
         "create_deliberation",
         "get_deliberation",
+        "list_open_deliberations",
+        "claim_deliberation",
         "submit_contribution",
         "record_resolution",
     }.issubset(tools)
@@ -168,3 +293,5 @@ def test_deliberation_tools_publish_strict_schemas_and_new_version():
     ]["enum"] == ["proposal", "critique", "counterproposal", "reconciliation"]
     assert "user_approved" in tools["record_resolution"]["inputSchema"]["required"]
     assert tools["get_deliberation"]["annotations"]["readOnlyHint"] is True
+    assert "cursor" in tools["search"]["inputSchema"]["properties"]
+    assert tools["claim_deliberation"]["annotations"]["readOnlyHint"] is False

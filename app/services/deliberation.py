@@ -8,9 +8,10 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.models.deliberation import Deliberation, DeliberationContribution
-from app.models.v2 import now_utc
+from app.models.v2 import V2Experience, now_utc
 from app.schemas.deliberation import (
     DeliberationContributionCreate,
+    DeliberationClaim,
     DeliberationCreate,
     DeliberationResolutionCreate,
 )
@@ -63,6 +64,7 @@ def contribution_body(item: DeliberationContribution) -> dict[str, Any]:
         "responds_to_contribution_ids": item.responds_to_json or [],
         "source_model": item.source_model,
         "source_client": item.created_by_client,
+        "completion_verification": item.verification_json or {},
         "provenance": item.provenance or {},
         "created_at": item.created_at.isoformat(),
     }
@@ -79,7 +81,13 @@ def deliberation_body(
         "context": deliberation.context_json or {},
         "constraints": deliberation.constraints_json or [],
         "acceptance_criteria": deliberation.acceptance_criteria_json or {},
+        "target_model": deliberation.target_model,
         "status": deliberation.status,
+        "claim": {
+            "claimed_by_client": deliberation.claimed_by_client,
+            "claimed_by_model": deliberation.claimed_by_model,
+            "claimed_at": deliberation.claimed_at.isoformat() if deliberation.claimed_at else None,
+        } if deliberation.claimed_by_client else None,
         "resolution": deliberation.resolution_json or None,
         "created_by_client": deliberation.created_by_client,
         "resolved_by_client": deliberation.resolved_by_client,
@@ -125,6 +133,7 @@ def create_deliberation(
         context_json=payload.context,
         constraints_json=payload.constraints,
         acceptance_criteria_json=payload.acceptance_criteria,
+        target_model=payload.target_model,
         status="open",
         resolution_json={},
         created_by_client=client_id,
@@ -157,12 +166,149 @@ def get_deliberation(
     return deliberation_body(db, item)
 
 
+def list_open_deliberations(
+    db: Session,
+    *,
+    owner_id: uuid.UUID,
+    target_model: str | None = None,
+    unclaimed_only: bool = False,
+    limit: int = 20,
+) -> list[dict[str, Any]]:
+    stmt = select(Deliberation).where(
+        Deliberation.owner_id == owner_id,
+        Deliberation.status == "open",
+    )
+    if target_model:
+        stmt = stmt.where(Deliberation.target_model == target_model)
+    if unclaimed_only:
+        stmt = stmt.where(Deliberation.claimed_by_client.is_(None))
+    rows = list(db.scalars(
+        stmt.order_by(Deliberation.created_at, Deliberation.id).limit(limit)
+    ).all())
+    return [deliberation_body(db, row, include_contributions=False) for row in rows]
+
+
+def claim_deliberation(
+    db: Session,
+    payload: DeliberationClaim,
+    *,
+    owner_id: uuid.UUID,
+    client_id: str,
+) -> Deliberation:
+    deliberation = db.scalar(
+        select(Deliberation).where(
+            Deliberation.owner_id == owner_id,
+            Deliberation.id == payload.deliberation_id,
+        ).with_for_update()
+    )
+    if not deliberation:
+        raise DeliberationError(
+            "DELIBERATION_NOT_FOUND",
+            "Deliberation not found for the authenticated user",
+            {"deliberation_id": str(payload.deliberation_id)},
+        )
+    if deliberation.status != "open":
+        raise DeliberationError(
+            "DELIBERATION_CLOSED", "A resolved deliberation cannot be claimed",
+            {"deliberation_id": str(deliberation.id)},
+        )
+    if deliberation.claimed_by_client and deliberation.claimed_by_client != client_id:
+        raise DeliberationError(
+            "DELIBERATION_ALREADY_CLAIMED",
+            "This deliberation is already claimed by another authenticated client",
+            {"deliberation_id": str(deliberation.id),
+             "claimed_by_client": deliberation.claimed_by_client},
+        )
+    if not deliberation.claimed_by_client:
+        deliberation.claimed_by_client = client_id
+        deliberation.claimed_by_model = payload.source_model
+        deliberation.claimed_at = now_utc()
+        deliberation.updated_at = deliberation.claimed_at
+        db.commit()
+        db.refresh(deliberation)
+    return deliberation
+
+
+def _completion_verification(
+    db: Session,
+    *,
+    deliberation: Deliberation,
+    evidence: dict[str, Any],
+    owner_id: uuid.UUID,
+    idempotency_key: str | None,
+) -> dict[str, Any]:
+    criteria = deliberation.acceptance_criteria_json or {}
+    log = evidence.get("probe_log")
+    probes = log if isinstance(log, list) else []
+    checks: dict[str, dict[str, Any]] = {}
+
+    expected = criteria.get("probes_attempted")
+    if isinstance(expected, int):
+        checks["probes_attempted"] = {
+            "passed": len(probes) == expected, "expected": expected, "observed": len(probes)
+        }
+    field_checks = {
+        "search_query_log_required": "queries",
+        "exact_subject_followup_required": "exact_name_followups",
+        "fetch_all_reviews_required": "reviews_fetched",
+    }
+    for criterion, field in field_checks.items():
+        if criteria.get(criterion) is True:
+            checks[criterion] = {
+                "passed": bool(probes) and all(isinstance(p, dict) and isinstance(p.get(field), list) and bool(p[field]) for p in probes),
+                "checked_field": field,
+            }
+
+    if criteria.get("fetch_all_reviews_required") is True:
+        raw_ids = [value for probe in probes if isinstance(probe, dict)
+                   for value in (probe.get("reviews_fetched") or [])]
+        parsed_ids: list[uuid.UUID] = []
+        invalid_ids: list[str] = []
+        for value in raw_ids:
+            try:
+                parsed_ids.append(uuid.UUID(str(value)))
+            except (ValueError, TypeError, AttributeError):
+                invalid_ids.append(str(value))
+        found = set(db.scalars(select(V2Experience.id).where(
+            V2Experience.owner_id == owner_id,
+            V2Experience.deleted_at.is_(None),
+            V2Experience.id.in_(parsed_ids),
+        )).all()) if parsed_ids else set()
+        missing = sorted(str(value) for value in parsed_ids if value not in found)
+        checks["referenced_reviews_exist"] = {
+            "passed": bool(parsed_ids) and not invalid_ids and not missing,
+            "referenced_count": len(parsed_ids), "invalid_ids": invalid_ids,
+            "missing_or_unowned_ids": missing,
+        }
+
+    if criteria.get("final_contribution_required") is True:
+        checks["final_contribution_required"] = {"passed": True}
+    if criteria.get("deterministic_idempotency_key_required") is True:
+        checks["deterministic_idempotency_key_required"] = {
+            "passed": bool(idempotency_key),
+            "note": "Presence is verified; semantic determinism cannot be inferred from the key text.",
+        }
+
+    supported = set(field_checks) | {
+        "probes_attempted", "final_contribution_required",
+        "deterministic_idempotency_key_required",
+    }
+    unsupported = sorted(key for key, required in criteria.items()
+                         if required and key not in supported)
+    return {
+        "machine_checks": checks,
+        "all_machine_checks_passed": bool(checks) and all(item["passed"] for item in checks.values()),
+        "not_machine_verifiable": unsupported,
+    }
+
+
 def submit_contribution(
     db: Session,
     payload: DeliberationContributionCreate,
     *,
     owner_id: uuid.UUID,
     client_id: str,
+    idempotency_key: str | None = None,
 ) -> DeliberationContribution:
     deliberation = _owned_deliberation(
         db, owner_id, deliberation_id=payload.deliberation_id
@@ -188,6 +334,10 @@ def submit_contribution(
                 {"missing_or_foreign_contribution_ids": missing},
             )
 
+    verification = _completion_verification(
+        db, deliberation=deliberation, evidence=payload.evidence,
+        owner_id=owner_id, idempotency_key=idempotency_key,
+    )
     item = DeliberationContribution(
         deliberation_id=deliberation.id,
         user_id=owner_id,
@@ -198,6 +348,7 @@ def submit_contribution(
         unresolved_points_json=payload.unresolved_points,
         responds_to_json=[str(item_id) for item_id in response_ids],
         source_model=payload.source_model,
+        verification_json=verification,
         provenance={
             "kind": "ai_deliberation_contribution",
             "source_client": client_id,

@@ -19,6 +19,12 @@ class DeliberationCreate(StrictDeliberationModel):
     context: dict[str, Any] = {}
     constraints: list[str] = []
     acceptance_criteria: dict[str, Any] = {}
+    target_model: str | None = Field(default=None, max_length=160)
+
+
+class DeliberationClaim(StrictDeliberationModel):
+    deliberation_id: UUID
+    source_model: str | None = Field(default=None, max_length=160)
 
 
 class DeliberationContributionCreate(StrictDeliberationModel):
