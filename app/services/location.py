@@ -12,7 +12,7 @@ from sqlalchemy import String, cast, or_, select
 from sqlalchemy.orm import Session
 
 from app.models.v2 import LocationAssertion, SubjectType, V2Subject, now_utc
-from app.schemas.v2 import LocationAssertionCreate, LocationResolutionCreate
+from app.schemas.v2 import LocationAssertionCreate, LocationResolutionCreate, SubjectEnsure
 from app.services.v2 import ensure_subject, resolve_subject_type
 
 LOCATION_PREDICATES = {
@@ -228,7 +228,7 @@ def _resolve_or_create_place(
 
     return ensure_subject(
         db,
-        payload=__import__("app.schemas.v2", fromlist=["SubjectEnsure"]).SubjectEnsure(
+        payload=SubjectEnsure(
             subject_type="place",
             name=name,
             canonical_key=canonical_key,
