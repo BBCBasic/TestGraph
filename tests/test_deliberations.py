@@ -23,6 +23,11 @@ from app.services.deliberation import (
     record_resolution,
     submit_contribution,
 )
+from app.services.write_safety import (
+    IdempotencyKeyConflictError,
+    begin_idempotent_write,
+    finish_idempotent_write,
+)
 
 
 def _user(db, label):
@@ -245,6 +250,160 @@ def test_open_inbox_claiming_and_machine_completion_verification():
         assert verification["not_machine_verifiable"] == ["conflicts_and_dates_preserved"]
 
 
+
+def test_idempotency_replay_and_conflict_are_machine_verified_from_server_records():
+    with SessionLocal() as db:
+        owner = _user(db, "idempotency-verifier-owner")
+        client_id = "claude:v3"
+        deliberation = create_deliberation(
+            db,
+            DeliberationCreate(
+                canonical_key=f"idempotency-verifier:{uuid.uuid4()}",
+                title="Verify idempotency evidence",
+                question="Can replay and conflict behavior be machine checked?",
+                target_model="claude",
+                acceptance_criteria={
+                    "claim_required": True,
+                    "identical_claim_replay_required": True,
+                    "identical_contribution_replay_required": True,
+                    "replay_identity_preserved": True,
+                    "changed_payload_rejected": True,
+                    "expected_error_code": "IDEMPOTENCY_KEY_CONFLICT",
+                    "duplicate_contributions_for_replay_forbidden": True,
+                    "final_contribution_required": True,
+                    "task_discovered_via_open_inbox": True,
+                    "writes_outside_deliberation_forbidden": True,
+                },
+            ),
+            owner_id=owner.id,
+            client_id="chatgpt:v3",
+        )
+        claim_deliberation(
+            db,
+            DeliberationClaim(
+                deliberation_id=deliberation.id,
+                source_model="claude-sonnet",
+            ),
+            owner_id=owner.id,
+            client_id=client_id,
+        )
+
+        claim_key = "deliberation-claim:claude-claim-replay-test"
+        claim_payload = {
+            "deliberation_id": str(deliberation.id),
+            "source_model": "claude-sonnet",
+        }
+        claim_hash, prior = begin_idempotent_write(
+            db, client_id=client_id, key=claim_key, payload=claim_payload
+        )
+        assert prior is None
+        finish_idempotent_write(
+            db,
+            client_id=client_id,
+            key=claim_key,
+            payload_hash=claim_hash,
+            response_body={"claimed": True, "id": str(deliberation.id)},
+        )
+        _, claim_replay = begin_idempotent_write(
+            db, client_id=client_id, key=claim_key, payload=claim_payload
+        )
+        assert claim_replay["id"] == str(deliberation.id)
+
+        probe = submit_contribution(
+            db,
+            DeliberationContributionCreate(
+                deliberation_id=deliberation.id,
+                contribution_type="proposal",
+                content="Idempotency replay probe payload A",
+                confidence=0.9,
+                source_model="claude-sonnet",
+            ),
+            owner_id=owner.id,
+            client_id=client_id,
+            idempotency_key="claude-idempotency-probe-test",
+        )
+        contribution_key = (
+            "deliberation-contribution:claude-idempotency-probe-test"
+        )
+        contribution_payload = {
+            "deliberation_id": str(deliberation.id),
+            "contribution_type": "proposal",
+            "content": "Idempotency replay probe payload A",
+        }
+        contribution_hash, prior = begin_idempotent_write(
+            db,
+            client_id=client_id,
+            key=contribution_key,
+            payload=contribution_payload,
+        )
+        assert prior is None
+        response_body = {
+            "saved": True,
+            "deliberation_id": str(deliberation.id),
+            "contribution": {"id": str(probe.id)},
+        }
+        finish_idempotent_write(
+            db,
+            client_id=client_id,
+            key=contribution_key,
+            payload_hash=contribution_hash,
+            response_body=response_body,
+        )
+        _, replay = begin_idempotent_write(
+            db,
+            client_id=client_id,
+            key=contribution_key,
+            payload=contribution_payload,
+        )
+        assert replay["contribution"]["id"] == str(probe.id)
+
+        with pytest.raises(IdempotencyKeyConflictError):
+            begin_idempotent_write(
+                db,
+                client_id=client_id,
+                key=contribution_key,
+                payload={
+                    **contribution_payload,
+                    "content": "Idempotency replay probe payload B",
+                },
+            )
+
+        final = submit_contribution(
+            db,
+            DeliberationContributionCreate(
+                deliberation_id=deliberation.id,
+                contribution_type="reconciliation",
+                content="Server evidence should verify the replay and conflict.",
+                source_model="claude-sonnet",
+            ),
+            owner_id=owner.id,
+            client_id=client_id,
+            idempotency_key="claude-idempotency-final-test",
+        )
+        verification = final.verification_json
+        checks = verification["machine_checks"]
+        assert verification["all_machine_checks_passed"] is True
+        for criterion in (
+            "identical_claim_replay_required",
+            "identical_contribution_replay_required",
+            "replay_identity_preserved",
+            "changed_payload_rejected",
+            "expected_error_code",
+            "duplicate_contributions_for_replay_forbidden",
+        ):
+            assert checks[criterion]["passed"] is True
+        assert checks["expected_error_code"]["observed"] == [
+            "IDEMPOTENCY_KEY_CONFLICT"
+        ]
+        assert checks["identical_contribution_replay_required"][
+            "contribution_ids"
+        ] == [str(probe.id)]
+        assert verification["not_machine_verifiable"] == [
+            "task_discovered_via_open_inbox",
+            "writes_outside_deliberation_forbidden",
+        ]
+
+
 def test_exact_followup_reuses_fully_retrieved_identity_and_names_missing_subjects():
     with SessionLocal() as db:
         owner = _user(db, "followup-owner")
@@ -434,7 +593,7 @@ def test_search_paginates_and_reports_same_name_identity_collision():
 
 def test_deliberation_tools_publish_strict_schemas_and_new_version():
     tools = {tool["name"]: tool for tool in TOOLS}
-    assert SERVER_VERSION == "3.15.0-alpha"
+    assert SERVER_VERSION == "3.16.0-alpha"
     assert {
         "create_deliberation",
         "get_deliberation",
