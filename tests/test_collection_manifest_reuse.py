@@ -112,6 +112,7 @@ def _initial_collection_save():
         "discovered_count": 3,
         "submitted_member_refs": member_refs,
         "source_manifest": {
+            "coverage_status": "complete",
             "coverage_method": "single_page",
             "declared_source_count": 1,
             "source_pages": [{
