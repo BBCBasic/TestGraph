@@ -30,7 +30,7 @@ def test_oauth_mcp_v2_resource_flow(client,auth,monkeypatch):
     assert "list_open_deliberations" in instructions
     assert "next_cursor" in instructions
     tools=_rpc(client,"/mcp-v2","tools/list",token=access,call_id=2).json()["result"]["tools"]
-    assert {tool["name"] for tool in tools}=={"search","fetch","vocabulary_index","resolve_subject_type","resolve_subject","resolve_subject_hierarchy","register_subject_type_alias","set_type_relationship","retire_type_relationship","register_field","enrich_subject","correct_subject_fact","save_experience","delete_experience","save_assessment","create_deliberation","get_deliberation","list_open_deliberations","claim_deliberation","submit_contribution","record_resolution"}
+    assert {tool["name"] for tool in tools}=={"search","fetch","vocabulary_index","resolve_subject_type","resolve_subject","resolve_subject_hierarchy","register_subject_type_alias","set_type_relationship","retire_type_relationship","register_field","enrich_subject","correct_subject_fact","save_experience","delete_experience","save_assessment","create_deliberation","get_deliberation","list_open_deliberations","claim_deliberation","submit_contribution","record_resolution","assert_location","get_location_assertions","resolve_location_assertion"}
     save_tool=next(tool for tool in tools if tool["name"]=="save_experience")
     properties=save_tool["inputSchema"]["properties"]
     assert "experienced_at" in properties
