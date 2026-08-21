@@ -3,7 +3,7 @@ from __future__ import annotations
 import uuid
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -23,6 +23,24 @@ class DeliberationError(Exception):
         self.code = code
         self.message = message
         self.details = details or {}
+
+
+def _canonical_target_model(value: str | None) -> str | None:
+    if value is None:
+        return None
+    label = value.strip()
+    if not label:
+        return None
+    if label.casefold() in {"gpt", "chatgpt"}:
+        return "chatgpt"
+    return label
+
+
+def _target_model_aliases(value: str) -> set[str]:
+    canonical = _canonical_target_model(value)
+    if canonical == "chatgpt":
+        return {"gpt", "chatgpt"}
+    return {canonical.casefold()} if canonical else set()
 
 
 def _owned_deliberation(
@@ -133,7 +151,7 @@ def create_deliberation(
         context_json=payload.context,
         constraints_json=payload.constraints,
         acceptance_criteria_json=payload.acceptance_criteria,
-        target_model=payload.target_model,
+        target_model=_canonical_target_model(payload.target_model),
         status="open",
         resolution_json={},
         created_by_client=client_id,
@@ -179,7 +197,8 @@ def list_open_deliberations(
         Deliberation.status == "open",
     )
     if target_model:
-        stmt = stmt.where(Deliberation.target_model == target_model)
+        aliases = _target_model_aliases(target_model)
+        stmt = stmt.where(func.lower(Deliberation.target_model).in_(aliases))
     if unclaimed_only:
         stmt = stmt.where(Deliberation.claimed_by_client.is_(None))
     rows = list(db.scalars(
