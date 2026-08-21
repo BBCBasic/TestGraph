@@ -6,7 +6,7 @@ import pytest
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 
-from app.api.mcp_v2 import _save_experience
+from app.api.mcp_v2 import _save_experience, _search
 from app.core.security import Principal
 from app.db.base import Base
 from app.models.v2 import V2Subject
@@ -212,3 +212,60 @@ def test_existing_full_save_is_backfilled_and_reused_without_resubmission(db, pr
     backfilled = collection.provenance_json["testgraph_collection_manifest"]
     assert backfilled["legacy_backfill"] is True
     assert backfilled["discovered_count"] == 3
+
+
+def test_legacy_partial_manifest_cannot_support_tetbury_absence_or_reuse(db, principal):
+    first = _payload(_save_experience(db, principal, _initial_collection_save()))
+    reference = first["collection_reference"]
+    collection = db.get(V2Subject, uuid.UUID(reference["collection_id"]))
+
+    provenance = deepcopy(collection.provenance_json)
+    stored = provenance["testgraph_collection_manifest"]
+    stored.pop("verification_status", None)
+    stored.pop("coverage_status", None)
+    stored.pop("absence_claim_allowed", None)
+    stored["source_manifest"].pop("coverage_status", None)
+    stored["source_manifest"]["exhaustion_evidence"] = (
+        "This is a known-partial manifest and is not exhaustive."
+    )
+    collection.provenance_json = provenance
+    db.commit()
+
+    search = _payload(_search(
+        db, principal,
+        {"query": "Example Group", "subject_type": "organization", "limit": 10},
+    ))
+    matched = next(
+        item for item in search["known_subjects"]
+        if item["id"] == reference["collection_id"]
+    )
+    assert matched["collection_coverage"] == {
+        "verification_status": "verified",
+        "coverage_status": "partial",
+        "absence_claim_allowed": False,
+        "warning": (
+            "Collection coverage is partial; stored absence cannot establish that a "
+            "location or member does not exist in the real world."
+        ),
+    }
+    public_state = matched["provenance"]["testgraph_collection_manifest"]
+    assert public_state["coverage_status"] == "partial"
+    assert public_state["absence_claim_allowed"] is False
+
+    later = _base_save(
+        "Example Group North", "example-group-north", "partial-manifest-reuse-5"
+    )
+    later["subject_context"] = {"subjects": [], "relationships": []}
+    later["collection_assessment"] = {
+        "status": "member",
+        "collection_id": reference["collection_id"],
+        "manifest_revision": reference["manifest_revision"],
+    }
+    result = _save_experience(db, principal, later)
+    body = _payload(result)
+
+    assert result["isError"] is True
+    assert body["details"]["code"] == "collection_manifest_coverage_incomplete"
+    assert body["details"]["coverage_status"] == "partial"
+    assert body["details"]["absence_claim_allowed"] is False
+
