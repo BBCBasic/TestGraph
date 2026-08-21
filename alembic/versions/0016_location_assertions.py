@@ -58,7 +58,7 @@ def upgrade() -> None:
         "SELECT id FROM subject_types WHERE normalized_name = 'place'"
     )).scalar()
     if place_id is None:
-        place_id = uuid.uuid4()
+        place_id = str(uuid.uuid4())
         bind.execute(sa.text(
             "INSERT INTO subject_types "
             "(id, canonical_name, normalized_name, description, status, created_by, "
