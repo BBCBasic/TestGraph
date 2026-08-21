@@ -788,7 +788,7 @@ TOOLS = [
         "inputSchema": {"type": "object", "properties": {
             "assertion_id": {"type": "string", "format": "uuid"},
             "decision": {"type": "string", "enum": ["accepted", "rejected"]},
-            "rationale": {"type": "string", "minLength": 1}, "user_approved": {"type": "boolean", "default": false},
+            "rationale": {"type": "string", "minLength": 1}, "user_approved": {"type": "boolean", "default": False},
             "idempotency_key": {"type": "string", "minLength": 8, "maxLength": 200}
         }, "required": ["assertion_id", "decision", "rationale", "idempotency_key"], "additionalProperties": False},
         **_security(WRITE_SECURITY), "annotations": {"readOnlyHint": False, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
