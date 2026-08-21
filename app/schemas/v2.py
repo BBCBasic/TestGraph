@@ -75,6 +75,7 @@ class CollectionSourcePage(StrictModel):
 
 
 class CollectionSourceManifest(StrictModel):
+    coverage_status: Literal["complete", "partial", "unknown"]
     coverage_method: Literal[
         "single_page", "pagination", "sitemap", "api",
         "multi_source", "search_derived",
