@@ -67,6 +67,7 @@ def _member_assessment(**updates):
         "discovered_count": 3,
         "submitted_member_refs": ["reviewed_subject", "branch_two", "branch_three"],
         "source_manifest": {
+            "coverage_status": "complete",
             "coverage_method": "single_page",
             "declared_source_count": 1,
             "source_pages": [{
@@ -161,6 +162,7 @@ def test_source_manifest_must_cover_every_submitted_member():
 def test_paginated_manifest_requires_continuous_pages_and_terminal_link():
     second = "https://example.test/locations?page=2"
     manifest = {
+        "coverage_status": "complete",
         "coverage_method": "pagination",
         "declared_source_count": 2,
         "source_pages": [
@@ -192,6 +194,7 @@ def test_paginated_manifest_requires_continuous_pages_and_terminal_link():
 def test_paginated_manifest_accepts_complete_source_chain():
     second = "https://example.test/locations?page=2"
     manifest = {
+        "coverage_status": "complete",
         "coverage_method": "pagination",
         "declared_source_count": 2,
         "source_pages": [
