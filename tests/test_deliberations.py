@@ -192,6 +192,7 @@ def test_open_inbox_claiming_and_machine_completion_verification():
                     "fetch_all_reviews_required": True,
                     "final_contribution_required": True,
                     "deterministic_idempotency_key_required": True,
+                    "claim_required": True,
                     "conflicts_and_dates_preserved": True,
                 },
             ),
@@ -226,6 +227,12 @@ def test_open_inbox_claiming_and_machine_completion_verification():
                     "queries": ["evidence"],
                     "exact_name_followups": ["Coordination evidence"],
                     "reviews_fetched": [str(experience.id)],
+                    "subject_identities": [{
+                        "subject_id": str(subject.id),
+                        "subject_name": subject.name,
+                        "subject_type": subject_type.canonical_name,
+                        "review_count": 1,
+                    }],
                 }]},
             ),
             owner_id=owner.id, client_id="claude:v3",
@@ -234,7 +241,133 @@ def test_open_inbox_claiming_and_machine_completion_verification():
         verification = contribution.verification_json
         assert verification["all_machine_checks_passed"] is True
         assert verification["machine_checks"]["referenced_reviews_exist"]["passed"] is True
+        assert verification["machine_checks"]["claim_required"]["passed"] is True
         assert verification["not_machine_verifiable"] == ["conflicts_and_dates_preserved"]
+
+
+def test_exact_followup_reuses_fully_retrieved_identity_and_names_missing_subjects():
+    with SessionLocal() as db:
+        owner = _user(db, "followup-owner")
+        unique = uuid.uuid4().hex
+        subject_type = SubjectType(
+            canonical_name=f"followup-{unique}",
+            normalized_name=f"followup-{unique}",
+            status="provisional", created_by="pytest",
+        )
+        db.add(subject_type); db.flush()
+        subject = V2Subject(
+            subject_type_id=subject_type.id, owner_id=owner.id,
+            name="Exact Subject", canonical_key=f"exact:{uuid.uuid4()}",
+        )
+        db.add(subject); db.flush()
+        experience = V2Experience(
+            owner_id=owner.id, subject_id=subject.id,
+            headline="Evidence", summary="Evidence", raw_text="Evidence",
+            created_by_client="pytest:v3",
+        )
+        db.add(experience); db.commit()
+
+        deliberation = create_deliberation(
+            db,
+            DeliberationCreate(
+                canonical_key=f"followup-task:{uuid.uuid4()}",
+                title="Follow-up task", question="Reuse exact identity evidence",
+                target_model="claude",
+                acceptance_criteria={
+                    "probes_attempted": 2,
+                    "exact_subject_followup_required": True,
+                    "claim_required": True,
+                },
+            ),
+            owner_id=owner.id, client_id="chatgpt:v3",
+        )
+        claim_deliberation(
+            db,
+            DeliberationClaim(
+                deliberation_id=deliberation.id, source_model="claude-sonnet"
+            ),
+            owner_id=owner.id, client_id="claude:v3",
+        )
+        identity = {
+            "subject_id": str(subject.id),
+            "subject_name": subject.name,
+            "subject_type": subject_type.canonical_name,
+            "review_count": 1,
+        }
+        complete = submit_contribution(
+            db,
+            DeliberationContributionCreate(
+                deliberation_id=deliberation.id,
+                contribution_type="critique",
+                content="Earlier exact search reused",
+                evidence={"probe_log": [
+                    {
+                        "queries": [{"query": subject.name}],
+                        "exact_name_followups": [],
+                        "reviews_fetched": [str(experience.id)],
+                        "subject_identities": [identity],
+                    },
+                    {
+                        "queries": [{"query": "Evidence"}],
+                        "exact_name_followups": [],
+                        "reviews_fetched": [str(experience.id)],
+                        "subject_identities": [identity],
+                    },
+                ]},
+                source_model="claude-sonnet",
+            ),
+            owner_id=owner.id, client_id="claude:v3",
+        )
+        check = complete.verification_json["machine_checks"][
+            "exact_subject_followup_required"
+        ]
+        assert check["passed"] is True
+        assert check["missing_followups"] == []
+        assert complete.verification_json["machine_checks"]["claim_required"]["passed"] is True
+
+        missing_id = uuid.uuid4()
+        incomplete = submit_contribution(
+            db,
+            DeliberationContributionCreate(
+                deliberation_id=deliberation.id,
+                contribution_type="critique",
+                content="Missing exact follow-up",
+                evidence={"probe_log": [
+                    {
+                        "queries": [{"query": subject.name}],
+                        "exact_name_followups": [],
+                        "reviews_fetched": [str(experience.id)],
+                        "subject_identities": [identity],
+                    },
+                    {
+                        "queries": [{"query": "Evidence"}],
+                        "exact_name_followups": [],
+                        "reviews_fetched": [str(experience.id)],
+                        "subject_identities": [{
+                            "subject_id": str(missing_id),
+                            "subject_name": "Unsearched Subject",
+                            "subject_type": "software",
+                            "review_count": 1,
+                        }],
+                    },
+                ]},
+                source_model="claude-sonnet",
+            ),
+            owner_id=owner.id, client_id="claude:v3",
+        )
+        check = incomplete.verification_json["machine_checks"][
+            "exact_subject_followup_required"
+        ]
+        assert check["passed"] is False
+        assert check["missing_followups"] == [{
+            "probe_index": 1,
+            "subject_id": str(missing_id),
+            "subject_name": "Unsearched Subject",
+            "subject_type": "software",
+            "review_count": 1,
+            "reviews_fetched_for_subject": 0,
+            "reason": "exact_name_search_missing",
+        }]
 
 
 def test_search_paginates_and_reports_same_name_identity_collision():
