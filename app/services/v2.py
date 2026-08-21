@@ -505,11 +505,13 @@ def vocabulary_index(db: Session) -> dict:
     by_id = {x.id: x for x in types}
     return {
         "subject_types": [{"id": str(x.id), "canonical_name": x.canonical_name, "status": x.status,
+                           "public_location_eligible": x.public_location_eligible,
                            "aliases": [a.alias for a in aliases if a.subject_type_id == x.id]} for x in types],
         "relationships": [{"source": by_id[x.source_type_id].canonical_name, "relationship": x.relationship,
                            "target": by_id[x.target_type_id].canonical_name} for x in relationships
                           if x.source_type_id in by_id and x.target_type_id in by_id],
         "fields": [{"id": str(x.id), "canonical_name": x.canonical_name, "json_schema": x.json_schema} for x in fields],
+        "location_predicates": ["located_in", "contained_in", "published_address", "postcode", "position"],
     }
 
 

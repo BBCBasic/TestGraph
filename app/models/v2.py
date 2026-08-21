@@ -3,7 +3,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import DateTime, ForeignKey, String, Text, UniqueConstraint
+from sqlalchemy import Boolean, DateTime, ForeignKey, String, Text, UniqueConstraint
 from sqlalchemy.dialects.postgresql import JSONB, UUID as PGUUID
 from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy.types import JSON, Uuid
@@ -29,6 +29,7 @@ class SubjectType(Base):
     normalized_name: Mapped[str] = mapped_column(String(120), unique=True, index=True)
     description: Mapped[str | None] = mapped_column(Text)
     status: Mapped[str] = mapped_column(String(20), default="provisional", index=True)
+    public_location_eligible: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
     created_by: Mapped[str] = mapped_column(String(200), default="system")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc, onupdate=now_utc)
@@ -105,6 +106,28 @@ class V2Subject(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc, onupdate=now_utc)
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class LocationAssertion(Base):
+    __tablename__ = "location_assertions"
+    id: Mapped[uuid.UUID] = mapped_column(UuidType, primary_key=True, default=new_uuid)
+    owner_id: Mapped[uuid.UUID | None] = mapped_column(UuidType, ForeignKey("users.id"), index=True)
+    subject_id: Mapped[uuid.UUID] = mapped_column(UuidType, ForeignKey("v2_subjects.id", ondelete="CASCADE"), index=True)
+    predicate: Mapped[str] = mapped_column(String(40), index=True)
+    object_subject_id: Mapped[uuid.UUID | None] = mapped_column(UuidType, ForeignKey("v2_subjects.id"), index=True)
+    value_json: Mapped[dict] = mapped_column(JsonType, default=dict)
+    qualifiers_json: Mapped[dict] = mapped_column(JsonType, default=dict)
+    claim_hash: Mapped[str] = mapped_column(String(64), index=True)
+    source_json: Mapped[dict] = mapped_column(JsonType, default=dict)
+    asserted_by_client: Mapped[str] = mapped_column(String(200), index=True)
+    observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
+    valid_from: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    valid_to: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    conflict_state: Mapped[str] = mapped_column(String(20), default="uncontested", index=True)
+    resolution_json: Mapped[dict] = mapped_column(JsonType, default=dict)
+    visibility: Mapped[str] = mapped_column(String(20), default="private")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc, onupdate=now_utc)
 
 
 class SubjectRelationship(Base):

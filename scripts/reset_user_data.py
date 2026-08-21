@@ -4,10 +4,10 @@ from sqlalchemy import delete
 from app.db.session import SessionLocal
 from app.models.entities import AuditEvent,Experience,IdempotencyRecord,PairwiseAlignment,ProfileSignal,Subject
 from app.models.deliberation import Deliberation, DeliberationContribution
-from app.models.v2 import Assessment,FieldAlias,FieldDefinition,Source,SubjectRelationship,SubjectType,SubjectTypeAlias,SubjectTypeField,TypeRelationship,V2Experience,V2Subject
+from app.models.v2 import Assessment,LocationAssertion,FieldAlias,FieldDefinition,Source,SubjectRelationship,SubjectType,SubjectTypeAlias,SubjectTypeField,TypeRelationship,V2Experience,V2Subject
 
 CONFIRMATION="RESET-ALL-USER-DATA-2026-08-08"
-CONTENT_MODELS=(DeliberationContribution,Deliberation,Assessment,V2Experience,FieldAlias,SubjectTypeField,TypeRelationship,SubjectRelationship,V2Subject,Source,SubjectTypeAlias,FieldDefinition,SubjectType,ProfileSignal,PairwiseAlignment,Experience,Subject,IdempotencyRecord,AuditEvent)
+CONTENT_MODELS=(DeliberationContribution,Deliberation,LocationAssertion,Assessment,V2Experience,FieldAlias,SubjectTypeField,TypeRelationship,SubjectRelationship,V2Subject,Source,SubjectTypeAlias,FieldDefinition,SubjectType,ProfileSignal,PairwiseAlignment,Experience,Subject,IdempotencyRecord,AuditEvent)
 
 def reset_user_data():
     with SessionLocal() as db:
