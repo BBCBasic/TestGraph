@@ -42,7 +42,7 @@ from app.services.write_safety import (
 
 router = APIRouter()
 PROTOCOL_VERSION = "2025-06-18"
-SERVER_VERSION = "3.14.0-alpha"
+SERVER_VERSION = "3.15.0-alpha"
 READ_SECURITY = [{"type": "oauth2", "scopes": ["reviews:read"]}]
 WRITE_SECURITY = [{"type": "oauth2", "scopes": ["reviews:write"]}]
 
@@ -245,7 +245,9 @@ TOOLS = [
             "discovery, submit every member exposed by a finite authoritative directory as an unreviewed subject and "
             "connect each one to the collection. The server stores that verified manifest. On later reviews, reuse "
             "the returned collection_id and manifest_revision; do not resubmit the full member list. The server still "
-            "verifies that the reviewed subject belongs to the stored manifest. Location is optional; "
+            "verifies that the reviewed subject belongs to the stored manifest. Verification status and real-world "
+            "coverage status are separate: only coverage_status=complete permits reuse or conclusions that a location "
+            "or member is absent. Partial or unknown manifests return a warning and require refresh. Location is optional; "
             "never invent facts "
             "or silently geocode coordinates. The experience date defaults to creation time unless experienced_at "
             "is explicit. All context subject types must already be resolved. Existing globally registered fields "
@@ -383,6 +385,15 @@ TOOLS = [
                                 "source route may remain."
                             ),
                             "properties": {
+                                "coverage_status": {
+                                    "type": "string",
+                                    "enum": ["complete", "partial", "unknown"],
+                                    "description": (
+                                        "Independent real-world coverage claim. New and refreshed reusable "
+                                        "collection manifests must be complete; partial or unknown coverage "
+                                        "cannot support location/member absence conclusions."
+                                    ),
+                                },
                                 "coverage_method": {
                                     "type": "string",
                                     "enum": [
@@ -427,8 +438,8 @@ TOOLS = [
                                 },
                             },
                             "required": [
-                                "coverage_method", "declared_source_count", "source_pages",
-                                "discovery_queries", "exhaustion_evidence",
+                                "coverage_status", "coverage_method", "declared_source_count",
+                                "source_pages", "discovery_queries", "exhaustion_evidence",
                             ],
                             "additionalProperties": False,
                         },
@@ -647,7 +658,8 @@ TOOLS = [
         "title": "List open cross-model work",
         "description": (
             "List this user's open deliberations so an authenticated AI can discover work without being handed a UUID or canonical key. "
-            "Use target_model to find work addressed to a model label and unclaimed_only before claiming a task."
+            "Use target_model to find work addressed to a model label and unclaimed_only before claiming a task. "
+            "The gpt and chatgpt labels are treated as aliases."
         ),
         "inputSchema": {
             "type": "object",
@@ -833,6 +845,86 @@ def _resolve_subject(db, args):
     })
 
 
+_COLLECTION_PARTIAL_EVIDENCE_RE = re.compile(
+    r"\b(partial|not\s+exhaustive|incomplete|known[-\s]+subset|not\s+complete|"
+    r"could\s+not\s+exhaust|unresolved)\b",
+    re.IGNORECASE,
+)
+_COLLECTION_COMPLETE_EVIDENCE_RE = re.compile(
+    r"\b(finite|complete|exhaust(?:ed|ive)?|single[-\s]+page|"
+    r"no\s+next(?:\s+page|\s+link)?|all\s+(?:pages|members|branches|locations))\b",
+    re.IGNORECASE,
+)
+
+
+def _normalise_collection_manifest_state(state):
+    if not isinstance(state, dict):
+        return state
+    normalised = deepcopy(state)
+    verification_status = normalised.get("verification_status")
+    if verification_status not in {"verified", "unverified", "unknown"}:
+        verification_status = (
+            "verified" if normalised.get("status") == "verified" else "unknown"
+        )
+    source_manifest = normalised.get("source_manifest")
+    source_manifest = source_manifest if isinstance(source_manifest, dict) else {}
+    coverage_status = (
+        normalised.get("coverage_status") or source_manifest.get("coverage_status")
+    )
+    if coverage_status not in {"complete", "partial", "unknown"}:
+        evidence = str(source_manifest.get("exhaustion_evidence") or "")
+        unresolved = source_manifest.get("unresolved_source_urls") or []
+        if unresolved or _COLLECTION_PARTIAL_EVIDENCE_RE.search(evidence):
+            coverage_status = "partial"
+        elif evidence and _COLLECTION_COMPLETE_EVIDENCE_RE.search(evidence):
+            coverage_status = "complete"
+        else:
+            coverage_status = "unknown"
+    warning = None
+    if coverage_status != "complete":
+        warning = (
+            "Collection coverage is partial; stored absence cannot establish that a "
+            "location or member does not exist in the real world."
+            if coverage_status == "partial"
+            else
+            "Collection coverage is unknown; stored absence cannot establish that a "
+            "location or member does not exist in the real world."
+        )
+    normalised.update({
+        "verification_status": verification_status,
+        "coverage_status": coverage_status,
+        "absence_claim_allowed": coverage_status == "complete",
+        "coverage_warning": warning,
+    })
+    return normalised
+
+
+def _collection_coverage_view(provenance):
+    if not isinstance(provenance, dict):
+        return None
+    state = _normalise_collection_manifest_state(
+        provenance.get("testgraph_collection_manifest")
+    )
+    if not isinstance(state, dict):
+        return None
+    return {
+        "verification_status": state["verification_status"],
+        "coverage_status": state["coverage_status"],
+        "absence_claim_allowed": state["absence_claim_allowed"],
+        "warning": state["coverage_warning"],
+    }
+
+
+def _search_provenance(provenance):
+    if not isinstance(provenance, dict):
+        return provenance
+    public = deepcopy(provenance)
+    key = "testgraph_collection_manifest"
+    if isinstance(public.get(key), dict):
+        public[key] = _normalise_collection_manifest_state(public[key])
+    return public
+
+
 def _search(db, principal, args):
     q = str(args.get("query", "")).strip()
     type_term = str(args.get("subject_type", "")).strip()
@@ -938,12 +1030,17 @@ def _search(db, principal, args):
                     "subject_name": other.name,
                     "subject_type": other_type.canonical_name if other_type else None,
                     "provenance": relation.provenance_json,
+                    "collection_coverage": _collection_coverage_view(
+                        other.provenance_json
+                    ),
                 })
             known_subjects.append({
                 "id": str(known.id), "name": known.name, "canonical_key": known.canonical_key,
                 "subject_type_id": str(known_type.id), "subject_type": known_type.canonical_name,
                 "identifiers": known.identifiers_json, "attributes": known.attributes_json,
-                "provenance": known.provenance_json, "review_count": review_count,
+                "provenance": _search_provenance(known.provenance_json),
+                "collection_coverage": _collection_coverage_view(known.provenance_json),
+                "review_count": review_count,
                 "review_status": "reviewed" if review_count else "unreviewed",
                 "connections": connections,
             })
@@ -1585,6 +1682,19 @@ def _validate_collection_source_manifest(
             field="collection_assessment.source_manifest",
         )]
 
+    if manifest.coverage_status != "complete":
+        violations.append(_collection_violation(
+            "collection_coverage_incomplete",
+            (
+                "A reusable collection manifest must declare complete coverage. "
+                "Partial or unknown coverage may inform discovery but cannot support "
+                "member/location absence conclusions or later manifest reuse."
+            ),
+            field="collection_assessment.source_manifest.coverage_status",
+            coverage_status=manifest.coverage_status,
+            absence_claim_allowed=False,
+        ))
+
     pages = manifest.source_pages
     page_urls = [page.url for page in pages]
     page_url_set = set(page_urls)
@@ -1840,8 +1950,9 @@ def _legacy_collection_manifest(db, collection_subject, assessment):
             or experience.subject_id not in member_ids
         ):
             continue
-        return {
+        return _normalise_collection_manifest_state({
             "status": "verified",
+            "verification_status": "verified",
             "revision": 1,
             "collection_id": str(collection_subject.id),
             "collection_name": raw.get("collection_name") or collection_subject.name,
@@ -1854,7 +1965,7 @@ def _legacy_collection_manifest(db, collection_subject, assessment):
             "manifest_hash": _manifest_hash(raw.get("source_manifest"), member_ids),
             "verified_at": raw.get("recorded_at") or experience.created_at.isoformat(),
             "legacy_backfill": True,
-        }
+        })
     return None
 
 
@@ -1863,10 +1974,15 @@ def _stored_collection_manifest(db, assessment):
     if len(candidates) != 1:
         return None, candidates
     collection_subject = candidates[0]
-    state = (collection_subject.provenance_json or {}).get(
-        _COLLECTION_MANIFEST_PROVENANCE_KEY
+    state = _normalise_collection_manifest_state(
+        (collection_subject.provenance_json or {}).get(
+            _COLLECTION_MANIFEST_PROVENANCE_KEY
+        )
     )
-    if not isinstance(state, dict) or state.get("status") != "verified":
+    if (
+        not isinstance(state, dict)
+        or state.get("verification_status") != "verified"
+    ):
         state = _legacy_collection_manifest(db, collection_subject, assessment)
     if not state:
         return None, candidates
@@ -1913,6 +2029,21 @@ def _reuse_collection_manifest(db, assessment, args):
         )
     if state is None:
         return None, None
+    if state.get("coverage_status") != "complete":
+        return None, _collection_violation(
+            "collection_manifest_coverage_incomplete",
+            (
+                "The stored collection manifest is verified but its real-world coverage "
+                "is not complete. Refresh it with complete authoritative traversal before "
+                "reusing it or drawing member/location absence conclusions."
+            ),
+            field="collection_assessment.collection_id",
+            collection_id=state.get("collection_id"),
+            verification_status=state.get("verification_status"),
+            coverage_status=state.get("coverage_status"),
+            absence_claim_allowed=False,
+            warning=state.get("coverage_warning"),
+        )
     conflicts = {}
     for field, supplied, stored in (
         ("collection_name", assessment.collection_name, state.get("collection_name")),
@@ -2340,6 +2471,12 @@ def _persist_collection_manifest(
         manifest_json = assessment.source_manifest.model_dump(mode="json")
         state = {
             "status": "verified",
+            "verification_status": "verified",
+            "coverage_status": assessment.source_manifest.coverage_status,
+            "absence_claim_allowed": (
+                assessment.source_manifest.coverage_status == "complete"
+            ),
+            "coverage_warning": None,
             "revision": revision,
             "collection_id": str(collection_subject.id),
             "collection_name": assessment.collection_name,
@@ -2368,6 +2505,10 @@ def _persist_collection_manifest(
         "manifest_revision": state["revision"],
         "manifest_hash": state["manifest_hash"],
         "discovered_count": state["discovered_count"],
+        "verification_status": state["verification_status"],
+        "coverage_status": state["coverage_status"],
+        "absence_claim_allowed": state["absence_claim_allowed"],
+        "coverage_warning": state["coverage_warning"],
         "verified_at": state["verified_at"],
     }
     return updated, reference
@@ -2637,7 +2778,7 @@ async def mcp_v2(request: Request, db: Session = Depends(get_db)):
     if method and method.startswith("notifications/"):
         return Response(status_code=202)
     if method == "initialize":
-        result = {"protocolVersion": PROTOCOL_VERSION, "capabilities": {"tools": {"listChanged": False}}, "serverInfo": {"name": "TasteGraph v2", "version": SERVER_VERSION}, "instructions": "TestGraph is AI-native: use your full available reasoning, web retrieval and tool capabilities as its open-ended semantic and discovery engine. For unfamiliar subjects, derive useful types, fields, identities, relationships and likely future searches from meaning and evidence; do not wait for TestGraph to prescribe a domain-specific form. TestGraph supplies stable graph primitives, persistence and server-side verification, while you supply the open-ended intelligence. For cross-model work, call list_open_deliberations to discover tasks, claim_deliberation before executing one, and submit_contribution with evidence; only record_resolution with explicit user approval may close it. For search, continue through every next_cursor until has_more is false before claiming completeness, and never merge reviews by subject_name: group them by subject_id and subject_type. Before saving an experience, identify exactly what was experienced and inspect vocabulary_index. Reuse an existing canonical type or alias whenever possible. If the specific type is absent, reason from meaning to a broad-to-specific hierarchy and call resolve_subject_hierarchy; never create a type merely because it arrived first. Before saving, perform the generic subject enrichment check and include its result in subject_enrichment_check. Use authoritative or primary sources where available, but do not require a website, location or any domain-specific field. Reconcile every consulted source with the request paths it populated, or explain why it yielded no stored discovery. For every applied path, declare its generic retrieval_uses purpose and likely query examples: identity, likely query, location, classification, relationship, comparison or verification. Do not store facts merely because a source publishes them; omit facts with no plausible future TestGraph retrieval or graph use. When the subject has its own canonical URL, store it as an identifier. Perform routine checking and retry automatically; do not ask the user unless identity is genuinely ambiguous. If enrichment cannot be found, use unavailable with a reason and the searches attempted. Register information you may realistically search for later against what you save in TestGraph; do not collect facts merely because they are available. Treat enrichment as shared graph work: accept substantial discovery work now because captured knowledge is reusable in later searches, and users benefit reciprocally from useful enrichment contributed for other subjects. Save discoveries as unreviewed subject_context with generic relationships and source provenance, while attaching the review only to the exact subject experienced. Always submit collection_assessment. Collection unavailable is only for a genuine failure to identify the collection or find/access authoritative evidence; it is invalid when collection signals are known and never valid because the collection is large, inconvenient, slow, effortful, part of a quick review or deferred until later. When the subject belongs to a wider collection, first resolve the collection and reuse its stored collection_id and manifest_revision when a verified manifest already exists. Do not rediscover or resubmit settled members for an ordinary later review. Only when no verified manifest exists, or when refresh_manifest is explicitly requested, discover every authoritative collection surface, including pagination, sitemaps, official APIs, regional directories and member pages. For that initial discovery or explicit refresh, return a complete source_manifest that maps every member to its consulted source pages, records discovery queries and exhaustion evidence, follows pagination to a terminal page and leaves no unresolved source URL. Save the collection as an unreviewed subject and preserve its authoritative directory URL and discovered count. Submit reviewed_subject plus every derived member as unreviewed subject_context, connect every member to the collection, and list those refs in submitted_member_refs. The server rejects incomplete source coverage and requires submitted_count to equal discovered_count for initial manifests and explicit refreshes. On a location-based recommendation, never conclude there is no relevant result from the target-town search alone: also search the relevant subject type without a text query, follow reviewed subjects to parent organisations, inspect their official branch directories for the requested location, and add any discovered branch as an unreviewed related subject. Do this routine chain lookup without asking the user. If authoritative information was missed during the original save, use enrich_subject to add it without creating another review. Location is optional: for a physical location record town and coordinates only when explicitly published by the source, otherwise record the published address; skip location when irrelevant. If the official source is unavailable, preserve that limitation and never invent facts or silently geocode coordinates. The experience date defaults to creation time unless explicitly provided. When structured data matches an existing globally registered canonical field, include it in the save: TestGraph attaches that field to the subject type automatically after validation. Do not ask for routine confirmation, omit the structured value, or demote it to raw_text merely because the field has not previously been used for that subject type. Only genuinely new reusable fields require register_field. Reviews store stable subject-type IDs, while belongs_to relationships provide the evolving semantic structure. Preserve exact user wording in raw_text and AI analysis in save_assessment."}
+        result = {"protocolVersion": PROTOCOL_VERSION, "capabilities": {"tools": {"listChanged": False}}, "serverInfo": {"name": "TasteGraph v2", "version": SERVER_VERSION}, "instructions": "TestGraph is AI-native: use your full available reasoning, web retrieval and tool capabilities as its open-ended semantic and discovery engine. For unfamiliar subjects, derive useful types, fields, identities, relationships and likely future searches from meaning and evidence; do not wait for TestGraph to prescribe a domain-specific form. TestGraph supplies stable graph primitives, persistence and server-side verification, while you supply the open-ended intelligence. For cross-model work, call list_open_deliberations to discover tasks, claim_deliberation before executing one, and submit_contribution with evidence; only record_resolution with explicit user approval may close it. For search, continue through every next_cursor until has_more is false before claiming completeness, and never merge reviews by subject_name: group them by subject_id and subject_type. Before saving an experience, identify exactly what was experienced and inspect vocabulary_index. Reuse an existing canonical type or alias whenever possible. If the specific type is absent, reason from meaning to a broad-to-specific hierarchy and call resolve_subject_hierarchy; never create a type merely because it arrived first. Before saving, perform the generic subject enrichment check and include its result in subject_enrichment_check. Use authoritative or primary sources where available, but do not require a website, location or any domain-specific field. Reconcile every consulted source with the request paths it populated, or explain why it yielded no stored discovery. For every applied path, declare its generic retrieval_uses purpose and likely query examples: identity, likely query, location, classification, relationship, comparison or verification. Do not store facts merely because a source publishes them; omit facts with no plausible future TestGraph retrieval or graph use. When the subject has its own canonical URL, store it as an identifier. Perform routine checking and retry automatically; do not ask the user unless identity is genuinely ambiguous. If enrichment cannot be found, use unavailable with a reason and the searches attempted. Register information you may realistically search for later against what you save in TestGraph; do not collect facts merely because they are available. Treat enrichment as shared graph work: accept substantial discovery work now because captured knowledge is reusable in later searches, and users benefit reciprocally from useful enrichment contributed for other subjects. Save discoveries as unreviewed subject_context with generic relationships and source provenance, while attaching the review only to the exact subject experienced. Always submit collection_assessment. Collection unavailable is only for a genuine failure to identify the collection or find/access authoritative evidence; it is invalid when collection signals are known and never valid because the collection is large, inconvenient, slow, effortful, part of a quick review or deferred until later. When the subject belongs to a wider collection, first resolve the collection and reuse its stored collection_id and manifest_revision when a verified manifest already exists. Do not rediscover or resubmit settled members for an ordinary later review. Only when no verified manifest exists, or when refresh_manifest is explicitly requested, discover every authoritative collection surface, including pagination, sitemaps, official APIs, regional directories and member pages. For that initial discovery or explicit refresh, return a complete source_manifest that maps every member to its consulted source pages, records discovery queries and exhaustion evidence, follows pagination to a terminal page and leaves no unresolved source URL. Save the collection as an unreviewed subject and preserve its authoritative directory URL and discovered count. Submit reviewed_subject plus every derived member as unreviewed subject_context, connect every member to the collection, and list those refs in submitted_member_refs. The server rejects incomplete source coverage and requires submitted_count to equal discovered_count for initial manifests and explicit refreshes. On a location-based recommendation, never conclude there is no relevant result from the target-town search alone: also search the relevant subject type without a text query, follow reviewed subjects to parent organisations, inspect their official branch directories for the requested location, and add any discovered branch as an unreviewed related subject. Treat verification_status and coverage_status separately: only coverage_status=complete permits a conclusion that a location or member is absent; partial or unknown coverage is evidence of uncertainty and must be reported with its warning. Do this routine chain lookup without asking the user. If authoritative information was missed during the original save, use enrich_subject to add it without creating another review. Location is optional: for a physical location record town and coordinates only when explicitly published by the source, otherwise record the published address; skip location when irrelevant. If the official source is unavailable, preserve that limitation and never invent facts or silently geocode coordinates. The experience date defaults to creation time unless explicitly provided. When structured data matches an existing globally registered canonical field, include it in the save: TestGraph attaches that field to the subject type automatically after validation. Do not ask for routine confirmation, omit the structured value, or demote it to raw_text merely because the field has not previously been used for that subject type. Only genuinely new reusable fields require register_field. Reviews store stable subject-type IDs, while belongs_to relationships provide the evolving semantic structure. Preserve exact user wording in raw_text and AI analysis in save_assessment."}
     elif method == "ping":
         result = {}
     elif method == "tools/list":
