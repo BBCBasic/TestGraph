@@ -25,7 +25,8 @@ def _user(db):
     return user
 
 
-def _subject(db, owner, *, kind="location-test-venue", eligible=True, attributes=None):
+def _subject(db, owner, *, kind=None, eligible=True, attributes=None):
+    kind = kind or f"location-test-venue-{uuid.uuid4()}"
     subject_type = resolve_subject_type(db, kind)
     if subject_type is None:
         subject_type = SubjectType(
@@ -187,7 +188,7 @@ def test_location_eligibility_wgs84_and_legacy_drift_are_enforced():
                 ),
                 owner_id=owner.id, client_id="claude:v3",
             )
-        assert invalid_position.value.code == "POSITION_INVALID"
+        assert invalid_position.value.code == "LOCATION_POSITION_OUT_OF_RANGE"
 
         create_location_assertion(
             db,
