@@ -21,7 +21,7 @@ def test_oauth_mcp_v2_resource_flow(client,auth,monkeypatch):
     code=re.search(r"[?&]code=([^&]+)",approved.headers["location"]).group(1)
     access=client.post("/oauth/token",data={"grant_type":"authorization_code","client_id":client_id,"code":code,"redirect_uri":redirect_uri,"code_verifier":verifier,"resource":resource}).json()["access_token"]
     initialized=_rpc(client,"/mcp-v2","initialize",token=access)
-    assert initialized.json()["result"]["serverInfo"]["version"]=="3.14.0-alpha"
+    assert initialized.json()["result"]["serverInfo"]["version"]=="3.15.0-alpha"
     instructions=initialized.json()["result"]["instructions"]
     assert "full available reasoning, web retrieval and tool capabilities" in instructions
     assert "open-ended semantic and discovery engine" in instructions

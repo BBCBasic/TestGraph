@@ -67,6 +67,7 @@ def _member_assessment(**updates):
         "discovered_count": 3,
         "submitted_member_refs": ["reviewed_subject", "branch_two", "branch_three"],
         "source_manifest": {
+            "coverage_status": "complete",
             "coverage_method": "single_page",
             "declared_source_count": 1,
             "source_pages": [{
@@ -161,6 +162,7 @@ def test_source_manifest_must_cover_every_submitted_member():
 def test_paginated_manifest_requires_continuous_pages_and_terminal_link():
     second = "https://example.test/locations?page=2"
     manifest = {
+        "coverage_status": "complete",
         "coverage_method": "pagination",
         "declared_source_count": 2,
         "source_pages": [
@@ -192,6 +194,7 @@ def test_paginated_manifest_requires_continuous_pages_and_terminal_link():
 def test_paginated_manifest_accepts_complete_source_chain():
     second = "https://example.test/locations?page=2"
     manifest = {
+        "coverage_status": "complete",
         "coverage_method": "pagination",
         "declared_source_count": 2,
         "source_pages": [
@@ -422,6 +425,29 @@ def test_unavailable_rejects_operational_excuses(reason):
 
     assert assessment is None
     assert _payload(error)["details"]["code"] == "collection_unavailable_operational_excuse"
+
+
+
+def test_partial_collection_coverage_is_rejected_for_reusable_manifest():
+    raw = _member_assessment()
+    raw["source_manifest"]["coverage_status"] = "partial"
+    raw["source_manifest"]["exhaustion_evidence"] = (
+        "Only a known-partial subset was discoverable; the directory was not exhaustive."
+    )
+
+    assessment, error = _validate_collection_assessment(
+        raw, _member_args(), _completed_enrichment(DIRECTORY)
+    )
+
+    assert assessment is None
+    details = _payload(error)["details"]
+    violations = details.get("violations") or [details]
+    coverage = next(
+        item for item in violations
+        if item["code"] == "collection_coverage_incomplete"
+    )
+    assert coverage["coverage_status"] == "partial"
+    assert coverage["absence_claim_allowed"] is False
 
 
 def test_unavailable_rejects_known_collection_signals():
