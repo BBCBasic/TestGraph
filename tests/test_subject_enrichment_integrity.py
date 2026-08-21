@@ -205,6 +205,7 @@ def test_collection_mismatch_is_rejected_before_related_subject_write(db, princi
             "collection_type": "cafe group", "directory_url": SOURCE,
             "discovered_count": 2, "submitted_member_refs": ["subject"],
             "source_manifest": {
+                "coverage_status": "complete",
                 "coverage_method": "single_page",
                 "declared_source_count": 1,
                 "source_pages": [{
