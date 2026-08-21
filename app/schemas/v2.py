@@ -193,3 +193,31 @@ class ExperienceRead(StrictModel):
     created_by_client: str
     created_at: datetime
     updated_at: datetime
+
+
+class PlaceReference(StrictModel):
+    subject_id: UUID | None = None
+    name: str | None = Field(default=None, min_length=1, max_length=240)
+    canonical_key: str | None = Field(default=None, min_length=1, max_length=300)
+    identifiers: dict[str, Any] = {}
+    place_kind: str | None = Field(default=None, min_length=1, max_length=80)
+
+
+class LocationAssertionCreate(StrictModel):
+    subject_id: UUID
+    predicate: Literal["located_in", "contained_in", "published_address", "postcode", "position"]
+    object_place: PlaceReference | None = None
+    value: Any | None = None
+    qualifiers: dict[str, Any] = {}
+    source: dict[str, Any]
+    observed_at: datetime | None = None
+    valid_from: datetime | None = None
+    valid_to: datetime | None = None
+    visibility: Literal["private", "unlisted", "public"] = "private"
+
+
+class LocationResolutionCreate(StrictModel):
+    assertion_id: UUID
+    decision: Literal["accepted", "rejected"]
+    rationale: str = Field(min_length=1)
+    user_approved: bool = False
