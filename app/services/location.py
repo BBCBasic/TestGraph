@@ -313,7 +313,11 @@ def create_location_assertion(
     if not subject or subject.deleted_at:
         raise LocationError("SUBJECT_NOT_FOUND", "Subject not found")
     subject_type = db.get(SubjectType, subject.subject_type_id)
-    if subject_type and subject_type.normalized_name == "place" and not subject_type.public_location_eligible:
+    place_type = resolve_subject_type(db, "place")
+    if (
+        subject_type and place_type and subject_type.id == place_type.id
+        and not subject_type.public_location_eligible
+    ):
         subject_type.public_location_eligible = True
         db.flush()
     if not subject_type or not subject_type.public_location_eligible:
