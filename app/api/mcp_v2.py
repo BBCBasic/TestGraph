@@ -624,7 +624,7 @@ TOOLS = [
                 "context": {"type": "object", "additionalProperties": True, "default": {}},
                 "constraints": {"type": "array", "items": {"type": "string"}, "default": []},
                 "acceptance_criteria": {"type": "object", "additionalProperties": True, "default": {}},
-                "target_model": {"type": "string", "maxLength": 160, "description": "Optional intended model label used by the open-work inbox."},
+                "target_model": {"type": "string", "maxLength": 160, "description": "Optional intended model label used by the open-work inbox. gpt and chatgpt are aliases."},
                 "idempotency_key": {"type": "string", "minLength": 8, "maxLength": 200},
             },
             "required": ["canonical_key", "title", "question", "idempotency_key"],
@@ -664,7 +664,7 @@ TOOLS = [
         "inputSchema": {
             "type": "object",
             "properties": {
-                "target_model": {"type": "string", "maxLength": 160},
+                "target_model": {"type": "string", "maxLength": 160, "description": "Model inbox label; gpt and chatgpt are aliases."},
                 "unclaimed_only": {"type": "boolean", "default": True},
                 "limit": {"type": "integer", "minimum": 1, "maximum": 50, "default": 20},
             },
