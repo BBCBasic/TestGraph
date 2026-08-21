@@ -370,6 +370,27 @@ def test_exact_followup_reuses_fully_retrieved_identity_and_names_missing_subjec
         }]
 
 
+
+def test_gpt_and_chatgpt_share_one_open_inbox_target():
+    with SessionLocal() as db:
+        owner = _user(db, "target-alias-owner")
+        deliberation = create_deliberation(
+            db,
+            DeliberationCreate(
+                canonical_key=f"gpt-target:{uuid.uuid4()}",
+                title="GPT target", question="Can ChatGPT find this?", target_model="gpt",
+            ),
+            owner_id=owner.id, client_id="claude:v3",
+        )
+
+        assert deliberation.target_model == "chatgpt"
+        for label in ("gpt", "chatgpt", "ChatGPT"):
+            listed = list_open_deliberations(
+                db, owner_id=owner.id, target_model=label, unclaimed_only=True
+            )
+            assert [item["id"] for item in listed] == [str(deliberation.id)]
+
+
 def test_search_paginates_and_reports_same_name_identity_collision():
     with SessionLocal() as db:
         owner = _user(db, "search-owner")
@@ -411,7 +432,7 @@ def test_search_paginates_and_reports_same_name_identity_collision():
 
 def test_deliberation_tools_publish_strict_schemas_and_new_version():
     tools = {tool["name"]: tool for tool in TOOLS}
-    assert SERVER_VERSION == "3.14.0-alpha"
+    assert SERVER_VERSION == "3.15.0-alpha"
     assert {
         "create_deliberation",
         "get_deliberation",
