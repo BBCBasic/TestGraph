@@ -27,6 +27,7 @@ from app.services.mcp_v2_guidance_policy import (
 )
 
 settings=get_settings()
+mcp_v2_module.SERVER_VERSION = "3.18.0-alpha"
 apply_chain_ingest_policy(mcp_v2_module.TOOLS)
 apply_guidance_tool_policy(mcp_v2_module.TOOLS)
 REVIEWS_HTML = Path(__file__).parent / "static" / "reviews.html"
