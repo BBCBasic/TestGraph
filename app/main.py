@@ -21,11 +21,17 @@ from app.api.development import router as development_router
 from app.api.uci_reviews import router as uci_reviews_router
 from app.core.config import get_settings
 from app.services.mcp_v2_policy import apply_chain_ingest_policy
+from app.services.mcp_v2_guidance_policy import (
+    apply_guidance_tool_policy,
+    install_get_induction_middleware,
+)
 
 settings=get_settings()
 apply_chain_ingest_policy(mcp_v2_module.TOOLS)
+apply_guidance_tool_policy(mcp_v2_module.TOOLS)
 REVIEWS_HTML = Path(__file__).parent / "static" / "reviews.html"
 app=FastAPI(title="TasteGraph",version="3.0.0-alpha",description="Standardised review storage with stable subject-type IDs, aliases and flexible relationships.")
+install_get_induction_middleware(app, mcp_v2_module)
 
 railway_public_domain=os.getenv("RAILWAY_PUBLIC_DOMAIN")
 configured_public_domain=urlsplit(settings.public_base_url).hostname
