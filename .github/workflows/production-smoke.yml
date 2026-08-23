@@ -6,62 +6,102 @@ on:
     paths:
       - '.github/workflows/production-smoke.yml'
 
+permissions:
+  contents: write
+
 jobs:
   smoke:
     runs-on: ubuntu-latest
     steps:
-      - name: Check homepage
-        run: |
-          set -euo pipefail
-          curl -fsS -D /tmp/home.headers -o /tmp/home.html https://testgraph.21dle.co.uk/
-          grep -qi 'TestGraph\|TasteGraph' /tmp/home.html
+      - uses: actions/checkout@v4
 
-      - name: Check readiness
+      - name: Run smoke checks without exposing capability secrets
+        shell: bash
         run: |
-          set -euo pipefail
-          curl -fsS https://testgraph.21dle.co.uk/health/ready | tee /tmp/ready.json
-          grep -q '"status"' /tmp/ready.json
-          grep -q '"ready"' /tmp/ready.json
-          grep -q '"database"' /tmp/ready.json
-          grep -q '"ok"' /tmp/ready.json
+          set -uo pipefail
+          failures=0
+          : > PRODUCTION_SMOKE_RESULT.md
+          echo '# Production Smoke Result' >> PRODUCTION_SMOKE_RESULT.md
+          echo >> PRODUCTION_SMOKE_RESULT.md
+          echo "Run: $(date -u +'%Y-%m-%dT%H:%M:%SZ')" >> PRODUCTION_SMOKE_RESULT.md
+          echo >> PRODUCTION_SMOKE_RESULT.md
 
-      - name: Check OAuth protected-resource metadata
-        run: |
-          set -euo pipefail
-          curl -fsS https://testgraph.21dle.co.uk/.well-known/oauth-protected-resource/mcp-v2 | tee /tmp/resource.json
-          grep -q 'https://testgraph.21dle.co.uk/mcp-v2' /tmp/resource.json
+          check() {
+            name="$1"; shift
+            if "$@"; then
+              echo "- [x] $name" >> PRODUCTION_SMOKE_RESULT.md
+            else
+              echo "- [ ] $name" >> PRODUCTION_SMOKE_RESULT.md
+              failures=$((failures+1))
+            fi
+          }
 
-      - name: Check OAuth authorization-server metadata
-        run: |
-          set -euo pipefail
-          curl -fsS https://testgraph.21dle.co.uk/.well-known/oauth-authorization-server | tee /tmp/oauth.json
-          grep -q 'authorization_endpoint' /tmp/oauth.json
-          grep -q 'token_endpoint' /tmp/oauth.json
+          homepage() {
+            curl -fsS -o /tmp/home.html https://testgraph.21dle.co.uk/ >/dev/null && grep -qi 'TestGraph\|TasteGraph' /tmp/home.html
+          }
 
-      - name: Check MCP v2 rejects unauthenticated access cleanly
-        run: |
-          set -euo pipefail
-          code=$(curl -sS -o /tmp/mcp.txt -w '%{http_code}' https://testgraph.21dle.co.uk/mcp-v2)
-          echo "MCP status: $code"
-          test "$code" = "401" -o "$code" = "405"
+          readiness() {
+            curl -fsS -o /tmp/ready.json https://testgraph.21dle.co.uk/health/ready >/dev/null &&
+              grep -q '"ready"' /tmp/ready.json && grep -q '"database"' /tmp/ready.json && grep -q '"ok"' /tmp/ready.json
+          }
 
-      - name: Check public vocabulary
-        run: |
-          set -euo pipefail
-          curl -fsS https://testgraph.21dle.co.uk/api/v2/vocabulary | tee /tmp/vocabulary.json
-          test -s /tmp/vocabulary.json
+          resource_metadata() {
+            curl -fsS -o /tmp/resource.json https://testgraph.21dle.co.uk/.well-known/oauth-protected-resource/mcp-v2 >/dev/null &&
+              grep -q 'https://testgraph.21dle.co.uk/mcp-v2' /tmp/resource.json
+          }
 
-      - name: Check capability creation HTML
-        run: |
-          set -euo pipefail
-          curl -fsS -H 'Accept: text/html' -D /tmp/cap.headers -o /tmp/cap.html https://testgraph.21dle.co.uk/capability/new
-          grep -q 'Your private TestGraph capability URL' /tmp/cap.html
-          grep -q 'Copy URL' /tmp/cap.html
-          grep -qi '^cache-control: no-store' /tmp/cap.headers
+          oauth_metadata() {
+            curl -fsS -o /tmp/oauth.json https://testgraph.21dle.co.uk/.well-known/oauth-authorization-server >/dev/null &&
+              grep -q 'authorization_endpoint' /tmp/oauth.json && grep -q 'token_endpoint' /tmp/oauth.json
+          }
 
-      - name: Check capability creation JSON compatibility
-        run: |
-          set -euo pipefail
-          curl -fsS -H 'Accept: application/json' https://testgraph.21dle.co.uk/capability/new | tee /tmp/cap.json
-          grep -q 'personal_url' /tmp/cap.json
-          grep -q 'authentication' /tmp/cap.json
+          mcp_boundary() {
+            code=$(curl -sS -o /tmp/mcp.txt -w '%{http_code}' https://testgraph.21dle.co.uk/mcp-v2) || return 1
+            test "$code" = "401" -o "$code" = "405"
+          }
+
+          vocabulary() {
+            curl -fsS -o /tmp/vocabulary.json https://testgraph.21dle.co.uk/api/v2/vocabulary >/dev/null && test -s /tmp/vocabulary.json
+          }
+
+          capability_html() {
+            curl -fsS -H 'Accept: text/html' -D /tmp/cap.headers -o /tmp/cap.html https://testgraph.21dle.co.uk/capability/new >/dev/null &&
+              grep -q 'Your private TestGraph capability URL' /tmp/cap.html &&
+              grep -q 'Copy URL' /tmp/cap.html &&
+              grep -qi '^cache-control: no-store' /tmp/cap.headers
+          }
+
+          capability_json() {
+            curl -fsS -H 'Accept: application/json' -o /tmp/cap.json https://testgraph.21dle.co.uk/capability/new >/dev/null || return 1
+            python - <<'PY'
+          import json
+          with open('/tmp/cap.json', encoding='utf-8') as f:
+              data=json.load(f)
+          assert isinstance(data.get('personal_url'), str) and data['personal_url'].startswith('https://testgraph.21dle.co.uk/c/tg_')
+          assert 'authentication' in data
+          PY
+          }
+
+          check 'Homepage responds' homepage
+          check 'Readiness reports database OK' readiness
+          check 'OAuth protected-resource metadata uses custom MCP v2 URL' resource_metadata
+          check 'OAuth authorization-server metadata is complete' oauth_metadata
+          check 'MCP v2 rejects unauthenticated access cleanly' mcp_boundary
+          check 'Public vocabulary responds' vocabulary
+          check 'Capability browser page renders safely' capability_html
+          check 'Capability JSON compatibility remains intact' capability_json
+
+          echo >> PRODUCTION_SMOKE_RESULT.md
+          if [ "$failures" -eq 0 ]; then
+            echo '**Overall: PASS**' >> PRODUCTION_SMOKE_RESULT.md
+          else
+            echo "**Overall: FAIL ($failures checks failed)**" >> PRODUCTION_SMOKE_RESULT.md
+          fi
+
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add PRODUCTION_SMOKE_RESULT.md
+          git commit -m 'Record production smoke result' || true
+          git push
+
+          test "$failures" -eq 0
