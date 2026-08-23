@@ -2,6 +2,21 @@
 
 All notable changes to TestGraph will be documented in this file.
 
+## v0.1.1 — 2026-08-23
+
+Release-candidate patch following the first public-release tag.
+
+### Fixed
+
+- Added a human-friendly web page for creating a private capability URL.
+- Preserved JSON compatibility for API clients using `/capability/new`.
+- Fixed the capability-page response header bug that caused Railway to return `upstream error`.
+- Added an external production smoke test covering the live custom-domain deployment.
+
+### Verified
+
+The production smoke run passed checks for the homepage, database readiness, OAuth metadata, unauthenticated MCP-v2 handling, public vocabulary, capability HTML rendering, and capability JSON compatibility.
+
 ## v0.1.0 — 2026-08-23
 
 Initial experimental release.
