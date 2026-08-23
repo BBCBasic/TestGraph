@@ -72,10 +72,11 @@ def capability_new_browser(request: Request, db: Session = Depends(get_db)):
         return response
     payload = json.loads(response.body)
     personal_url = html.escape(payload["personal_url"], quote=True)
-    headers = dict(response.headers)
-    headers["Cache-Control"] = "no-store"
-    headers["Referrer-Policy"] = "no-referrer"
-    headers["X-Robots-Tag"] = "noindex, nofollow, noarchive"
+    headers = {
+        "Cache-Control": "no-store",
+        "Referrer-Policy": "no-referrer",
+        "X-Robots-Tag": "noindex, nofollow, noarchive",
+    }
     return HTMLResponse(f"""<!doctype html>
 <html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Private TestGraph capability</title>
