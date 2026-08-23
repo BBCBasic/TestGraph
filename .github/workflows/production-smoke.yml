@@ -1,0 +1,67 @@
+name: Production smoke test
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - '.github/workflows/production-smoke.yml'
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check homepage
+        run: |
+          set -euo pipefail
+          curl -fsS -D /tmp/home.headers -o /tmp/home.html https://testgraph.21dle.co.uk/
+          grep -qi 'TestGraph\|TasteGraph' /tmp/home.html
+
+      - name: Check readiness
+        run: |
+          set -euo pipefail
+          curl -fsS https://testgraph.21dle.co.uk/health/ready | tee /tmp/ready.json
+          grep -q '"status"' /tmp/ready.json
+          grep -q '"ready"' /tmp/ready.json
+          grep -q '"database"' /tmp/ready.json
+          grep -q '"ok"' /tmp/ready.json
+
+      - name: Check OAuth protected-resource metadata
+        run: |
+          set -euo pipefail
+          curl -fsS https://testgraph.21dle.co.uk/.well-known/oauth-protected-resource/mcp-v2 | tee /tmp/resource.json
+          grep -q 'https://testgraph.21dle.co.uk/mcp-v2' /tmp/resource.json
+
+      - name: Check OAuth authorization-server metadata
+        run: |
+          set -euo pipefail
+          curl -fsS https://testgraph.21dle.co.uk/.well-known/oauth-authorization-server | tee /tmp/oauth.json
+          grep -q 'authorization_endpoint' /tmp/oauth.json
+          grep -q 'token_endpoint' /tmp/oauth.json
+
+      - name: Check MCP v2 rejects unauthenticated access cleanly
+        run: |
+          set -euo pipefail
+          code=$(curl -sS -o /tmp/mcp.txt -w '%{http_code}' https://testgraph.21dle.co.uk/mcp-v2)
+          echo "MCP status: $code"
+          test "$code" = "401" -o "$code" = "405"
+
+      - name: Check public vocabulary
+        run: |
+          set -euo pipefail
+          curl -fsS https://testgraph.21dle.co.uk/api/v2/vocabulary | tee /tmp/vocabulary.json
+          test -s /tmp/vocabulary.json
+
+      - name: Check capability creation HTML
+        run: |
+          set -euo pipefail
+          curl -fsS -H 'Accept: text/html' -D /tmp/cap.headers -o /tmp/cap.html https://testgraph.21dle.co.uk/capability/new
+          grep -q 'Your private TestGraph capability URL' /tmp/cap.html
+          grep -q 'Copy URL' /tmp/cap.html
+          grep -qi '^cache-control: no-store' /tmp/cap.headers
+
+      - name: Check capability creation JSON compatibility
+        run: |
+          set -euo pipefail
+          curl -fsS -H 'Accept: application/json' https://testgraph.21dle.co.uk/capability/new | tee /tmp/cap.json
+          grep -q 'personal_url' /tmp/cap.json
+          grep -q 'authentication' /tmp/cap.json
