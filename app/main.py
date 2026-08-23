@@ -1,25 +1,29 @@
 from __future__ import annotations
+import html
+import json
 import os
 import uuid
 from pathlib import Path
 from urllib.parse import urlsplit
-from fastapi import FastAPI, Request
+from fastapi import Depends, FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
+from sqlalchemy.orm import Session
 from app.api.routes import router
 from app.api.v2 import router as v2_router
 from app.api.oauth import router as oauth_router
 from app.api.mcp import router as mcp_router
 from app.api import mcp_v2 as mcp_v2_module
 from app.api.mcp_v2 import router as mcp_v2_router
-from app.api.capability import router as capability_router
+from app.api.capability import router as capability_router, new_capability as new_capability_json
 from app.api.integrations import router as integrations_router
 from app.api.actions import router as actions_router
 from app.api.actions_v2 import router as actions_v2_router
 from app.api.development import router as development_router, reset_enabled
 from app.api.uci_reviews import router as uci_reviews_router
 from app.core.config import get_settings
+from app.db.session import get_db
 from app.services.mcp_v2_policy import apply_chain_ingest_policy
 from app.services.mcp_v2_guidance_policy import (
     apply_guidance_tool_policy,
@@ -60,6 +64,45 @@ def home():
     if reset_enabled():
         reset_control = """<section class="reset"><h2>Development reset</h2><p>Remove reviews, subjects and discovered vocabulary while preserving users, schemas, OAuth connections and API/capability credentials.</p><form method="post" action="/development/reset" onsubmit="return confirm('Permanently reset TestGraph to basics? OAuth connections and API keys will be preserved.');"><button type="submit">Reset database to basics</button></form></section>"""
     return f"""<!doctype html><html><head><title>TasteGraph</title><style>body{{font-family:system-ui;max-width:860px;margin:40px auto;padding:0 20px}}code{{background:#eee;padding:2px 5px}}.reset{{margin-top:32px;padding:20px;border:1px solid #e2bcbc;border-radius:12px;background:#fff8f8}}.reset h2{{margin-top:0}}.reset button{{padding:11px 16px;background:#a52626;color:white;border:0;border-radius:9px;font-weight:700;cursor:pointer}}</style></head><body><h1>TasteGraph</h1><p>Standardised review storage with flexible input.</p><ul><li><a href="/api/v2/vocabulary">Standard vocabulary</a></li><li><a href="/mcp-v2">MCP endpoint</a></li><li><a href="/docs">API documentation</a></li><li><a href="/capability/new">Create a private TasteGraph capability URL</a></li><li><a href="/reviews">Legacy review browser</a></li><li><a href="/health/ready">Health</a></li></ul><p>Reviews store stable subject-type IDs. Aliases standardise varied language; editable relationships support broad searches without becoming storage paths.</p>{reset_control}</body></html>"""
+
+@app.get("/capability/new", include_in_schema=False)
+def capability_new_browser(request: Request, db: Session = Depends(get_db)):
+    response = new_capability_json(db)
+    if "text/html" not in request.headers.get("accept", "").lower():
+        return response
+    payload = json.loads(response.body)
+    personal_url = html.escape(payload["personal_url"], quote=True)
+    headers = dict(response.headers)
+    headers["Cache-Control"] = "no-store"
+    headers["Referrer-Policy"] = "no-referrer"
+    headers["X-Robots-Tag"] = "noindex, nofollow, noarchive"
+    return HTMLResponse(f"""<!doctype html>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Private TestGraph capability</title>
+<style>
+body{{font-family:system-ui;background:#f5f6f8;color:#172033;margin:0}}
+main{{max-width:760px;margin:60px auto;padding:0 20px}}
+.card{{background:white;border:1px solid #d9dde5;border-radius:16px;padding:28px;box-shadow:0 8px 30px rgba(0,0,0,.05)}}
+h1{{margin-top:0;font-size:28px}}p{{line-height:1.55}}
+.secret{{word-break:break-all;padding:14px;background:#f3f5f8;border:1px solid #d9dde5;border-radius:10px;font-family:ui-monospace,SFMono-Regular,Consolas,monospace}}
+.actions{{display:flex;gap:10px;flex-wrap:wrap;margin-top:18px}}
+button,a.button{{font:inherit;padding:11px 15px;border-radius:9px;border:1px solid #aeb5c1;background:white;color:#172033;text-decoration:none;cursor:pointer}}
+button.primary{{background:#172033;color:white;border-color:#172033}}
+.warning{{margin-top:22px;padding:14px;border-left:4px solid #b7791f;background:#fff8e6}}
+.small{{font-size:14px;color:#626b7a}}
+</style></head>
+<body><main><div class="card">
+<h1>Your private TestGraph capability URL</h1>
+<p>This URL is the credential. Keep it private. Anyone who has it can access this TestGraph capability.</p>
+<div id="capability" class="secret">{personal_url}</div>
+<div class="actions">
+<button class="primary" type="button" onclick="navigator.clipboard.writeText(document.getElementById('capability').innerText).then(()=>this.textContent='Copied')">Copy URL</button>
+<a class="button" href="{personal_url}" rel="noreferrer">Open capability</a>
+</div>
+<div class="warning"><strong>Do not post or share this URL publicly.</strong> Store it like a password or API key.</div>
+<p class="small">API clients can continue to request this endpoint without an HTML Accept header and receive the existing JSON response.</p>
+<p><a href="/">Back to TestGraph</a></p>
+</div></main></body></html>""", headers=headers)
 
 @app.get("/reviews", response_class=FileResponse, include_in_schema=False)
 def review_browser(): return FileResponse(REVIEWS_HTML)
