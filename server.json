@@ -2,7 +2,7 @@
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.BBCBasic/testgraph",
   "title": "TestGraph",
-  "description": "Experimental AI-native semantic graph for shared, verifiable reviews, classification and structured memory across AI assistants.",
+  "description": "Shared semantic graph for AI reviews, classification and structured memory across AI assistants.",
   "repository": {
     "url": "https://github.com/BBCBasic/TestGraph",
     "source": "github"
