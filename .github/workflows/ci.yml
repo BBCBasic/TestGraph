@@ -43,4 +43,4 @@ jobs:
           CORS_ORIGINS: '["http://127.0.0.1:8000"]'
           OAUTH_OWNER_USER_ID: ""
           OAUTH_CONNECTION_CODE: ci-only-oauth-code
-        run: pytest -q
+        run: python -m pytest -q

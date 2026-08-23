@@ -34,6 +34,9 @@ from app.services.location import (
     LocationError, assertion_body, assertions_for_subject, create_location_assertion,
     location_matches, resolve_location_assertion,
 )
+from app.services.mcp_v2_guidance_policy import apply_guidance_tool_policy
+from app.services.mcp_v2_policy import apply_chain_ingest_policy
+from app.services.mcp_v2_semantic_policy import apply_semantic_naming_policy
 from app.services.semantic import add_semantic_relationship, resolve_subject_hierarchy, retire_semantic_relationship
 from app.services.v2 import (
     add_subject_type_alias, create_assessment, create_experience, delete_owned_experience,
@@ -46,7 +49,7 @@ from app.services.write_safety import (
 
 router = APIRouter()
 PROTOCOL_VERSION = "2025-06-18"
-SERVER_VERSION = "3.17.0-alpha"
+SERVER_VERSION = "3.19.0-alpha"
 READ_SECURITY = [{"type": "oauth2", "scopes": ["reviews:read"]}]
 WRITE_SECURITY = [{"type": "oauth2", "scopes": ["reviews:write"]}]
 
@@ -794,6 +797,14 @@ TOOLS = [
         **_security(WRITE_SECURITY), "annotations": {"readOnlyHint": False, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
     }
 ]
+
+# Publish one deterministic MCP surface regardless of whether callers import
+# this module directly or through app.main.  Keeping these policy transforms in
+# app.main made TOOLS and SERVER_VERSION depend on import order, which in turn
+# made otherwise isolated tests fail when the complete suite imported the app.
+apply_chain_ingest_policy(TOOLS)
+apply_guidance_tool_policy(TOOLS)
+apply_semantic_naming_policy(TOOLS)
 
 
 def _resolve(db, args):
