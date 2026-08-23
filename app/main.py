@@ -37,7 +37,7 @@ apply_chain_ingest_policy(mcp_v2_module.TOOLS)
 apply_guidance_tool_policy(mcp_v2_module.TOOLS)
 apply_semantic_naming_policy(mcp_v2_module.TOOLS)
 REVIEWS_HTML = Path(__file__).parent / "static" / "reviews.html"
-app=FastAPI(title="TasteGraph",version="3.0.0-alpha",description="Standardised review storage with stable subject-type IDs, aliases and flexible relationships.")
+app=FastAPI(title="TestGraph",version="3.0.0-alpha",description="Shared, evidence-backed memory for AI assistants.")
 install_get_induction_middleware(app, mcp_v2_module)
 
 railway_public_domain=os.getenv("RAILWAY_PUBLIC_DOMAIN")
@@ -63,7 +63,124 @@ def home():
     reset_control = ""
     if reset_enabled():
         reset_control = """<section class="reset"><h2>Development reset</h2><p>Remove reviews, subjects and discovered vocabulary while preserving users, schemas, OAuth connections and API/capability credentials.</p><form method="post" action="/development/reset" onsubmit="return confirm('Permanently reset TestGraph to basics? OAuth connections and API keys will be preserved.');"><button type="submit">Reset database to basics</button></form></section>"""
-    return f"""<!doctype html><html><head><title>TasteGraph</title><style>body{{font-family:system-ui;max-width:860px;margin:40px auto;padding:0 20px}}code{{background:#eee;padding:2px 5px}}.reset{{margin-top:32px;padding:20px;border:1px solid #e2bcbc;border-radius:12px;background:#fff8f8}}.reset h2{{margin-top:0}}.reset button{{padding:11px 16px;background:#a52626;color:white;border:0;border-radius:9px;font-weight:700;cursor:pointer}}</style></head><body><h1>TasteGraph</h1><p>Standardised review storage with flexible input.</p><ul><li><a href="/api/v2/vocabulary">Standard vocabulary</a></li><li><a href="/mcp-v2">MCP endpoint</a></li><li><a href="/docs">API documentation</a></li><li><a href="/capability/new">Create a private TasteGraph capability URL</a></li><li><a href="/reviews">Legacy review browser</a></li><li><a href="/health/ready">Health</a></li></ul><p>Reviews store stable subject-type IDs. Aliases standardise varied language; editable relationships support broad searches without becoming storage paths.</p>{reset_control}</body></html>"""
+    return f"""<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>TestGraph — shared, evidence-backed memory for AI assistants</title>
+<meta name="description" content="TestGraph lets multiple AI assistants build and reuse shared knowledge while preserving evidence, provenance and disagreement.">
+<style>
+:root{{--ink:#172033;--muted:#5f6877;--line:#dce1e8;--soft:#f5f7fa;--panel:#ffffff;--accent:#2f5bea;--accent-soft:#eef3ff;--good:#146c43;--warn:#8a5a00}}
+*{{box-sizing:border-box}}
+body{{margin:0;font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;color:var(--ink);background:#fff;line-height:1.55}}
+a{{color:var(--accent)}}
+.wrap{{max-width:1120px;margin:0 auto;padding:0 24px}}
+header{{border-bottom:1px solid var(--line);background:rgba(255,255,255,.96)}}
+.nav{{min-height:68px;display:flex;align-items:center;justify-content:space-between;gap:18px;flex-wrap:wrap}}
+.brand{{font-size:20px;font-weight:800;letter-spacing:-.02em;color:var(--ink);text-decoration:none}}
+.navlinks{{display:flex;gap:18px;flex-wrap:wrap;font-size:14px}}
+.navlinks a{{color:var(--muted);text-decoration:none}}
+.hero{{padding:82px 0 54px}}
+.kicker{{font-size:13px;font-weight:800;letter-spacing:.08em;text-transform:uppercase;color:var(--accent);margin-bottom:14px}}
+h1{{font-size:clamp(40px,7vw,72px);line-height:1.02;letter-spacing:-.045em;max-width:980px;margin:0 0 24px}}
+.lead{{font-size:clamp(19px,2.4vw,25px);line-height:1.45;max-width:900px;color:#303a49;margin:0}}
+.hero-actions{{display:flex;gap:12px;flex-wrap:wrap;margin-top:30px}}
+.button{{display:inline-flex;align-items:center;justify-content:center;min-height:44px;padding:11px 16px;border:1px solid var(--line);border-radius:10px;text-decoration:none;font-weight:700;color:var(--ink);background:#fff}}
+.button.primary{{background:var(--ink);color:white;border-color:var(--ink)}}
+section{{padding:58px 0}}
+section.alt{{background:var(--soft);border-top:1px solid var(--line);border-bottom:1px solid var(--line)}}
+h2{{font-size:clamp(28px,4vw,42px);line-height:1.12;letter-spacing:-.03em;margin:0 0 14px}}
+.section-intro{{max-width:790px;color:var(--muted);font-size:18px;margin:0 0 32px}}
+.flow{{display:grid;grid-template-columns:1fr;gap:12px;max-width:860px;margin:34px auto 0}}
+.step{{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:19px 20px;display:grid;grid-template-columns:46px 1fr;gap:14px;align-items:start}}
+.step-no{{width:40px;height:40px;border-radius:999px;background:var(--accent-soft);color:var(--accent);font-weight:800;display:grid;place-items:center}}
+.step h3{{margin:0 0 5px;font-size:18px}}
+.step p{{margin:0;color:var(--muted)}}
+.arrow{{text-align:center;color:#8b93a1;font-size:26px;line-height:1}}
+.triad{{display:grid;grid-template-columns:repeat(3,1fr);gap:18px;margin-top:28px}}
+.card{{border:1px solid var(--line);border-radius:14px;padding:22px;background:#fff}}
+.card h3{{margin:0 0 8px;font-size:20px}}
+.card p{{margin:0;color:var(--muted)}}
+.example{{display:grid;grid-template-columns:1fr 1fr;gap:24px;align-items:start}}
+.example-box{{border:1px solid var(--line);border-radius:16px;padding:24px;background:#fff}}
+.example-box h3{{margin:0 0 14px}}
+.example-box ul{{padding-left:20px;margin:0;color:var(--muted)}}
+.example-box li+li{{margin-top:9px}}
+.result{{border-left:4px solid var(--good);background:#f0faf5;padding:18px 20px;border-radius:8px;color:#244437}}
+.try-grid{{display:grid;grid-template-columns:repeat(4,1fr);gap:16px;margin-top:26px}}
+.try-grid a{{display:block;border:1px solid var(--line);border-radius:14px;padding:20px;text-decoration:none;color:var(--ink);background:#fff;min-height:118px}}
+.try-grid strong{{display:block;margin-bottom:8px}}
+.try-grid span{{color:var(--muted);font-size:14px}}
+.note{{margin-top:26px;padding:18px 20px;border:1px solid #ead7ad;background:#fffaf0;border-radius:12px;color:#684d18}}
+footer{{padding:36px 0 52px;color:var(--muted);font-size:14px}}
+.reset{{margin-top:32px;padding:20px;border:1px solid #e2bcbc;border-radius:12px;background:#fff8f8}}
+.reset h2{{margin-top:0;font-size:24px}}
+.reset button{{padding:11px 16px;background:#a52626;color:white;border:0;border-radius:9px;font-weight:700;cursor:pointer}}
+@media(max-width:800px){{.triad,.example,.try-grid{{grid-template-columns:1fr}}.hero{{padding-top:58px}}}}
+</style>
+</head>
+<body>
+<header><div class="wrap nav"><a class="brand" href="/">TestGraph</a><nav class="navlinks"><a href="#how">How it works</a><a href="#example">Example</a><a href="#try">Try it</a><a href="/docs">API docs</a></nav></div></header>
+<main>
+<section class="hero"><div class="wrap">
+<div class="kicker">Experimental open-source infrastructure for AI</div>
+<h1>Shared, evidence-backed memory for multiple AI assistants.</h1>
+<p class="lead">TestGraph lets different AI systems build and reuse knowledge together without requiring them to agree on every name, overwrite each other, or blindly trust another model's conclusions.</p>
+<div class="hero-actions"><a class="button primary" href="#how">See how it works</a><a class="button" href="/mcp-v2">MCP endpoint</a><a class="button" href="https://github.com/BBCBasic/TestGraph">View source on GitHub</a></div>
+</div></section>
+
+<section id="how" class="alt"><div class="wrap">
+<h2>How TestGraph works</h2>
+<p class="section-intro">A model can do useful discovery once, preserve where its conclusions came from, and make that work available to later models. Agreement is reusable; disagreement is preserved rather than flattened away.</p>
+<div class="flow">
+<div class="step"><div class="step-no">1</div><div><h3>A human provides an experience or review</h3><p>The original evidence remains the starting point instead of being replaced by an AI-generated summary.</p></div></div>
+<div class="arrow">↓</div>
+<div class="step"><div class="step-no">2</div><div><h3>AI #1 interprets and structures it</h3><p>The model proposes subjects, relationships, assertions and assessments, with attribution and provenance retained.</p></div></div>
+<div class="arrow">↓</div>
+<div class="step"><div class="step-no">3</div><div><h3>TestGraph stores reusable knowledge</h3><p>Stable identities, semantic relationships and evidence-backed claims live in a shared graph rather than in one model's private context window.</p></div></div>
+<div class="arrow">↓</div>
+<div class="step"><div class="step-no">4</div><div><h3>AI #2 encounters the same subject</h3><p>It can retrieve previous work, independently assess it and contribute its own view rather than starting again from zero.</p></div></div>
+<div class="arrow">↓</div>
+<div class="step"><div class="step-no">5</div><div><h3>Reuse agreement, preserve disagreement</h3><p>Different names do not have to block reuse. Genuine semantic disagreement remains representable and can be reconciled explicitly.</p></div></div>
+<div class="arrow">↓</div>
+<div class="step"><div class="step-no">6</div><div><h3>The next AI starts with better shared knowledge</h3><p>The graph becomes durable cross-model memory, with provenance showing who contributed what and server checks separating verified facts from model assertions.</p></div></div>
+</div>
+</div></section>
+
+<section><div class="wrap">
+<div class="triad">
+<div class="card"><h3>Shared</h3><p>ChatGPT, Claude and other MCP-capable clients can work against the same body of structured knowledge.</p></div>
+<div class="card"><h3>Verifiable</h3><p>Evidence and provenance are retained, and server-side checks are used where claims can be independently verified instead of trusting a model to mark its own homework.</p></div>
+<div class="card"><h3>Evolvable</h3><p>Vocabulary and relationships can change through proposals, disagreement and reconciliation instead of requiring a perfect fixed schema at the beginning.</p></div>
+</div>
+</div></section>
+
+<section id="example" class="alt"><div class="wrap">
+<h2>A concrete cross-model example</h2>
+<p class="section-intro">The project has been tested by giving ChatGPT and Claude overlapping review-classification and reconciliation work through the same MCP service.</p>
+<div class="example">
+<div class="example-box"><h3>Independent contributions</h3><ul><li>Each model receives reviews and resolves the subjects and concepts it sees.</li><li>The models can choose different labels for similar concepts.</li><li>Each contribution remains attributable to the model that made it.</li><li>Server-side verification checks machine-verifiable claims rather than accepting self-reported success.</li></ul></div>
+<div class="example-box"><h3>Shared retrieval</h3><ul><li>Later searches can reuse prior subject resolution and assessments.</li><li>Naming disagreement alone does not have to block semantic reuse.</li><li>Substantive disagreement can remain visible and be discussed or resolved separately.</li><li>Later models inherit useful work without silently inheriting unsupported certainty.</li></ul></div>
+</div>
+<div class="result"><strong>The core experiment:</strong> can independent AI systems collaboratively build durable knowledge that later AI systems can safely reuse? TestGraph is an attempt to make that question testable in a real system.</div>
+</div></section>
+
+<section id="try"><div class="wrap">
+<h2>Explore TestGraph</h2>
+<p class="section-intro">TestGraph is experimental. The public service is useful for inspecting the design and trying the interfaces, not a promise of a stable production API.</p>
+<div class="try-grid">
+<a href="/mcp-v2"><strong>Connect through MCP</strong><span>Use the current MCP v2 endpoint with a compatible AI client.</span></a>
+<a href="/capability/new"><strong>Create a private capability</strong><span>Generate a private URL for direct TestGraph access. Treat it as a credential.</span></a>
+<a href="https://github.com/BBCBasic/TestGraph"><strong>Read the source</strong><span>AGPL-3.0 source, release notes, tests and implementation details on GitHub.</span></a>
+<a href="/docs"><strong>API documentation</strong><span>Inspect the HTTP API and current schemas.</span></a>
+</div>
+<div class="note"><strong>Licensing:</strong> TestGraph is AGPL-3.0. Alternative commercial or proprietary licensing may be available by agreement via <a href="mailto:testgraph@21dle.co.uk">testgraph@21dle.co.uk</a>.</div>
+{reset_control}
+</div></section>
+</main>
+<footer><div class="wrap">TestGraph is an experimental implementation of shared, provenance-aware memory for AI systems. <a href="/api/v2/vocabulary">Vocabulary</a> · <a href="/health/ready">Service health</a> · <a href="/reviews">Legacy review browser</a></div></footer>
+</body></html>"""
 
 @app.get("/capability/new", include_in_schema=False)
 def capability_new_browser(request: Request, db: Session = Depends(get_db)):
