@@ -1,0 +1,223 @@
+from __future__ import annotations
+
+from datetime import datetime
+from typing import Any, Literal
+from uuid import UUID
+
+from pydantic import BaseModel, ConfigDict, Field
+
+
+class StrictModel(BaseModel):
+    model_config = ConfigDict(extra="forbid", from_attributes=True)
+
+
+class SubjectTypeEnsure(StrictModel):
+    term: str = Field(min_length=1, max_length=160)
+    description: str | None = None
+    create_if_missing: bool = True
+
+
+class SubjectEnsure(StrictModel):
+    subject_type: str
+    name: str = Field(min_length=1, max_length=240)
+    canonical_key: str = Field(min_length=1, max_length=300)
+    identifiers: dict[str, Any] = {}
+    attributes: dict[str, Any] = {}
+    provenance: dict[str, Any] = {}
+
+
+class ContextSubjectEnsure(SubjectEnsure):
+    ref: str = Field(min_length=1, max_length=80, pattern=r"^[a-zA-Z0-9_-]+$")
+
+
+class ContextRelationshipEnsure(StrictModel):
+    source_ref: str = Field(min_length=1, max_length=80)
+    relationship: str = Field(min_length=1, max_length=60)
+    target_ref: str = Field(min_length=1, max_length=80)
+    provenance: dict[str, Any] = {}
+
+
+class SubjectContextEnsure(StrictModel):
+    subjects: list[ContextSubjectEnsure] = []
+    relationships: list[ContextRelationshipEnsure] = []
+
+
+class EnrichmentRetrievalUse(StrictModel):
+    roles: list[Literal[
+        "identity", "likely_query", "location", "classification",
+        "relationship", "comparison", "verification",
+    ]] = Field(min_length=1)
+    likely_queries: list[str] = []
+    reason: str = Field(min_length=1)
+
+
+class SubjectEnrichmentCheck(StrictModel):
+    status: Literal["completed", "unavailable", "not_applicable", "ambiguous"]
+    sources: list[str] = []
+    applied_fields: dict[str, list[str]] = {}
+    retrieval_uses: dict[str, EnrichmentRetrievalUse] = {}
+    unapplied_sources: dict[str, str] = {}
+    attempts: list[str] = []
+    reason: str | None = Field(default=None, min_length=1)
+    candidate_identities: list[str] = []
+
+
+class CollectionSourcePage(StrictModel):
+    url: str = Field(min_length=1)
+    source_kind: Literal[
+        "directory_page", "sitemap", "api", "official_member_page",
+        "other_authoritative",
+    ]
+    sequence: int | None = Field(default=None, ge=1)
+    member_refs: list[str] = []
+    next_url: str | None = Field(default=None, min_length=1)
+    terminal: bool = False
+
+
+class CollectionSourceManifest(StrictModel):
+    coverage_status: Literal["complete", "partial", "unknown"]
+    coverage_method: Literal[
+        "single_page", "pagination", "sitemap", "api",
+        "multi_source", "search_derived",
+    ]
+    declared_source_count: int = Field(ge=1)
+    source_pages: list[CollectionSourcePage] = Field(min_length=1)
+    discovery_queries: list[str] = Field(min_length=1)
+    exhaustion_evidence: str = Field(min_length=1)
+    unresolved_source_urls: list[str] = []
+
+
+class CollectionAssessment(StrictModel):
+    status: Literal["member", "independent", "unavailable", "ambiguous"]
+    collection_id: UUID | None = None
+    manifest_revision: int | None = Field(default=None, ge=1)
+    refresh_manifest: bool = False
+    collection_name: str | None = Field(default=None, min_length=1, max_length=240)
+    collection_type: str | None = Field(default=None, min_length=1, max_length=160)
+    directory_url: str | None = Field(default=None, min_length=1)
+    discovered_count: int | None = Field(default=None, ge=2)
+    submitted_member_refs: list[str] = []
+    source_manifest: CollectionSourceManifest | None = None
+    evidence_sources: list[str] = []
+    unavailability_kind: Literal[
+        "collection_identity_not_found",
+        "authoritative_source_not_found",
+        "authoritative_source_inaccessible",
+    ] | None = None
+    attempts: list[str] = []
+    reason: str | None = Field(default=None, min_length=1)
+    candidate_collections: list[str] = []
+    checked_at: datetime | None = None
+
+
+class SourceCreate(StrictModel):
+    source_type: str
+    provider: str
+    external_id: str | None = None
+    url: str | None = None
+    author: str | None = None
+    license: str | None = None
+    raw_data: dict[str, Any] = {}
+    source_metadata: dict[str, Any] = {}
+
+
+class ExperienceCreate(StrictModel):
+    owner_id: UUID
+    subject_id: UUID
+    headline: str = Field(min_length=1, max_length=240)
+    summary: str = Field(min_length=1)
+    raw_text: str = Field(min_length=1)
+    structured_data: dict[str, Any] = {}
+    experienced_at: datetime | None = None
+    visibility: Literal["private", "unlisted", "public", "aggregate_only"] = "private"
+    user_approved: bool = False
+    source: SourceCreate | None = None
+    subject_enrichment_check: SubjectEnrichmentCheck | None = None
+    collection_assessment: CollectionAssessment | None = None
+    source_client: str = "ai-client"
+
+
+class AssessmentCreate(StrictModel):
+    experience_id: UUID
+    assessment_type: str
+    evidence: dict[str, Any] = {}
+    analysis: dict[str, Any] = {}
+    conclusion: str | None = None
+    confidence: float | None = Field(default=None, ge=0, le=1)
+    source_model: str | None = None
+    provenance: dict[str, Any] = {}
+
+
+class FieldEnsure(StrictModel):
+    canonical_name: str = Field(min_length=1, max_length=160)
+    json_schema: dict[str, Any]
+    description: str | None = None
+    aliases: list[str] = []
+    subject_types: list[str] = []
+
+
+class RelationshipEnsure(StrictModel):
+    source_type: str
+    relationship: str = "belongs_to"
+    target_type: str
+
+
+class SubjectRead(StrictModel):
+    id: UUID
+    subject_type_id: UUID
+    name: str
+    canonical_key: str
+    identifiers_json: dict[str, Any]
+    attributes_json: dict[str, Any]
+    provenance_json: dict[str, Any]
+    created_at: datetime
+    updated_at: datetime
+
+
+class ExperienceRead(StrictModel):
+    id: UUID
+    owner_id: UUID
+    subject_id: UUID
+    source_id: UUID | None
+    record_type: str
+    experienced_at: datetime | None
+    headline: str
+    summary: str
+    raw_text: str
+    structured_data: dict[str, Any]
+    submitted_data: dict[str, Any]
+    normalization_log: list[Any]
+    visibility: str
+    publication_status: str
+    provenance: dict[str, Any]
+    created_by_client: str
+    created_at: datetime
+    updated_at: datetime
+
+
+class PlaceReference(StrictModel):
+    subject_id: UUID | None = None
+    name: str | None = Field(default=None, min_length=1, max_length=240)
+    canonical_key: str | None = Field(default=None, min_length=1, max_length=300)
+    identifiers: dict[str, Any] = {}
+    place_kind: str | None = Field(default=None, min_length=1, max_length=80)
+
+
+class LocationAssertionCreate(StrictModel):
+    subject_id: UUID
+    predicate: Literal["located_in", "contained_in", "published_address", "postcode", "position"]
+    object_place: PlaceReference | None = None
+    value: Any | None = None
+    qualifiers: dict[str, Any] = {}
+    source: dict[str, Any]
+    observed_at: datetime | None = None
+    valid_from: datetime | None = None
+    valid_to: datetime | None = None
+    visibility: Literal["private", "unlisted", "public"] = "private"
+
+
+class LocationResolutionCreate(StrictModel):
+    assertion_id: UUID
+    decision: Literal["accepted", "rejected"]
+    rationale: str = Field(min_length=1)
+    user_approved: bool = False
