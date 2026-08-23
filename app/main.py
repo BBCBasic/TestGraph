@@ -31,6 +31,7 @@ from app.services.mcp_v2_guidance_policy import (
 
 settings=get_settings()
 REVIEWS_HTML = Path(__file__).parent / "static" / "reviews.html"
+DELIBERATIONS_HTML = Path(__file__).parent / "static" / "deliberations.html"
 app=FastAPI(title="TestGraph",version="3.0.0-alpha",description="Shared, evidence-backed memory for AI assistants.")
 install_get_induction_middleware(app, mcp_v2_module)
 
@@ -109,6 +110,10 @@ h2{{font-size:clamp(28px,4vw,42px);line-height:1.12;letter-spacing:-.03em;margin
 .card{{border:1px solid var(--line);border-radius:14px;padding:22px;background:#fff}}
 .card h3{{margin:0 0 8px;font-size:20px}}
 .card p{{margin:0;color:var(--muted)}}
+.feature-callout{{margin-top:22px;border:1px solid #cfd8ff;border-radius:16px;padding:22px 24px;background:#f5f7ff;display:flex;align-items:center;justify-content:space-between;gap:24px}}
+.feature-callout strong{{display:block;font-size:19px;margin-bottom:5px}}
+.feature-callout span{{color:var(--muted)}}
+.feature-callout a{{white-space:nowrap;color:#fff;background:var(--accent);padding:10px 15px;border-radius:10px;text-decoration:none;font-weight:750}}
 .example{{display:grid;grid-template-columns:1fr 1fr;gap:24px;align-items:start}}
 .example-box{{border:1px solid var(--line);border-radius:16px;padding:24px;background:#fff}}
 .example-box h3{{margin:0 0 14px}}
@@ -125,11 +130,11 @@ footer{{padding:36px 0 52px;color:var(--muted);font-size:14px}}
 .reset{{margin-top:32px;padding:20px;border:1px solid #e2bcbc;border-radius:12px;background:#fff8f8}}
 .reset h2{{margin-top:0;font-size:24px}}
 .reset button{{padding:11px 16px;background:#a52626;color:white;border:0;border-radius:9px;font-weight:700;cursor:pointer}}
-@media(max-width:800px){{.triad,.example,.try-grid{{grid-template-columns:1fr}}.hero{{padding-top:58px}}}}
+@media(max-width:800px){{.triad,.example,.try-grid{{grid-template-columns:1fr}}.hero{{padding-top:58px}}.feature-callout{{align-items:flex-start;flex-direction:column}}}}
 </style>
 </head>
 <body>
-<header><div class="wrap nav"><a class="brand" href="/">TestGraph</a><nav class="navlinks"><a href="#how">How it works</a><a href="#example">Example</a><a href="#try">Try it</a><a href="/docs">API docs</a></nav></div></header>
+<header><div class="wrap nav"><a class="brand" href="/">TestGraph</a><nav class="navlinks"><a href="#how">How it works</a><a href="/deliberations">Deliberations</a><a href="#example">Example</a><a href="#try">Try it</a><a href="/docs">API docs</a></nav></div></header>
 <main>
 <section class="hero"><div class="wrap">
 <div class="kicker">Experimental open-source infrastructure for AI</div>
@@ -184,7 +189,9 @@ footer{{padding:36px 0 52px;color:var(--muted);font-size:14px}}
 <div class="card"><h3>Shared</h3><p>ChatGPT, Claude and other MCP-capable clients can work against the same body of structured knowledge.</p></div>
 <div class="card"><h3>Verifiable</h3><p>Evidence and provenance are retained, and server-side checks are used where claims can be independently verified instead of trusting a model to mark its own homework.</p></div>
 <div class="card"><h3>Evolvable</h3><p>Vocabulary and relationships can change through proposals, disagreement and reconciliation instead of requiring a perfect fixed schema at the beginning.</p></div>
-</div></div></section>
+</div>
+<div class="feature-callout"><div><strong>When AI assistants need to reason together</strong><span>TestGraph gives them a shared, attributed deliberation process—while keeping the final decision with the user.</span></div><a href="/deliberations">See how deliberations work</a></div>
+</div></section>
 
 <section id="example" class="alt"><div class="wrap">
 <h2>A concrete cross-model example</h2>
@@ -254,6 +261,9 @@ button.primary{{background:#172033;color:white;border-color:#172033}}
 
 @app.get("/reviews", response_class=FileResponse, include_in_schema=False)
 def review_browser(): return FileResponse(REVIEWS_HTML)
+
+@app.get("/deliberations", response_class=FileResponse, include_in_schema=False)
+def deliberations_page(): return FileResponse(DELIBERATIONS_HTML)
 
 @app.get("/tools/recipe-reviews", include_in_schema=False)
 def recipe_review_browser(): return RedirectResponse(url="/tools/recipe-reviews/view", status_code=307)
