@@ -15,6 +15,10 @@ def test_live_page_is_v2_only_and_linked(client):
     assert "/api/v2/vocabulary" in page.text
     assert "/api/v2/public/experiences" in page.text
     assert "/api/v1/" not in page.text
+    assert "Classification" in page.text
+    assert "Zoomable bubble chart" in page.text
+    assert 'id="zoom-in"' in page.text
+    assert "classificationPath" in page.text
 
 
 def test_public_v2_feed_excludes_private_data_and_internal_metadata(client):
