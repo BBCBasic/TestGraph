@@ -4,7 +4,7 @@ import uuid
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import or_, select
+from sqlalchemy import distinct, func, or_, select
 from sqlalchemy.orm import Session
 
 from app.core.security import Principal, require_scope
@@ -24,6 +24,65 @@ PageLimit = Annotated[int, Query(ge=1, le=100)]
 @router.get("/vocabulary")
 def vocabulary(db: Session = Depends(get_db)):
     return vocabulary_index(db)
+
+
+@router.get("/public/experiences")
+def public_experiences(limit: PageLimit = 20, db: Session = Depends(get_db)):
+    """Return a deliberately small, sanitised view of explicitly public V2 data."""
+    public_filter = (
+        V2Experience.deleted_at.is_(None),
+        V2Experience.publication_status == "published",
+        V2Experience.visibility == "public",
+    )
+    rows = db.execute(
+        select(V2Experience, V2Subject, SubjectType)
+        .join(V2Subject, V2Experience.subject_id == V2Subject.id)
+        .join(SubjectType, V2Subject.subject_type_id == SubjectType.id)
+        .where(*public_filter, V2Subject.deleted_at.is_(None))
+        .order_by(V2Experience.created_at.desc())
+        .limit(limit)
+    ).all()
+    experience_ids = [experience.id for experience, _, _ in rows]
+    assessments = (
+        list(db.scalars(
+            select(Assessment)
+            .where(Assessment.experience_id.in_(experience_ids))
+            .order_by(Assessment.created_at)
+        ).all())
+        if experience_ids else []
+    )
+    assessments_by_experience: dict[uuid.UUID, list[dict]] = {}
+    for assessment in assessments:
+        assessments_by_experience.setdefault(assessment.experience_id, []).append({
+            "assessment_type": assessment.assessment_type,
+            "conclusion": assessment.conclusion,
+            "confidence": assessment.confidence,
+            "source_model": assessment.source_model,
+        })
+    public_experience_ids = select(V2Experience.id).where(*public_filter)
+    return {
+        "counts": {
+            "experiences": db.scalar(select(func.count()).select_from(V2Experience).where(*public_filter)) or 0,
+            "subjects": db.scalar(select(func.count(distinct(V2Experience.subject_id))).where(*public_filter)) or 0,
+            "assessments": db.scalar(select(func.count()).select_from(Assessment).where(
+                Assessment.experience_id.in_(public_experience_ids)
+            )) or 0,
+        },
+        "experiences": [
+            {
+                "subject": {"name": subject.name, "subject_type": subject_type.canonical_name},
+                "headline": experience.headline,
+                "summary": experience.summary,
+                "raw_text": experience.raw_text,
+                "structured_data": experience.structured_data,
+                "experienced_at": experience.experienced_at.isoformat() if experience.experienced_at else None,
+                "created_at": experience.created_at.isoformat(),
+                "assessments": assessments_by_experience.get(experience.id, []),
+            }
+            for experience, subject, subject_type in rows
+        ],
+        "privacy": "Only V2 experiences marked public and published are included.",
+    }
 
 
 @router.get("/subject-types/resolve")
