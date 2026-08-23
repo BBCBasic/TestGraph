@@ -9,6 +9,7 @@ from fastapi import Depends, FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
+from sqlalchemy import text
 from sqlalchemy.orm import Session
 from app.api.routes import router
 from app.api.v2 import router as v2_router
@@ -58,8 +59,25 @@ async def request_context(request:Request,call_next):
 async def value_error_handler(request:Request,exc:ValueError):
     return JSONResponse(status_code=400,content={"error":{"code":"invalid_request","message":str(exc),"details":[],"request_id":request.state.request_id}})
 
+def _landing_page_views(request: Request, db: Session) -> int:
+    user_agent = request.headers.get("user-agent", "").lower()
+    obvious_automation = ("bot", "crawler", "spider", "slurp", "curl", "wget", "uptime", "healthcheck")
+    if any(marker in user_agent for marker in obvious_automation):
+        value = db.scalar(text("SELECT value FROM site_counters WHERE key = 'landing_page_views'"))
+        return int(value or 0)
+    value = db.scalar(text("""
+        INSERT INTO site_counters (key, value, updated_at)
+        VALUES ('landing_page_views', 1, CURRENT_TIMESTAMP)
+        ON CONFLICT (key) DO UPDATE
+        SET value = site_counters.value + 1, updated_at = CURRENT_TIMESTAMP
+        RETURNING value
+    """))
+    db.commit()
+    return int(value or 0)
+
 @app.get("/",response_class=HTMLResponse)
-def home():
+def home(request: Request, db: Session = Depends(get_db)):
+    page_views = _landing_page_views(request, db)
     reset_control = ""
     if reset_enabled():
         reset_control = """<section class="reset"><h2>Development reset</h2><p>Remove reviews, subjects and discovered vocabulary while preserving users, schemas, OAuth connections and API/capability credentials.</p><form method="post" action="/development/reset" onsubmit="return confirm('Permanently reset TestGraph to basics? OAuth connections and API keys will be preserved.');"><button type="submit">Reset database to basics</button></form></section>"""
@@ -110,6 +128,7 @@ h2{{font-size:clamp(28px,4vw,42px);line-height:1.12;letter-spacing:-.03em;margin
 .try-grid span{{color:var(--muted);font-size:14px}}
 .note{{margin-top:26px;padding:18px 20px;border:1px solid #ead7ad;background:#fffaf0;border-radius:12px;color:#684d18}}
 footer{{padding:36px 0 52px;color:var(--muted);font-size:14px}}
+.counter{{display:inline-block;margin-top:9px;padding:3px 8px;border:1px solid var(--line);border-radius:999px;background:var(--soft);font-variant-numeric:tabular-nums}}
 .reset{{margin-top:32px;padding:20px;border:1px solid #e2bcbc;border-radius:12px;background:#fff8f8}}
 .reset h2{{margin-top:0;font-size:24px}}
 .reset button{{padding:11px 16px;background:#a52626;color:white;border:0;border-radius:9px;font-weight:700;cursor:pointer}}
@@ -197,7 +216,7 @@ footer{{padding:36px 0 52px;color:var(--muted);font-size:14px}}
 {reset_control}
 </div></section>
 </main>
-<footer><div class="wrap">TestGraph is an experimental implementation of shared, provenance-aware memory for AI systems. <a href="/api/v2/vocabulary">Vocabulary</a> · <a href="/health/ready">Service health</a> · <a href="/reviews">Legacy review browser</a></div></footer>
+<footer><div class="wrap">TestGraph is an experimental implementation of shared, provenance-aware memory for AI systems. <a href="/api/v2/vocabulary">Vocabulary</a> · <a href="/health/ready">Service health</a> · <a href="/reviews">Legacy review browser</a><br><span class="counter">Approx. human landing-page views: {page_views:,}</span> <span>— no cookies, IP storage or fingerprinting.</span></div></footer>
 </body></html>"""
 
 @app.get("/capability/new", include_in_schema=False)
