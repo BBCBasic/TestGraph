@@ -593,7 +593,7 @@ def test_search_paginates_and_reports_same_name_identity_collision():
 
 def test_deliberation_tools_publish_strict_schemas_and_new_version():
     tools = {tool["name"]: tool for tool in TOOLS}
-    assert SERVER_VERSION == "3.17.0-alpha"
+    assert SERVER_VERSION == "3.19.0-alpha"
     assert {
         "create_deliberation",
         "get_deliberation",
@@ -605,7 +605,7 @@ def test_deliberation_tools_publish_strict_schemas_and_new_version():
     assert tools["create_deliberation"]["inputSchema"]["additionalProperties"] is False
     assert tools["submit_contribution"]["inputSchema"]["properties"][
         "contribution_type"
-    ]["enum"] == ["proposal", "critique", "counterproposal", "reconciliation"]
+    ]["enum"] == ["proposal", "critique", "counterproposal", "reconciliation", "vote"]
     assert "user_approved" in tools["record_resolution"]["inputSchema"]["required"]
     assert tools["get_deliberation"]["annotations"]["readOnlyHint"] is True
     assert "cursor" in tools["search"]["inputSchema"]["properties"]

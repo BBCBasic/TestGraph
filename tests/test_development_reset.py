@@ -35,7 +35,7 @@ def test_development_reset_page_has_single_confirmed_action(client, monkeypatch)
     page = client.get("/development/reset")
     assert page.status_code == 200
     assert "Reset database to basics" in page.text
-    assert "Permanently reset TasteGraph to basics?" in page.text
+    assert "Permanently reset TestGraph to basics?" in page.text
     assert "reset_token" not in page.text
     assert "confirmation" not in page.text
     assert page.headers["cache-control"] == "no-store"

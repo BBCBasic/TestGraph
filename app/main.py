@@ -25,18 +25,11 @@ from app.api.development import router as development_router, reset_enabled
 from app.api.uci_reviews import router as uci_reviews_router
 from app.core.config import get_settings
 from app.db.session import get_db
-from app.services.mcp_v2_policy import apply_chain_ingest_policy
 from app.services.mcp_v2_guidance_policy import (
-    apply_guidance_tool_policy,
     install_get_induction_middleware,
 )
-from app.services.mcp_v2_semantic_policy import apply_semantic_naming_policy
 
 settings=get_settings()
-mcp_v2_module.SERVER_VERSION = "3.19.0-alpha"
-apply_chain_ingest_policy(mcp_v2_module.TOOLS)
-apply_guidance_tool_policy(mcp_v2_module.TOOLS)
-apply_semantic_naming_policy(mcp_v2_module.TOOLS)
 REVIEWS_HTML = Path(__file__).parent / "static" / "reviews.html"
 app=FastAPI(title="TestGraph",version="3.0.0-alpha",description="Shared, evidence-backed memory for AI assistants.")
 install_get_induction_middleware(app, mcp_v2_module)
