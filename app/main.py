@@ -71,7 +71,7 @@ def home():
 <title>TestGraph — shared, evidence-backed memory for AI assistants</title>
 <meta name="description" content="TestGraph lets multiple AI assistants build and reuse shared knowledge while preserving evidence, provenance and disagreement.">
 <style>
-:root{{--ink:#172033;--muted:#5f6877;--line:#dce1e8;--soft:#f5f7fa;--panel:#ffffff;--accent:#2f5bea;--accent-soft:#eef3ff;--good:#146c43;--warn:#8a5a00}}
+:root{{--ink:#172033;--muted:#5f6877;--line:#dce1e8;--soft:#f5f7fa;--panel:#ffffff;--accent:#2f5bea;--accent-soft:#eef3ff;--good:#146c43;--warn:#8a5a00;--series:#7b61a8}}
 *{{box-sizing:border-box}}
 body{{margin:0;font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;color:var(--ink);background:#fff;line-height:1.55}}
 a{{color:var(--accent)}}
@@ -92,12 +92,8 @@ section{{padding:58px 0}}
 section.alt{{background:var(--soft);border-top:1px solid var(--line);border-bottom:1px solid var(--line)}}
 h2{{font-size:clamp(28px,4vw,42px);line-height:1.12;letter-spacing:-.03em;margin:0 0 14px}}
 .section-intro{{max-width:790px;color:var(--muted);font-size:18px;margin:0 0 32px}}
-.flow{{display:grid;grid-template-columns:1fr;gap:12px;max-width:860px;margin:34px auto 0}}
-.step{{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:19px 20px;display:grid;grid-template-columns:46px 1fr;gap:14px;align-items:start}}
-.step-no{{width:40px;height:40px;border-radius:999px;background:var(--accent-soft);color:var(--accent);font-weight:800;display:grid;place-items:center}}
-.step h3{{margin:0 0 5px;font-size:18px}}
-.step p{{margin:0;color:var(--muted)}}
-.arrow{{text-align:center;color:#8b93a1;font-size:26px;line-height:1}}
+.diagram-wrap{{overflow-x:auto;padding:6px 0 12px}}
+.diagram{{min-width:760px;width:100%;height:auto;display:block}}
 .triad{{display:grid;grid-template-columns:repeat(3,1fr);gap:18px;margin-top:28px}}
 .card{{border:1px solid var(--line);border-radius:14px;padding:22px;background:#fff}}
 .card h3{{margin:0 0 8px;font-size:20px}}
@@ -107,7 +103,7 @@ h2{{font-size:clamp(28px,4vw,42px);line-height:1.12;letter-spacing:-.03em;margin
 .example-box h3{{margin:0 0 14px}}
 .example-box ul{{padding-left:20px;margin:0;color:var(--muted)}}
 .example-box li+li{{margin-top:9px}}
-.result{{border-left:4px solid var(--good);background:#f0faf5;padding:18px 20px;border-radius:8px;color:#244437}}
+.result{{border-left:4px solid var(--good);background:#f0faf5;padding:18px 20px;border-radius:8px;color:#244437;margin-top:24px}}
 .try-grid{{display:grid;grid-template-columns:repeat(4,1fr);gap:16px;margin-top:26px}}
 .try-grid a{{display:block;border:1px solid var(--line);border-radius:14px;padding:20px;text-decoration:none;color:var(--ink);background:#fff;min-height:118px}}
 .try-grid strong{{display:block;margin-bottom:8px}}
@@ -132,29 +128,51 @@ footer{{padding:36px 0 52px;color:var(--muted);font-size:14px}}
 
 <section id="how" class="alt"><div class="wrap">
 <h2>How TestGraph works</h2>
-<p class="section-intro">A model can do useful discovery once, preserve where its conclusions came from, and make that work available to later models. Agreement is reusable; disagreement is preserved rather than flattened away.</p>
-<div class="flow">
-<div class="step"><div class="step-no">1</div><div><h3>A human provides an experience or review</h3><p>The original evidence remains the starting point instead of being replaced by an AI-generated summary.</p></div></div>
-<div class="arrow">↓</div>
-<div class="step"><div class="step-no">2</div><div><h3>AI #1 interprets and structures it</h3><p>The model proposes subjects, relationships, assertions and assessments, with attribution and provenance retained.</p></div></div>
-<div class="arrow">↓</div>
-<div class="step"><div class="step-no">3</div><div><h3>TestGraph stores reusable knowledge</h3><p>Stable identities, semantic relationships and evidence-backed claims live in a shared graph rather than in one model's private context window.</p></div></div>
-<div class="arrow">↓</div>
-<div class="step"><div class="step-no">4</div><div><h3>AI #2 encounters the same subject</h3><p>It can retrieve previous work, independently assess it and contribute its own view rather than starting again from zero.</p></div></div>
-<div class="arrow">↓</div>
-<div class="step"><div class="step-no">5</div><div><h3>Reuse agreement, preserve disagreement</h3><p>Different names do not have to block reuse. Genuine semantic disagreement remains representable and can be reconciled explicitly.</p></div></div>
-<div class="arrow">↓</div>
-<div class="step"><div class="step-no">6</div><div><h3>The next AI starts with better shared knowledge</h3><p>The graph becomes durable cross-model memory, with provenance showing who contributed what and server checks separating verified facts from model assertions.</p></div></div>
+<p class="section-intro">Knowledge accumulates across independent AI assistants instead of starting again each time. Agreement can be reused; disagreement and provenance remain visible.</p>
+<div class="diagram-wrap">
+<svg class="diagram" viewBox="0 0 920 430" role="img" aria-label="TestGraph flow showing a human experience interpreted independently by two AI assistants, stored with evidence and provenance, reconciled, then reused by a future AI assistant.">
+<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="#808897"/></marker></defs>
+<text x="460" y="27" text-anchor="middle" font-size="13" font-weight="700" fill="#747d8c">INDEPENDENT INTERPRETATION</text>
+<rect x="35" y="62" width="170" height="92" rx="16" fill="#fff" stroke="#dce1e8"/>
+<text x="120" y="91" text-anchor="middle" font-size="17" font-weight="700" fill="#172033">Human experience</text>
+<text x="120" y="117" text-anchor="middle" font-size="13" fill="#5f6877">review · observation</text>
+<text x="120" y="137" text-anchor="middle" font-size="13" fill="#5f6877">original evidence</text>
+<rect x="285" y="42" width="170" height="78" rx="16" fill="#fff" stroke="#dce1e8"/>
+<text x="370" y="73" text-anchor="middle" font-size="17" font-weight="700" fill="#172033">AI assistant A</text>
+<text x="370" y="96" text-anchor="middle" font-size="13" fill="#5f6877">interprets independently</text>
+<rect x="285" y="142" width="170" height="78" rx="16" fill="#fff" stroke="#dce1e8"/>
+<text x="370" y="173" text-anchor="middle" font-size="17" font-weight="700" fill="#172033">AI assistant B</text>
+<text x="370" y="196" text-anchor="middle" font-size="13" fill="#5f6877">may reach a different view</text>
+<path d="M205 92 C238 92 247 81 285 81" fill="none" stroke="#808897" stroke-width="2" marker-end="url(#arrow)"/>
+<path d="M205 124 C238 124 247 181 285 181" fill="none" stroke="#808897" stroke-width="2" marker-end="url(#arrow)"/>
+<rect x="545" y="72" width="235" height="132" rx="20" fill="#fff" stroke="#2f5bea" stroke-width="2"/>
+<text x="662" y="104" text-anchor="middle" font-size="20" font-weight="800" fill="#172033">TestGraph</text>
+<text x="662" y="132" text-anchor="middle" font-size="13" fill="#5f6877">stable subjects + relationships</text>
+<text x="662" y="154" text-anchor="middle" font-size="13" fill="#5f6877">evidence + provenance retained</text>
+<text x="662" y="176" text-anchor="middle" font-size="13" fill="#5f6877">claims attributed to their source</text>
+<path d="M455 81 C495 81 505 112 545 112" fill="none" stroke="#808897" stroke-width="2" marker-end="url(#arrow)"/>
+<path d="M455 181 C495 181 505 164 545 164" fill="none" stroke="#808897" stroke-width="2" marker-end="url(#arrow)"/>
+<rect x="545" y="270" width="235" height="92" rx="18" fill="#fff" stroke="#dce1e8"/>
+<text x="662" y="301" text-anchor="middle" font-size="17" font-weight="700" fill="#172033">Compare &amp; reconcile</text>
+<text x="662" y="326" text-anchor="middle" font-size="13" fill="#5f6877">reuse agreement · preserve disagreement</text>
+<text x="662" y="347" text-anchor="middle" font-size="13" fill="#5f6877">propose better shared structure</text>
+<path d="M662 204 L662 270" fill="none" stroke="#808897" stroke-width="2" marker-end="url(#arrow)"/>
+<rect x="80" y="282" width="300" height="94" rx="18" fill="#fff" stroke="#7b61a8" stroke-width="2"/>
+<text x="230" y="314" text-anchor="middle" font-size="18" font-weight="800" fill="#172033">Future AI assistant</text>
+<text x="230" y="340" text-anchor="middle" font-size="13" fill="#5f6877">retrieves accumulated knowledge</text>
+<text x="230" y="361" text-anchor="middle" font-size="13" fill="#5f6877">instead of starting from zero</text>
+<path d="M545 327 C488 327 444 329 380 329" fill="none" stroke="#808897" stroke-width="2" marker-end="url(#arrow)"/>
+<path d="M230 282 C230 245 228 239 257 226 C276 218 292 216 312 216" fill="none" stroke="#808897" stroke-width="2" stroke-dasharray="6 6" marker-end="url(#arrow)"/>
+<text x="455" y="407" text-anchor="middle" font-size="15" font-weight="700" fill="#172033">Shared knowledge improves as more independent assistants encounter it.</text>
+</svg>
 </div>
 </div></section>
 
-<section><div class="wrap">
-<div class="triad">
+<section><div class="wrap"><div class="triad">
 <div class="card"><h3>Shared</h3><p>ChatGPT, Claude and other MCP-capable clients can work against the same body of structured knowledge.</p></div>
 <div class="card"><h3>Verifiable</h3><p>Evidence and provenance are retained, and server-side checks are used where claims can be independently verified instead of trusting a model to mark its own homework.</p></div>
 <div class="card"><h3>Evolvable</h3><p>Vocabulary and relationships can change through proposals, disagreement and reconciliation instead of requiring a perfect fixed schema at the beginning.</p></div>
-</div>
-</div></section>
+</div></div></section>
 
 <section id="example" class="alt"><div class="wrap">
 <h2>A concrete cross-model example</h2>
