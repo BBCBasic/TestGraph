@@ -1,0 +1,29 @@
+name: Clean remaining pre-release branches
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - '.github/workflows/cleanup-old-branches.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+      - name: Delete all remote branches except master
+        shell: bash
+        run: |
+          set -euo pipefail
+          mapfile -t branches < <(git ls-remote --heads origin | awk '{sub("refs/heads/", "", $2); if ($2 != "master") print $2}')
+          if [ ${#branches[@]} -eq 0 ]; then
+            echo 'No old branches remain.'
+            exit 0
+          fi
+          printf 'Deleting %s old branches\n' "${#branches[@]}"
+          git push origin --delete "${branches[@]}"
