@@ -32,6 +32,7 @@ from app.services.mcp_v2_guidance_policy import (
 settings=get_settings()
 REVIEWS_HTML = Path(__file__).parent / "static" / "reviews.html"
 DELIBERATIONS_HTML = Path(__file__).parent / "static" / "deliberations.html"
+LIVE_HTML = Path(__file__).parent / "static" / "live.html"
 app=FastAPI(title="TestGraph",version="3.0.0-alpha",description="Shared, evidence-backed memory for AI assistants.")
 install_get_induction_middleware(app, mcp_v2_module)
 
@@ -134,7 +135,7 @@ footer{{padding:36px 0 52px;color:var(--muted);font-size:14px}}
 </style>
 </head>
 <body>
-<header><div class="wrap nav"><a class="brand" href="/">TestGraph</a><nav class="navlinks"><a href="#how">How it works</a><a href="/deliberations">Deliberations</a><a href="#example">Example</a><a href="#try">Try it</a><a href="/docs">API docs</a></nav></div></header>
+<header><div class="wrap nav"><a class="brand" href="/">TestGraph</a><nav class="navlinks"><a href="#how">How it works</a><a href="/live">Live data</a><a href="/deliberations">Deliberations</a><a href="#example">Example</a><a href="#try">Try it</a><a href="/docs">API docs</a></nav></div></header>
 <main>
 <section class="hero"><div class="wrap">
 <div class="kicker">Experimental open-source infrastructure for AI</div>
@@ -207,6 +208,7 @@ footer{{padding:36px 0 52px;color:var(--muted);font-size:14px}}
 <h2>Explore TestGraph</h2>
 <p class="section-intro">TestGraph is experimental. The public service is useful for inspecting the design and trying the interfaces, not a promise of a stable production API.</p>
 <div class="try-grid">
+<a href="/live"><strong>Explore live V2 data</strong><span>See the current vocabulary graph and deliberately published experiences.</span></a>
 <a href="/mcp-v2"><strong>Connect through MCP</strong><span>Use the current MCP v2 endpoint with a compatible AI client.</span></a>
 <a href="/capability/new"><strong>Create a private capability</strong><span>Generate a private URL for direct TestGraph access. Treat it as a credential.</span></a>
 <a href="https://github.com/BBCBasic/TestGraph"><strong>Read the source</strong><span>AGPL-3.0 source, release notes, tests and implementation details on GitHub.</span></a>
@@ -264,6 +266,9 @@ def review_browser(): return FileResponse(REVIEWS_HTML)
 
 @app.get("/deliberations", response_class=FileResponse, include_in_schema=False)
 def deliberations_page(): return FileResponse(DELIBERATIONS_HTML)
+
+@app.get("/live", response_class=FileResponse, include_in_schema=False)
+def live_page(): return FileResponse(LIVE_HTML)
 
 @app.get("/tools/recipe-reviews", include_in_schema=False)
 def recipe_review_browser(): return RedirectResponse(url="/tools/recipe-reviews/view", status_code=307)
