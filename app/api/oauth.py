@@ -165,32 +165,73 @@ def authorization_server_metadata():
 
 @router.post("/oauth/register", status_code=201)
 async def register_client(request: Request, db: Session = Depends(get_db)):
-    body = await request.json()
+    """RFC 7591 dynamic client registration for public MCP clients.
+
+    Claude and other MCP clients are strict about the registration response
+    matching the metadata they submitted, so preserve supported requested
+    grant/response types and scope instead of returning broader defaults.
+    """
+    try:
+        body = await request.json()
+    except Exception as exc:
+        raise HTTPException(400, "OAuth client registration body must be JSON") from exc
+    if not isinstance(body, dict):
+        raise HTTPException(400, "OAuth client registration body must be a JSON object")
+
     redirect_uris = body.get("redirect_uris") or []
     if not isinstance(redirect_uris, list) or not redirect_uris or len(redirect_uris) > 10:
         raise HTTPException(400, "redirect_uris is required")
+    if not all(isinstance(uri, str) and uri for uri in redirect_uris):
+        raise HTTPException(400, "redirect_uris must contain non-empty strings")
     for uri in redirect_uris:
         _validate_redirect_uri(uri)
+
     method = body.get("token_endpoint_auth_method", "none")
     if method != "none":
         raise HTTPException(400, "Only public OAuth clients are supported")
+
+    grant_types = body.get("grant_types", ["authorization_code", "refresh_token"])
+    if not isinstance(grant_types, list) or not grant_types:
+        raise HTTPException(400, "grant_types must be a non-empty array")
+    if "authorization_code" not in grant_types or any(
+        grant not in {"authorization_code", "refresh_token"} for grant in grant_types
+    ):
+        raise HTTPException(400, "Unsupported OAuth grant type")
+
+    response_types = body.get("response_types", ["code"])
+    if not isinstance(response_types, list) or response_types != ["code"]:
+        raise HTTPException(400, "Only response_types=[\"code\"] is supported")
+
+    requested_scope = body.get("scope")
+    registered_scope = _validate_scope(str(requested_scope)) if requested_scope else None
+    client_name = body.get("client_name", "MCP client")
+    if not isinstance(client_name, str) or not client_name.strip():
+        client_name = "MCP client"
+
     client = OAuthClient(
         client_id=f"tg_{secrets.token_urlsafe(24)}",
         redirect_uris=redirect_uris,
-        client_name=body.get("client_name", "MCP client"),
+        client_name=client_name.strip(),
         token_endpoint_auth_method="none",
     )
     db.add(client)
     db.commit()
-    return {
+    db.refresh(client)
+
+    result = {
         "client_id": client.client_id,
         "client_id_issued_at": int(client.created_at.timestamp()),
         "redirect_uris": redirect_uris,
         "client_name": client.client_name,
         "token_endpoint_auth_method": "none",
-        "grant_types": ["authorization_code", "refresh_token"],
-        "response_types": ["code"],
+        "grant_types": grant_types,
+        "response_types": response_types,
     }
+    if registered_scope:
+        result["scope"] = registered_scope
+    if isinstance(body.get("application_type"), str):
+        result["application_type"] = body["application_type"]
+    return result
 
 
 @router.get("/oauth/authorize", response_class=HTMLResponse)
