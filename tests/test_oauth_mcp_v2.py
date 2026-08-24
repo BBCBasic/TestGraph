@@ -9,6 +9,27 @@ def _rpc(client,path,method,params=None,token=None,call_id=1):
     if params is not None:body["params"]=params
     return client.post(path,headers=headers,json=body)
 
+def test_claude_dynamic_client_registration(client):
+    response=client.post("/oauth/register",json={
+        "redirect_uris":["https://claude.ai/api/mcp/auth_callback"],
+        "client_name":"Claude",
+        "token_endpoint_auth_method":"none",
+        "grant_types":["authorization_code"],
+        "response_types":["code"],
+        "scope":"reviews:read reviews:write",
+        "application_type":"web",
+    })
+    assert response.status_code==201
+    registered=response.json()
+    assert registered["client_id"].startswith("tg_")
+    assert registered["redirect_uris"]==["https://claude.ai/api/mcp/auth_callback"]
+    assert registered["client_name"]=="Claude"
+    assert registered["token_endpoint_auth_method"]=="none"
+    assert registered["grant_types"]==["authorization_code"]
+    assert registered["response_types"]==["code"]
+    assert registered["scope"]=="reviews:read reviews:write"
+    assert registered["application_type"]=="web"
+
 def test_oauth_mcp_v2_resource_flow(client,auth,monkeypatch):
     user=client.post("/api/v1/users",headers=auth,json={"display_name":"OAuth V2 User"}).json()
     monkeypatch.setenv("OAUTH_OWNER_USER_ID",user["id"]);monkeypatch.setenv("OAUTH_CONNECTION_CODE","test-connect-code-v2");get_settings.cache_clear()
