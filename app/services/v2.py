@@ -397,7 +397,9 @@ def _source(db: Session, payload: SourceCreate | None) -> Source | None:
     return obj
 
 
-def create_experience(db: Session, payload: ExperienceCreate, client_id: str) -> V2Experience:
+def create_experience(
+    db: Session, payload: ExperienceCreate, client_id: str, *, commit: bool = True,
+) -> V2Experience:
     if not payload.user_approved:
         raise ValueError("Explicit user approval is required")
     subject = db.get(V2Subject, payload.subject_id)
@@ -433,7 +435,11 @@ def create_experience(db: Session, payload: ExperienceCreate, client_id: str) ->
         },
         created_by_client=client_id,
     )
-    db.add(obj); db.commit(); db.refresh(obj)
+    db.add(obj)
+    if commit:
+        db.commit(); db.refresh(obj)
+    else:
+        db.flush()
     return obj
 
 
