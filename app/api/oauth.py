@@ -11,6 +11,7 @@ from app.core.security import issue_access_token
 from app.db.session import get_db
 from app.models.entities import CapabilityCredential, OAuthAuthorizationCode, OAuthClient, OAuthRefreshToken, User
 from app.services.connection_audit import record_oauth_connection
+from app.api.admin_connections import router as admin_connections_router
 router=APIRouter(); ALLOWED_SCOPES={"reviews:read","reviews:write"}
 def _now(): return datetime.now(timezone.utc)
 def _hash(value:str)->str: return hashlib.sha256(value.encode()).hexdigest()
@@ -131,3 +132,5 @@ async def token(request:Request,db:Session=Depends(get_db)):
  access_token,expires_in=issue_access_token(user_id=user_id,client_id=client_id,scope=scope,resource=resource);refresh_token=_new_refresh(db,client_id=client_id,user_id=user_id,scope=scope,resource=resource)
  if fresh_connection:record_oauth_connection(db,user_id=user_id,client_id=client_id,resource=resource,request_id=request.headers.get("X-Request-ID"))
  db.commit();return {"access_token":access_token,"token_type":"Bearer","expires_in":expires_in,"refresh_token":refresh_token,"scope":scope}
+
+router.include_router(admin_connections_router)
