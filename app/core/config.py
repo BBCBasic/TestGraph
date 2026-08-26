@@ -13,7 +13,6 @@ class ClientCredential(BaseModel):
 
 
 def _default_public_base_url() -> str:
-    """Use Railway's public hostname automatically, while keeping localhost for development."""
     railway_public_domain = os.getenv("RAILWAY_PUBLIC_DOMAIN", "").strip()
     if railway_public_domain:
         return f"https://{railway_public_domain}"
@@ -36,8 +35,15 @@ class Settings(BaseSettings):
     oauth_connection_code: str = "connect-dev"
     oauth_access_token_minutes: int = 60
     oauth_refresh_token_days: int = 30
+    google_client_id: str | None = None
+    google_client_secret: str | None = None
+    google_account_session_hours: int = 12
 
     model_config = SettingsConfigDict(env_file=".env", case_sensitive=False)
+
+    @property
+    def google_login_enabled(self) -> bool:
+        return bool(self.google_client_id and self.google_client_secret)
 
     @field_validator("allowed_hosts", "cors_origins", mode="before")
     @classmethod
@@ -51,8 +57,6 @@ class Settings(BaseSettings):
     def normalize_public_base_url(cls, value):
         railway_public_domain = os.getenv("RAILWAY_PUBLIC_DOMAIN", "").strip()
         if railway_public_domain:
-            # Railway must never advertise localhost to external OAuth/MCP clients,
-            # even if an old PUBLIC_BASE_URL environment variable is still present.
             return f"https://{railway_public_domain}"
         if not isinstance(value, str) or not value.strip():
             return "http://127.0.0.1:8000"
@@ -67,10 +71,7 @@ class Settings(BaseSettings):
         if len(url) >= 2 and url[0] == url[-1] and url[0] in {"'", '"'}:
             url = url[1:-1].strip()
         if "${{" in url or "}}" in url:
-            raise ValueError(
-                "DATABASE_URL contains an unresolved Railway reference; "
-                "add it to the API service with Add Reference -> Postgres -> DATABASE_URL"
-            )
+            raise ValueError("DATABASE_URL contains an unresolved Railway reference; add it to the API service with Add Reference -> Postgres -> DATABASE_URL")
         if url.startswith("postgres://"):
             url = "postgresql+psycopg://" + url.removeprefix("postgres://")
         elif url.startswith("postgresql://"):
