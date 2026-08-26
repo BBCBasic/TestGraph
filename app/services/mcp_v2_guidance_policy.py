@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 
 from fastapi.responses import JSONResponse
 
@@ -38,11 +39,58 @@ GET_INDUCTION_TOOL = {
 }
 
 
+GET_SERVER_INFO_TOOL = {
+    "name": "get_server_info",
+    "title": "Get TestGraph server and deployment version",
+    "description": (
+        "Return the exact TestGraph MCP server version and live deployment identity. Use this to diagnose stale "
+        "MCP connections, endpoint mismatches or clients connected to a different deployment. Compare build_sha "
+        "and deployment_id with the public /version endpoint."
+    ),
+    "inputSchema": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": False,
+    },
+    "annotations": {
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": False,
+    },
+}
+
+
+def _server_info(mcp_module) -> dict:
+    base = mcp_module._base()
+    return {
+        "service": "TestGraph",
+        "api_version": "v2",
+        "server_version": mcp_module.SERVER_VERSION,
+        "protocol_version": mcp_module.PROTOCOL_VERSION,
+        "build_sha": os.getenv("RAILWAY_GIT_COMMIT_SHA") or os.getenv("GIT_COMMIT_SHA") or "unknown",
+        "deployment_id": os.getenv("RAILWAY_DEPLOYMENT_ID") or "unknown",
+        "service_id": os.getenv("RAILWAY_SERVICE_ID") or "unknown",
+        "environment": os.getenv("RAILWAY_ENVIRONMENT_NAME") or os.getenv("RAILWAY_ENVIRONMENT") or "unknown",
+        "mcp_endpoint": f"{base}/mcp-v2",
+        "version_endpoint": f"{base}/version",
+    }
+
+
 def apply_guidance_tool_policy(tools: list[dict]) -> None:
     by_name = {item.get("name"): item for item in tools}
+    read_template = by_name.get("fetch") or by_name.get("search") or {}
+
+    if "get_server_info" not in by_name:
+        tool = dict(GET_SERVER_INFO_TOOL)
+        if "securitySchemes" in read_template:
+            tool["securitySchemes"] = read_template["securitySchemes"]
+        if "_meta" in read_template:
+            tool["_meta"] = read_template["_meta"]
+        tools.insert(0, tool)
+
     if "get_induction" not in by_name:
         # Match the read security metadata already used by the other read-only MCP tools.
-        read_template = by_name.get("fetch") or by_name.get("search") or {}
         tool = dict(GET_INDUCTION_TOOL)
         if "securitySchemes" in read_template:
             tool["securitySchemes"] = read_template["securitySchemes"]
@@ -85,6 +133,9 @@ def apply_guidance_tool_policy(tools: list[dict]) -> None:
 def install_get_induction_middleware(app, mcp_module) -> None:
     @app.middleware("http")
     async def governed_induction(request, call_next):
+        if request.method == "GET" and request.url.path == "/version":
+            return JSONResponse(_server_info(mcp_module))
+
         if request.method != "POST" or request.url.path != "/mcp-v2":
             return await call_next(request)
 
@@ -95,7 +146,10 @@ def install_get_induction_middleware(app, mcp_module) -> None:
             body = {}
 
         params = body.get("params") or {}
-        if body.get("method") != "tools/call" or params.get("name") != "get_induction":
+        method = body.get("method")
+        tool_name = params.get("name")
+        intercepted = method == "tools/call" and tool_name in {"get_induction", "get_server_info"}
+        if not intercepted:
             # Reading the body in middleware must not starve the downstream MCP handler.
             sent = False
 
@@ -116,7 +170,9 @@ def install_get_induction_middleware(app, mcp_module) -> None:
         except TokenError as exc:
             result = mcp_module._auth_error(str(exc))
         else:
-            if principal.user_id is None:
+            if tool_name == "get_server_info":
+                result = mcp_module._result(_server_info(mcp_module))
+            elif principal.user_id is None:
                 result = mcp_module._error("Authenticated TestGraph user is required")
             else:
                 with SessionLocal() as db:
