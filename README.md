@@ -1,95 +1,184 @@
 # TestGraph
 
-**Experimental AI-native experience graph for shared, verifiable memory across AI assistants.**
+## Can independent AIs build shared knowledge without silently overwriting each other?
 
-> **Status:** working pre-release research system. The architecture and MCP workflows have been exercised with multiple AI clients, but the project is not yet presented as a stable production service or API.
+**TestGraph is an experimental shared knowledge and experience graph for AI assistants.** It lets independent AI clients contribute to the same graph while preserving the original human evidence, model attribution, disagreement, confidence and the path by which a conclusion was reached.
 
-TestGraph stores human reviews and AI-derived structure as durable graph knowledge while keeping evidence, provenance and server-verifiable execution separate from model claims. It is designed so that different AI systems can contribute to and reuse the same knowledge without requiring a complete domain schema in advance.
+> **Status:** working pre-release research system. TestGraph has been exercised through MCP with multiple AI clients, including cross-model classification, retrieval, assessment and deliberation. It is not yet presented as a stable production service or API.
 
-## Project goals
+The central question is not simply whether an AI can remember something. It is:
 
-1. **Schema emergence:** Give several AIs unfamiliar experiences and obtain a useful structure without designing the categories beforehand.
-2. **Controlled disagreement:** Conflicting classifications converge through evidence, confidence and server rules instead of flip-flopping.
-3. **Truthful execution:** Models cannot claim that discovery, enrichment or reconciliation happened unless the server can verify it.
-4. **Calling-AI capability:** TestGraph deliberately uses the calling AI as its semantic and discovery engine. The AI should apply its available reasoning, retrieval and tool capabilities to unfamiliar subjects, derive useful structure and relationships, and reconcile evidence without waiting for TestGraph to prescribe a domain-specific form. TestGraph provides stable graph primitives, persistence and server-side verification; the calling AI provides the open-ended intelligence.
+> **Can multiple independent AIs accumulate reusable knowledge, disagree without destroying each other's conclusions, and eventually reach justified convergence with an audit trail of why?**
 
-These goals are acceptance criteria for TestGraph's architecture and tests, not merely guidance for individual AI clients.
+## The experiment
 
-## Standard vocabulary model
+A human observation can be interpreted independently by different AI systems:
 
-Reviews are stored against stable `subject_type_id` values, not DNS-style concept paths. Flexible input is resolved through canonical subject types and globally unique aliases; case, punctuation, possessives and ordinary plurals are normalised mechanically. Unknown types may be created as provisional entries after dictionary lookup.
+```text
+Human evidence
+     |
+     +---- AI A ---- "ferry belongs_to transportation"
+     |
+     +---- AI B ---- "ferry belongs_to public transport"
+                         |
+                         v
+                    TestGraph
+                  +-------------+
+                  | evidence    |
+                  | provenance  |
+                  | confidence  |
+                  | disagreement|
+                  | votes       |
+                  | resolution  |
+                  +------+------+ 
+                         |
+                         v
+                reusable shared knowledge
+```
 
-Classification is separate metadata. For example, `ferry belongs_to transportation` improves broad transportation searches but never changes where a ferry review is stored. `review` is the record type, not a vocabulary node. Reusable structured fields have their own stable IDs and aliases and may be attached to multiple subject types.
+TestGraph does not require those models to use identical words before their work can be useful. A naming disagreement can remain a naming disagreement. A substantive semantic disagreement can remain unresolved and attributable until evidence or an explicit resolution justifies convergence.
 
-Migration `0009_flat_standard_vocabulary` deliberately discards the old v2 concept/review data while preserving users, OAuth state, capability credentials and other authentication data.
+The server stores and verifies the process; the calling AI supplies the open-ended semantic reasoning.
 
-## Local setup
+## What TestGraph is investigating
 
-1. Create a Python 3.11+ virtual environment.
-2. Install dependencies:
+1. **Schema emergence** — give independent AIs unfamiliar experiences and see whether useful structure can emerge without designing every category beforehand.
+2. **Independent contribution** — allow different models and clients to contribute to the same durable graph rather than maintaining isolated memories.
+3. **Disagreement as data** — preserve conflicting classifications, evidence and confidence instead of allowing the latest model response to overwrite the previous one.
+4. **Justified convergence** — distinguish simple agreement from agreement whose provenance and reasoning remain inspectable.
+5. **Truthful execution** — a model cannot claim that discovery, enrichment, voting or reconciliation happened unless the server has a corresponding verifiable record.
+6. **Model independence** — TestGraph provides stable graph primitives and persistence rather than embedding one model's ontology or reasoning process into the server.
+
+These are architecture and test goals, not merely prompting instructions.
+
+## How this differs from adjacent systems
+
+TestGraph overlaps with several important areas of current AI infrastructure, but is exploring a different layer.
+
+| Area / system | Primary concern | TestGraph's experimental focus |
+| --- | --- | --- |
+| Agent memory systems such as Mem0 | Remembering useful information for an agent/user | Shared epistemic state contributed to by independent AI clients |
+| Stateful agent systems such as Letta | Persistent agent context and memory | External evidence, attribution, disagreement and cross-model reuse |
+| Temporal knowledge graphs such as Graphiti | Evolving structured knowledge for agents | Independent contributors plus explicit disagreement, deliberation and convergence |
+| Model Context Protocol (MCP) | Interoperability between AI clients and tools/data | A stateful knowledge layer reached through MCP; TestGraph is not a replacement for MCP |
+| Multi-agent frameworks | Coordinating agents to complete tasks | Durable knowledge that survives individual conversations/agents and records how conclusions were reached |
+
+This comparison is about architectural emphasis, not a claim that TestGraph replaces or outperforms those projects.
+
+## Why provenance matters
+
+Convergence alone is weak evidence. Many systems can make several values collapse into one canonical value.
+
+TestGraph is interested in **justified convergence**: retaining enough information to answer questions such as:
+
+- Which human evidence started this conclusion?
+- Which model proposed the classification?
+- Did another model independently agree?
+- Was the disagreement merely terminology or genuinely semantic?
+- What evidence supported a vote or counterproposal?
+- Who or what resolved it?
+- Can a later AI inspect that history rather than trusting an unexplained canonical value?
+
+## Current multi-model work
+
+The project has been exercised with independent AI clients against the same TestGraph instance. Current workflows include:
+
+- storing human reviews/experiences with provenance;
+- independent subject classification and enrichment;
+- discovering and proposing new vocabulary;
+- retrieving structure created by another AI;
+- model-attributed assessments;
+- deliberations, proposals, critiques and votes;
+- server-recorded resolutions;
+- server-verifiable acceptance criteria;
+- version-aware MCP writes so a stale client cannot silently write against a different deployment.
+
+This is ongoing experimental work. The repository deliberately does **not** claim that cross-model semantic convergence has been solved.
+
+## A simple example
+
+Classification is metadata rather than a storage address. A review of a ferry can remain a `ferry` review while the graph records relationships such as:
+
+```text
+ferry --belongs_to--> transportation
+```
+
+Another AI may propose a more specific or differently named relationship. TestGraph can retain both contributions and their provenance while the disagreement is examined. A later search can still use the useful structure without pretending that unresolved semantic questions have disappeared.
+
+Reviews are stored against stable `subject_type_id` values. Flexible input is resolved through canonical subject types and globally unique aliases; ordinary case, punctuation, possessive and plural differences are normalised mechanically. Reusable structured fields have stable IDs and can be attached to multiple subject types.
+
+## MCP
+
+TestGraph exposes a tool-only MCP application. The current multi-model integration is exercised through `/mcp-v2` using OAuth 2.1 Authorization Code + PKCE.
+
+A connected AI receives a short-lived scoped token; it does not receive the user's private capability key, connection secret or owner identifier.
+
+The MCP surface includes search/fetch/save operations plus graph, assessment, deliberation and reconciliation tools. Because this is a research system, the deployed MCP schema should currently be treated as authoritative.
+
+### Deployment/version safety
+
+Cross-client testing exposed a practical problem: an AI client can retain an older MCP tool definition after the server has changed. TestGraph therefore exposes server/deployment information and requires a live deployment token immediately before protected write operations. A stale or mismatched connection is rejected before data is changed.
+
+This mechanism is itself experimental and is intended to make cross-client testing failures observable rather than ambiguous.
+
+## Architecture
+
+At a high level:
+
+```text
+Human evidence / experience
+          |
+          v
+   Independent AI clients
+   (reasoning + discovery)
+          |
+          v
+        MCP/OAuth
+          |
+          v
+      TestGraph server
+   +--------------------+
+   | stable identities  |
+   | graph relationships|
+   | provenance         |
+   | assessments        |
+   | deliberations      |
+   | verification       |
+   | audit history      |
+   +---------+----------+
+             |
+             v
+       PostgreSQL graph data
+             |
+             v
+      reusable by another AI
+```
+
+Implemented foundations include stable subject-type IDs, canonical terms and aliases, editable relationships, versioned schemas, structured validation, OAuth 2.1 + PKCE, dynamic client registration, scoped credentials, idempotency, provenance, consent/visibility rules, audit events, soft deletion, cross-model assessments and deliberation workflows.
+
+## Try it locally
+
+Requires Python 3.11+.
+
+```bash
+git clone https://github.com/BBCBasic/TestGraph.git
+cd TestGraph
+python -m venv .venv
+```
+
+Activate the virtual environment, then:
 
 ```bash
 pip install -r requirements.txt
-```
-
-3. Copy `.env.example` to `.env` and replace every placeholder secret with a private value.
-4. Run migrations:
-
-```bash
+cp .env.example .env
 alembic upgrade head
-```
-
-5. Seed schemas and demo identities:
-
-```bash
 python -m scripts.seed
-```
-
-6. Start the application:
-
-```bash
 python run.py
 ```
 
-Open `http://127.0.0.1:8000` and `http://127.0.0.1:8000/docs`.
+Open `http://127.0.0.1:8000` or `http://127.0.0.1:8000/docs`.
 
-Do not reuse example or development credentials outside a local development environment. Secrets, API keys, OAuth connection codes and owner identifiers must never be committed to the repository.
-
-## MCP and OAuth
-
-TestGraph includes a tool-only MCP app. The current multi-model integration is exercised through `/mcp-v2`. Its production connection uses OAuth 2.1 Authorization Code + PKCE. A connected AI receives a short-lived scoped token; it does not receive the connection code, API key or TestGraph owner ID.
-
-The MCP surface includes review search/fetch/save operations and the newer graph/reconciliation capabilities used by multi-model experiments. Treat the deployed MCP schema as authoritative because this experimental surface is still evolving.
-
-Before a deployment, configure a long random `OAUTH_CONNECTION_CODE`, set the appropriate `OAUTH_OWNER_USER_ID`, and ensure production secrets exist only in the deployment environment.
-
-## Import the open UCI recipe reviews
-
-After migrations and `python -m scripts.seed`, run:
-
-```bash
-python -m scripts.import_uci_recipe_reviews --representative-reviews 100 --load
-```
-
-This downloads the CC BY 4.0 UCI dataset and chooses one evidence-rich review from each of its 100 recipes. It writes the converted records to `data/uci_recipe_reviews_100.json` and loads them into the configured database. Re-running it is safe: stable source IDs prevent duplicates.
-
-The original review text, 0-5 star score, timestamp, votes, source record ID, licence and attribution are preserved in provenance. The importer interprets explicit statements about flavour, clarity, timing, ingredient availability, difficulty, repeat-worthiness and modifications. Each interpretation retains its supporting source sentence; anything unsupported remains `null`.
-
-To load the checked bundle without downloading or regenerating it:
-
-```bash
-python -m scripts.import_uci_recipe_reviews --load-bundle data/uci_recipe_reviews_100.json
-```
-
-## Development data reset
-
-A guarded reset page is available at `/development/reset`. It is hidden and returns 404 unless explicitly enabled:
-
-```text
-ENABLE_DEVELOPMENT_RESET=true
-```
-
-The page permanently removes v1/v2 review and knowledge data while preserving users, schemas, OAuth connections and capability credentials. **It must remain disabled in a public production deployment.**
+Replace all placeholder secrets in `.env`. Never reuse development/example credentials in a public deployment.
 
 ## Tests
 
@@ -97,65 +186,40 @@ The page permanently removes v1/v2 review and knowledge data while preserving us
 pytest -q
 ```
 
-A public release should not be cut unless the full test suite passes against the release commit and the deployment readiness check succeeds. See `RELEASE_CHECKLIST.md`.
+A public release should not be cut unless the complete test suite passes against the release commit and the deployment readiness checks succeed. See `RELEASE_CHECKLIST.md`.
 
-## Railway deployment
+## Open review dataset
 
-1. Push the repository to GitHub.
-2. Create a Railway project from the GitHub repository.
-3. Add PostgreSQL.
-4. Reference the Postgres service's `DATABASE_URL`; do not paste an unresolved Railway reference as a plain string.
-5. Configure production variables, using unique random secrets:
+TestGraph includes an importer for the UCI recipe-review dataset. It can select representative evidence-rich reviews, retain source attribution/licensing and load them into TestGraph for repeatable experiments.
 
-```text
-ENVIRONMENT=production
-APP_SECRET=<random secret>
-DEVELOPMENT_API_KEY=<long random key; development/admin use only>
-CLIENT_API_KEYS={}
-OAUTH_OWNER_USER_ID=<owner UUID>
-OAUTH_CONNECTION_CODE=<long random connection code>
-PUBLIC_BASE_URL=https://<your-domain>
-ALLOWED_HOSTS=["<your-domain>","<railway-domain>"]
-CORS_ORIGINS=["https://<your-domain>"]
-ENABLE_DEVELOPMENT_RESET=false
+```bash
+python -m scripts.import_uci_recipe_reviews --representative-reviews 100 --load
 ```
 
-`railway.json` configures pre-deploy migrations, Uvicorn startup using Railway's `$PORT`, and readiness checking at `/health/ready`.
+A checked bundle can also be loaded without downloading/regenerating the source dataset:
 
-The application converts Railway's `postgresql://` URL to SQLAlchemy's `postgresql+psycopg://` form because the project uses Psycopg 3. A production deployment that cannot resolve PostgreSQL should stop rather than silently fall back to SQLite.
+```bash
+python -m scripts.import_uci_recipe_reviews --load-bundle data/uci_recipe_reviews_100.json
+```
 
-## Architecture implemented
+## Production/development notes
 
-- Calling-AI capability as the open-ended semantic and discovery engine, with the server as verification/persistence layer
-- Stable flat subject-type IDs
-- Canonical terms and aliases
-- Editable type relationships used for search rather than storage addresses
-- Versioned schema registry
-- Domain-specific Pydantic validation stored as JSON/JSONB
-- Draft-first publication with explicit approval/version
-- Scoped client credentials
-- Central read policy
-- Canonical subject resolution and version-checked draft editing
-- OAuth 2.1 Authorization Code + PKCE, dynamic client registration, refresh-token rotation and scoped access tokens
-- MCP endpoint for authenticated AI access
-- Idempotency keys
-- Provenance, consent, ownership and visibility
-- Pairwise reviewer-reader alignment and reader-specific relevance
-- Audit log and soft deletion
-- Request IDs, consistent JSON errors, request-size limits and pagination-ready endpoints
-- Alembic migrations
-- SQLite locally; PostgreSQL in production
-- Cross-model reconciliation and server-recorded deliberation/assessment workflows
+The reference deployment uses FastAPI, PostgreSQL and Railway. `railway.json` runs migrations before deployment and starts Uvicorn using Railway's assigned port. Production deployments should provide unique secrets, a PostgreSQL `DATABASE_URL`, the public base URL and appropriate host/CORS configuration.
 
-## Safe read and editing rules
+A guarded `/development/reset` facility exists for development environments and must remain disabled in public production deployments (`ENABLE_DEVELOPMENT_RESET=false`). See the source, `SECURITY.md` and `RELEASE_CHECKLIST.md` for operational details.
 
-- Public lists return only experiences that are both `published` and `public`.
-- Exact IDs may also retrieve a published `unlisted` experience.
-- Drafts and private experiences require an appropriate read credential.
-- `aggregate_only` experiences are never returned as individual reviews.
-- Resolve subjects before editing or attaching structured knowledge.
-- Version checks protect concurrent draft editing.
-- Optional client credentials must use unique, revocable secrets and the minimum scopes required.
+## What would be useful to test next?
+
+External criticism is particularly useful around these questions:
+
+- Is explicit cross-model disagreement actually useful, or is ordinary provenance enough?
+- When should naming differences be merged automatically and when should they remain separate?
+- What constitutes convincing evidence that two models reached a conclusion independently?
+- Should convergence be model-voted, server-rule-based, human-approved, or some combination?
+- Which parts belong in a shared knowledge layer and which should remain responsibilities of MCP clients/agent frameworks?
+- How should a graph represent a conclusion that was once accepted but is later contradicted by better evidence?
+
+Issues and experimental counterexamples are welcome.
 
 ## Licence
 
@@ -163,10 +227,10 @@ TestGraph is licensed under the **GNU Affero General Public License v3.0 (`AGPL-
 
 The AGPL permits use, modification and redistribution subject to its terms, including its network-source obligations for modified versions used to provide a network service.
 
-If AGPL-3.0 does not meet your requirements, **alternative commercial or proprietary licensing may be available**. Contact `testgraph@21dle.co.uk` to discuss a separate licence agreement.
+Alternative commercial or proprietary licensing may be available; contact `testgraph@21dle.co.uk`.
 
-Contributors should read `CONTRIBUTING.md`. Contributions are accepted only on terms that preserve the project's ability to offer alternative licences.
+Contributors should read `CONTRIBUTING.md`.
 
-## Before making the repository public
+## Research status
 
-Read `RELEASE_CHECKLIST.md` and `SECURITY.md`. In particular, complete the secret-history review, confirm the public-data boundary, run the complete test suite, and verify a clean deployment from the exact release commit.
+TestGraph should currently be treated as an experiment rather than established infrastructure. Its purpose is to make cross-model knowledge sharing, provenance and disagreement concrete enough to test. Negative results, failed convergence and architectural criticism are therefore useful outcomes, not merely bugs to hide.
