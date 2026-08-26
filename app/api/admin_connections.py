@@ -8,6 +8,7 @@ from fastapi import APIRouter, Depends, Request
 from fastapi.responses import HTMLResponse, Response
 from sqlalchemy.orm import Session
 
+from app.api.account import router as account_router
 from app.core.config import get_settings
 from app.db.session import get_db
 from app.services.connection_audit import recent_oauth_connections
@@ -91,3 +92,7 @@ code{{font-size:12px}}.empty{{padding:30px;text-align:center;color:#6b7280}}.met
 </main></body></html>""",
         headers=headers,
     )
+
+
+# Account/login routes are part of the same human-facing OAuth surface.
+router.include_router(account_router)
