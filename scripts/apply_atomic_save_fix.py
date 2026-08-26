@@ -36,6 +36,13 @@ api = api_path.read_text()
 start = api.index("def _save_experience(")
 end = api.index("\ndef _delete_experience", start)
 segment = api[start:end]
+
+old_order = '''    enrichment_check, check_error = _validate_subject_enrichment_check(\n        args.get("subject_enrichment_check"), args\n    )\n    if check_error is not None:\n        return check_error\n    collection_assessment, collection_error = _validate_collection_assessment(\n        args.get("collection_assessment"), args, enrichment_check, db=db\n    )\n    if collection_error is not None:\n        return collection_error\n    client_id = f"{principal.client_id}:v3"\n    relevant = {k: v for k, v in args.items() if k != "idempotency_key"}\n    payload_hash, prior = begin_idempotent_write(db, client_id=client_id, key=f"experience:{args['idempotency_key']}", payload=relevant)\n    if prior is not None:\n        return _result(prior)\n'''
+new_order = '''    client_id = f"{principal.client_id}:v3"\n    relevant = {k: v for k, v in args.items() if k != "idempotency_key"}\n    payload_hash, prior = begin_idempotent_write(\n        db, client_id=client_id, key=f"experience:{args['idempotency_key']}", payload=relevant\n    )\n    if prior is not None:\n        return _result(prior)\n    enrichment_check, check_error = _validate_subject_enrichment_check(\n        args.get("subject_enrichment_check"), args\n    )\n    if check_error is not None:\n        return check_error\n    collection_assessment, collection_error = _validate_collection_assessment(\n        args.get("collection_assessment"), args, enrichment_check, db=db\n    )\n    if collection_error is not None:\n        return collection_error\n'''
+if segment.count(old_order) != 1:
+    raise RuntimeError("save_experience idempotency ordering did not match expected source")
+segment = segment.replace(old_order, new_order, 1)
+
 old_subject = "        client_id,\n    )\n    context = ensure_subject_context("
 new_subject = "        client_id, commit=False,\n    )\n    context = ensure_subject_context("
 if segment.count(old_subject) != 1:
