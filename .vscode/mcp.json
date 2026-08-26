@@ -1,0 +1,8 @@
+{
+  "servers": {
+    "testgraph": {
+      "type": "http",
+      "url": "https://testgraph.21dle.co.uk/mcp-v2"
+    }
+  }
+}
