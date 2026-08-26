@@ -12,6 +12,7 @@ from app.db.session import get_db
 from app.models.entities import CapabilityCredential, OAuthAuthorizationCode, OAuthClient, OAuthRefreshToken, User
 from app.services.connection_audit import record_oauth_connection
 from app.api.admin_connections import router as admin_connections_router
+from app.api.account import _current_user
 router=APIRouter(); ALLOWED_SCOPES={"reviews:read","reviews:write"}
 def _now(): return datetime.now(timezone.utc)
 def _hash(value:str)->str: return hashlib.sha256(value.encode()).hexdigest()
@@ -96,17 +97,29 @@ async def register_client(request:Request,db:Session=Depends(get_db)):
  if isinstance(body.get("application_type"),str):result["application_type"]=body["application_type"]
  return result
 @router.get("/oauth/authorize",response_class=HTMLResponse)
-def authorize_page(response_type:str,client_id:str,redirect_uri:str,state:str,code_challenge:str,code_challenge_method:str="S256",resource:str="",scope:str="reviews:read reviews:write",db:Session=Depends(get_db)):
+def authorize_page(request:Request,response_type:str,client_id:str,redirect_uri:str,state:str,code_challenge:str,code_challenge_method:str="S256",resource:str="",scope:str="reviews:read reviews:write",use_key:bool=False,db:Session=Depends(get_db)):
  scope=_validate_authorize(db,response_type=response_type,client_id=client_id,redirect_uri=redirect_uri,code_challenge=code_challenge,code_challenge_method=code_challenge_method,resource=resource,scope=scope)
  hidden={"response_type":response_type,"client_id":client_id,"redirect_uri":redirect_uri,"state":state,"code_challenge":code_challenge,"code_challenge_method":code_challenge_method,"resource":resource,"scope":scope}
  fields="".join(f'<input type="hidden" name="{html.escape(k)}" value="{html.escape(v)}">' for k,v in hidden.items())
- return HTMLResponse(f'''<!doctype html><html><head><meta name="viewport" content="width=device-width"><title>Connect TasteGraph</title></head><body><main><h1>Connect TasteGraph</h1><p>Allow this AI app to read your TasteGraph reviews and save a review only after you explicitly approve it.</p><form method="post" action="/oauth/authorize">{fields}<label>Your private TasteGraph capability URL or key<input name="connection_secret" type="password" autocomplete="off" required></label><button type="submit">Connect TasteGraph</button></form><small>The capability is used only by TasteGraph to identify your account. The AI client receives OAuth tokens, not your capability key. Existing private development connection codes are also accepted.</small></main></body></html>''')
+ if not use_key:
+  try:user=_current_user(request,db)
+  except HTTPException:
+   continuation="/oauth/authorize?"+urlencode({**hidden})
+   return RedirectResponse("/account?"+urlencode({"continue":continuation}),status_code=303)
+  client=_client(db,client_id,redirect_uri)
+  client_name=html.escape(client.client_name or "AI client")
+  return HTMLResponse(f'''<!doctype html><html><head><meta name="viewport" content="width=device-width"><title>Connect TestGraph</title><style>body{{font:16px system-ui;max-width:700px;margin:50px auto;padding:0 20px;line-height:1.5;color:#172033}}button{{font:inherit;padding:11px 16px;background:#172033;color:white;border:0;border-radius:8px;cursor:pointer}}.note{{background:#f5f7fa;padding:14px;border-radius:8px}}</style></head><body><p><a href="/account">Your TestGraph account</a></p><h1>Connect {client_name} to TestGraph?</h1><p>This will connect the AI client to your existing TestGraph identity. The AI receives scoped OAuth tokens, not your Google credentials.</p><div class="note">Requested access: <strong>{html.escape(scope)}</strong></div><form method="post" action="/oauth/authorize">{fields}<input type="hidden" name="account_session" value="1"><p><button type="submit">Connect this AI</button></p></form><p><a href="/account">Cancel and return to account</a></p></body></html>''')
+ return HTMLResponse(f'''<!doctype html><html><head><meta name="viewport" content="width=device-width"><title>Connect TestGraph</title><style>body{{font:16px system-ui;max-width:700px;margin:50px auto;padding:0 20px;line-height:1.5;color:#172033}}label{{display:block;margin:18px 0}}input{{display:block;width:100%;max-width:620px;padding:10px;margin-top:7px}}button{{font:inherit;padding:11px 16px;background:#172033;color:white;border:0;border-radius:8px;cursor:pointer}}</style></head><body><p><a href="/account">TestGraph account</a></p><h1>Connect with a capability key</h1><p>This is the original TestGraph connection method. Google is not required.</p><form method="post" action="/oauth/authorize">{fields}<label>Your private TestGraph capability URL or key<input name="connection_secret" type="password" autocomplete="off" required></label><button type="submit">Connect TestGraph</button></form><p><small>The capability is used only by TestGraph to identify your account. The AI client receives OAuth tokens, not your capability key.</small></p></body></html>''')
 @router.post("/oauth/authorize")
 async def authorize_submit(request:Request,db:Session=Depends(get_db)):
  form=await request.form();values={k:str(form.get(k,"")) for k in ("response_type","client_id","redirect_uri","state","code_challenge","code_challenge_method","resource","scope")}
  scope=_validate_authorize(db,response_type=values["response_type"],client_id=values["client_id"],redirect_uri=values["redirect_uri"],code_challenge=values["code_challenge"],code_challenge_method=values["code_challenge_method"],resource=values["resource"],scope=values["scope"])
- supplied=str(form.get("connection_secret",""));user=_connecting_user(db,supplied)
- if not user:return HTMLResponse("<h1>Connection refused</h1><p>The TasteGraph capability URL/key was not recognised.</p>",status_code=401)
+ if str(form.get("account_session",""))=="1":
+  try:user=_current_user(request,db)
+  except HTTPException:return HTMLResponse("<h1>Connection refused</h1><p>Your TestGraph account session has expired. Return to /account and sign in again.</p>",status_code=401)
+ else:
+  supplied=str(form.get("connection_secret",""));user=_connecting_user(db,supplied)
+ if not user:return HTMLResponse("<h1>Connection refused</h1><p>The TestGraph capability URL/key was not recognised.</p>",status_code=401)
  raw_code=secrets.token_urlsafe(48);db.add(OAuthAuthorizationCode(code_hash=_hash(raw_code),client_id=values["client_id"],user_id=user.id,redirect_uri=values["redirect_uri"],code_challenge=values["code_challenge"],scope=scope,resource=values["resource"],expires_at=_now()+timedelta(minutes=10)));db.commit()
  return RedirectResponse(f'{values["redirect_uri"]}?{urlencode({"code":raw_code,"state":values["state"]})}',status_code=303)
 def _new_refresh(db:Session,*,client_id:str,user_id:uuid.UUID,scope:str,resource:str)->str:
