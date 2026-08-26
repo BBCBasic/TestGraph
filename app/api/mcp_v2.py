@@ -2586,6 +2586,13 @@ def _save_experience(db, principal, args):
         return _error("Explicit user approval is required before saving a direct review")
     if principal.user_id is None:
         return _error("Authenticated TasteGraph user is required")
+    client_id = f"{principal.client_id}:v3"
+    relevant = {k: v for k, v in args.items() if k != "idempotency_key"}
+    payload_hash, prior = begin_idempotent_write(
+        db, client_id=client_id, key=f"experience:{args['idempotency_key']}", payload=relevant
+    )
+    if prior is not None:
+        return _result(prior)
     enrichment_check, check_error = _validate_subject_enrichment_check(
         args.get("subject_enrichment_check"), args
     )
@@ -2596,11 +2603,6 @@ def _save_experience(db, principal, args):
     )
     if collection_error is not None:
         return collection_error
-    client_id = f"{principal.client_id}:v3"
-    relevant = {k: v for k, v in args.items() if k != "idempotency_key"}
-    payload_hash, prior = begin_idempotent_write(db, client_id=client_id, key=f"experience:{args['idempotency_key']}", payload=relevant)
-    if prior is not None:
-        return _result(prior)
     subject_type = resolve_subject_type(db, args["subject_type"])
     if not subject_type:
         return _error(
@@ -2627,11 +2629,11 @@ def _save_experience(db, principal, args):
             attributes=args.get("subject_attributes", {}),
             provenance=subject_provenance,
         ),
-        client_id,
+        client_id, commit=False,
     )
     context = ensure_subject_context(
         db, subject, context_payload,
-        client_id=client_id, owner_id=principal.user_id,
+        client_id=client_id, owner_id=principal.user_id, commit=False,
     )
     collection_assessment, collection_reference = _persist_collection_manifest(
         db, collection_assessment, subject, context_payload, context
@@ -2647,7 +2649,7 @@ def _save_experience(db, principal, args):
             subject_enrichment_check=enrichment_check,
             collection_assessment=collection_assessment, source_client=client_id,
         ),
-        client_id,
+        client_id, commit=False,
     )
     body = {
         "saved": True, "experience_id": str(exp.id), "subject_id": str(subject.id),
