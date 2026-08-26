@@ -53,8 +53,6 @@ These are architecture and test goals, not merely prompting instructions.
 
 ## How this differs from adjacent systems
 
-TestGraph overlaps with several important areas of current AI infrastructure, but is exploring a different layer.
-
 | Area / system | Primary concern | TestGraph's experimental focus |
 | --- | --- | --- |
 | Agent memory systems such as Mem0 | Remembering useful information for an agent/user | Shared epistemic state contributed to by independent AI clients |
@@ -65,23 +63,112 @@ TestGraph overlaps with several important areas of current AI infrastructure, bu
 
 This comparison is about architectural emphasis, not a claim that TestGraph replaces or outperforms those projects.
 
+## Identity and capability keys
+
+TestGraph supports **two ways to have an identity**.
+
+### 1. Persistent Google-backed identity — optional
+
+Open:
+
+```text
+https://testgraph.21dle.co.uk/account
+```
+
+Sign in with Google. TestGraph creates or recovers the same internal TestGraph `user_id` each time you return with that Google identity.
+
+From that account you can create as many `tg_...` capability keys as you need for ChatGPT, Claude, another MCP client or disposable testing.
+
+```text
+Google account
+      |
+      v
+persistent TestGraph user_id
+      |
+      +---- tg_ key A ---- ChatGPT
+      +---- tg_ key B ---- Claude
+      +---- tg_ key C ---- test client
+```
+
+Capability keys are stored **hashed**, not in recoverable plaintext. A newly generated `tg_` key is shown once. If you want to reuse it later, store it yourself. If you lose it, sign back in with Google and create another key; the underlying TestGraph identity and data remain unchanged.
+
+Google is therefore an optional **persistent identity/recovery mechanism**, not a requirement for using TestGraph.
+
+### 2. Standalone capability — no Google account required
+
+Open:
+
+```text
+https://testgraph.21dle.co.uk/capability/new
+```
+
+This creates a new standalone TestGraph identity and a private `tg_...` capability URL exactly as before. Keep it safe: without an external identity attached, possession of that capability is what gives access to that TestGraph identity.
+
+## Connecting an AI through MCP
+
+The current remote MCP endpoint is:
+
+```text
+https://testgraph.21dle.co.uk/mcp-v2
+```
+
+Use the **website versions** of ChatGPT or Claude when setting up the connector.
+
+The normal OAuth connection flow is now:
+
+```text
+AI client starts OAuth
+        |
+        v
+TestGraph /account
+        |
+        +---- Sign in with Google
+        |          |
+        |          v
+        |    persistent TestGraph identity
+        |
+        +---- Use existing tg_ capability
+                   |
+                   v
+             existing identity
+        |
+        v
+Confirm "Connect this AI"
+        |
+        v
+OAuth completes and client receives scoped tokens
+```
+
+The AI client receives OAuth access/refresh tokens. It does **not** receive your Google credentials or your private TestGraph capability key.
+
+### ChatGPT
+
+1. Open ChatGPT on the web.
+2. Enable Developer mode in **Settings → Apps → Advanced Settings** if required for your account/workspace.
+3. Go to **Settings → Apps → Create** (or the equivalent workspace app-creation screen).
+4. Enter `https://testgraph.21dle.co.uk/mcp-v2` as the MCP endpoint.
+5. Choose OAuth authentication.
+6. TestGraph opens its account page. Sign in with Google **or** choose the existing-capability route.
+7. Confirm **Connect this AI**.
+8. Complete app creation and start a new chat with TestGraph enabled.
+
+### Claude
+
+1. Open Claude on the web.
+2. Go to **Customize → Connectors**.
+3. Choose **Add custom connector**.
+4. Enter `https://testgraph.21dle.co.uk/mcp-v2`.
+5. Complete OAuth when prompted.
+6. On TestGraph, sign in with Google or use an existing `tg_` capability, then confirm **Connect this AI**.
+7. Enable the connector in a conversation.
+
 ## Why provenance matters
 
-Convergence alone is weak evidence. Many systems can make several values collapse into one canonical value.
-
-TestGraph is interested in **justified convergence**: retaining enough information to answer questions such as:
-
-- Which human evidence started this conclusion?
-- Which model proposed the classification?
-- Did another model independently agree?
-- Was the disagreement merely terminology or genuinely semantic?
-- What evidence supported a vote or counterproposal?
-- Who or what resolved it?
-- Can a later AI inspect that history rather than trusting an unexplained canonical value?
+Convergence alone is weak evidence. TestGraph is interested in **justified convergence**: retaining enough information to answer which human evidence started a conclusion, which model proposed it, whether another model independently agreed, whether disagreement was naming or semantic, what supported a vote or counterproposal, and how a resolution was reached.
 
 ## Current multi-model work
 
-The project has been exercised with independent AI clients against the same TestGraph instance. Current workflows include:
+Current workflows include:
 
 - storing human reviews/experiences with provenance;
 - independent subject classification and enrichment;
@@ -91,39 +178,28 @@ The project has been exercised with independent AI clients against the same Test
 - deliberations, proposals, critiques and votes;
 - server-recorded resolutions;
 - server-verifiable acceptance criteria;
-- version-aware MCP writes so a stale client cannot silently write against a different deployment.
+- version-aware MCP writes so a stale client cannot silently write against a different deployment;
+- optional persistent TestGraph identities with independently revocable capability credentials.
 
 This is ongoing experimental work. The repository deliberately does **not** claim that cross-model semantic convergence has been solved.
 
 ## A simple example
 
-Classification is metadata rather than a storage address. A review of a ferry can remain a `ferry` review while the graph records relationships such as:
+Classification is metadata rather than a storage address. A review of a ferry can remain a `ferry` review while the graph records:
 
 ```text
 ferry --belongs_to--> transportation
 ```
 
-Another AI may propose a more specific or differently named relationship. TestGraph can retain both contributions and their provenance while the disagreement is examined. A later search can still use the useful structure without pretending that unresolved semantic questions have disappeared.
+Another AI may propose a more specific or differently named relationship. TestGraph can retain both contributions and their provenance while the disagreement is examined.
 
-Reviews are stored against stable `subject_type_id` values. Flexible input is resolved through canonical subject types and globally unique aliases; ordinary case, punctuation, possessive and plural differences are normalised mechanically. Reusable structured fields have stable IDs and can be attached to multiple subject types.
+## MCP deployment/version safety
 
-## MCP
+Cross-client testing exposed a practical problem: an AI client can retain an older MCP tool definition after the server has changed. TestGraph exposes server/deployment information and requires a live deployment token immediately before protected write operations. A stale or mismatched connection is rejected before data is changed.
 
-TestGraph exposes a tool-only MCP application. The current multi-model integration is exercised through `/mcp-v2` using OAuth 2.1 Authorization Code + PKCE.
-
-A connected AI receives a short-lived scoped token; it does not receive the user's private capability key, connection secret or owner identifier.
-
-The MCP surface includes search/fetch/save operations plus graph, assessment, deliberation and reconciliation tools. Because this is a research system, the deployed MCP schema should currently be treated as authoritative.
-
-### Deployment/version safety
-
-Cross-client testing exposed a practical problem: an AI client can retain an older MCP tool definition after the server has changed. TestGraph therefore exposes server/deployment information and requires a live deployment token immediately before protected write operations. A stale or mismatched connection is rejected before data is changed.
-
-This mechanism is itself experimental and is intended to make cross-client testing failures observable rather than ambiguous.
+The user-facing error tells the client to refresh or reconnect **TestGraph**, without assuming the user named the connector “V2”.
 
 ## Architecture
-
-At a high level:
 
 ```text
 Human evidence / experience
@@ -154,7 +230,24 @@ Human evidence / experience
       reusable by another AI
 ```
 
-Implemented foundations include stable subject-type IDs, canonical terms and aliases, editable relationships, versioned schemas, structured validation, OAuth 2.1 + PKCE, dynamic client registration, scoped credentials, idempotency, provenance, consent/visibility rules, audit events, soft deletion, cross-model assessments and deliberation workflows.
+Implemented foundations include stable subject-type IDs, canonical terms and aliases, editable relationships, versioned schemas, structured validation, OAuth 2.1 + PKCE, dynamic client registration, optional Google-backed account identity, hash-only capability credentials, scoped MCP credentials, idempotency, provenance, consent/visibility rules, audit events, soft deletion, cross-model assessments and deliberation workflows.
+
+## Google login deployment configuration
+
+Google login is optional. To enable it on a deployment, create a Google **Web application** OAuth client and register this exact redirect URI:
+
+```text
+https://testgraph.21dle.co.uk/account/google/callback
+```
+
+Set these deployment secrets (never commit their values):
+
+```text
+GOOGLE_CLIENT_ID=<Google OAuth client ID>
+GOOGLE_CLIENT_SECRET=<Google OAuth client secret>
+```
+
+Without those variables, standalone `tg_` capability identities continue to work normally.
 
 ## Try it locally
 
@@ -186,17 +279,17 @@ Replace all placeholder secrets in `.env`. Never reuse development/example crede
 pytest -q
 ```
 
-A public release should not be cut unless the complete test suite passes against the release commit and the deployment readiness checks succeed. See `RELEASE_CHECKLIST.md`.
+A public release should not be cut unless the complete test suite passes against the release commit and deployment readiness checks succeed. See `RELEASE_CHECKLIST.md`.
 
 ## Open review dataset
 
-TestGraph includes an importer for the UCI recipe-review dataset. It can select representative evidence-rich reviews, retain source attribution/licensing and load them into TestGraph for repeatable experiments.
+TestGraph includes an importer for the UCI recipe-review dataset:
 
 ```bash
 python -m scripts.import_uci_recipe_reviews --representative-reviews 100 --load
 ```
 
-A checked bundle can also be loaded without downloading/regenerating the source dataset:
+or load the checked bundle:
 
 ```bash
 python -m scripts.import_uci_recipe_reviews --load-bundle data/uci_recipe_reviews_100.json
@@ -204,13 +297,11 @@ python -m scripts.import_uci_recipe_reviews --load-bundle data/uci_recipe_review
 
 ## Production/development notes
 
-The reference deployment uses FastAPI, PostgreSQL and Railway. `railway.json` runs migrations before deployment and starts Uvicorn using Railway's assigned port. Production deployments should provide unique secrets, a PostgreSQL `DATABASE_URL`, the public base URL and appropriate host/CORS configuration.
+The reference deployment uses FastAPI, PostgreSQL and Railway. Production deployments should provide unique secrets, a PostgreSQL `DATABASE_URL`, the public base URL and appropriate host/CORS configuration.
 
-A guarded `/development/reset` facility exists for development environments and must remain disabled in public production deployments (`ENABLE_DEVELOPMENT_RESET=false`). See the source, `SECURITY.md` and `RELEASE_CHECKLIST.md` for operational details.
+A guarded `/development/reset` facility exists for development environments and must remain disabled in public production deployments (`ENABLE_DEVELOPMENT_RESET=false`).
 
 ## What would be useful to test next?
-
-External criticism is particularly useful around these questions:
 
 - Is explicit cross-model disagreement actually useful, or is ordinary provenance enough?
 - When should naming differences be merged automatically and when should they remain separate?
@@ -223,9 +314,7 @@ Issues and experimental counterexamples are welcome.
 
 ## Licence
 
-TestGraph is licensed under the **GNU Affero General Public License v3.0 (`AGPL-3.0`)**. See `LICENSE`.
-
-The AGPL permits use, modification and redistribution subject to its terms, including its network-source obligations for modified versions used to provide a network service.
+TestGraph is licensed under **GNU Affero General Public License v3.0 (`AGPL-3.0`)**. See `LICENSE`.
 
 Alternative commercial or proprietary licensing may be available; contact `testgraph@21dle.co.uk`.
 
@@ -233,4 +322,4 @@ Contributors should read `CONTRIBUTING.md`.
 
 ## Research status
 
-TestGraph should currently be treated as an experiment rather than established infrastructure. Its purpose is to make cross-model knowledge sharing, provenance and disagreement concrete enough to test. Negative results, failed convergence and architectural criticism are therefore useful outcomes, not merely bugs to hide.
+TestGraph should currently be treated as an experiment rather than established infrastructure. Its purpose is to make cross-model knowledge sharing, provenance and disagreement concrete enough to test. Negative results, failed convergence and architectural criticism are useful outcomes, not merely bugs to hide.
