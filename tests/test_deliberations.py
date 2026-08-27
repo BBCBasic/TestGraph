@@ -593,7 +593,7 @@ def test_search_paginates_and_reports_same_name_identity_collision():
 
 def test_deliberation_tools_publish_strict_schemas_and_new_version():
     tools = {tool["name"]: tool for tool in TOOLS}
-    assert SERVER_VERSION == "3.19.0-alpha"
+    assert SERVER_VERSION == "3.20.0-alpha"
     assert {
         "create_deliberation",
         "get_deliberation",
