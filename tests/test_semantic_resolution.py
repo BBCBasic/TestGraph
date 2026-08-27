@@ -180,8 +180,8 @@ def test_new_belongs_to_target_automatically_reclassifies_existing_edge():
         assert retired.retired_by == "second-ai"
         assert "Automatically reclassified" in retired.retired_reason
         assert vocabulary_index(db)["relationships"] == [
-            {"source": "community space", "relationship": "belongs_to", "target": "services"},
-            {"source": "makerspace", "relationship": "belongs_to", "target": "services"},
+            {"source": "community space", "relationship": "belongs_to", "target": "service"},
+            {"source": "makerspace", "relationship": "belongs_to", "target": "service"},
         ]
 
 

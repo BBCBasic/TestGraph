@@ -2,6 +2,15 @@
 
 All notable changes to TestGraph will be documented in this file.
 
+## Unreleased
+
+### Added
+
+- Subject-level classification convergence: one AI creates a candidate and two distinct model identities agreeing on the same strict-descendant type automatically move, confirm, and lock the subject.
+- Persistent classification decision audit records, including model identity, evidence, reason, prior type, target type, and outcome.
+- Explicit, governed reopening for user correction, contradictory evidence, retired types, or vocabulary invalidation; ordinary later disagreement is recorded without reopening a confirmed classification.
+- MCP tools to inspect classification state, propose a refinement, and deliberately reopen a settled classification.
+
 ## v0.1.1 — 2026-08-23
 
 Release-candidate patch following the first public-release tag.

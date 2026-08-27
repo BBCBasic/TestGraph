@@ -103,9 +103,36 @@ class V2Subject(Base):
     identifiers_json: Mapped[dict] = mapped_column(JsonType, default=dict)
     attributes_json: Mapped[dict] = mapped_column(JsonType, default=dict)
     provenance_json: Mapped[dict] = mapped_column(JsonType, default=dict)
+    classification_status: Mapped[str] = mapped_column(String(20), default="provisional", index=True)
+    classification_version: Mapped[int] = mapped_column(default=1)
+    classification_locked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc, onupdate=now_utc)
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class SubjectClassificationDecision(Base):
+    __tablename__ = "subject_classification_decisions"
+    __table_args__ = (
+        UniqueConstraint(
+            "subject_id", "classification_version", "source_model",
+            name="uq_subject_classification_model_version",
+        ),
+    )
+    id: Mapped[uuid.UUID] = mapped_column(UuidType, primary_key=True, default=new_uuid)
+    subject_id: Mapped[uuid.UUID] = mapped_column(
+        UuidType, ForeignKey("v2_subjects.id", ondelete="CASCADE"), index=True,
+    )
+    classification_version: Mapped[int] = mapped_column(default=1, index=True)
+    from_type_id: Mapped[uuid.UUID] = mapped_column(UuidType, ForeignKey("subject_types.id"), index=True)
+    target_type_id: Mapped[uuid.UUID] = mapped_column(UuidType, ForeignKey("subject_types.id"), index=True)
+    source_model: Mapped[str] = mapped_column(String(160), index=True)
+    source_client: Mapped[str] = mapped_column(String(200), default="unknown")
+    reason: Mapped[str] = mapped_column(Text)
+    evidence_json: Mapped[dict] = mapped_column(JsonType, default=dict)
+    evidence_fingerprint: Mapped[str | None] = mapped_column(String(128), index=True)
+    outcome: Mapped[str] = mapped_column(String(30), default="candidate", index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
 
 
 class LocationAssertion(Base):

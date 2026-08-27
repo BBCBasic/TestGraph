@@ -30,6 +30,9 @@ from app.services.deliberation import (
     deliberation_body, get_deliberation, list_open_deliberations,
     record_resolution, submit_contribution,
 )
+from app.services.classification import (
+    classification_state, propose_reclassification, reopen_classification,
+)
 from app.services.location import (
     LocationError, assertion_body, assertions_for_subject, create_location_assertion,
     location_matches, resolve_location_assertion,
@@ -49,7 +52,7 @@ from app.services.write_safety import (
 
 router = APIRouter()
 PROTOCOL_VERSION = "2025-06-18"
-SERVER_VERSION = "3.19.0-alpha"
+SERVER_VERSION = "3.20.0-alpha"
 READ_SECURITY = [{"type": "oauth2", "scopes": ["reviews:read"]}]
 WRITE_SECURITY = [{"type": "oauth2", "scopes": ["reviews:write"]}]
 
@@ -153,6 +156,53 @@ TOOLS = [
             "readOnlyHint": True, "destructiveHint": False,
             "idempotentHint": True, "openWorldHint": False,
         },
+    },
+    {
+        "name": "get_subject_classification",
+        "title": "Get settled subject classification",
+        "description": "Read the current classification state and its decision audit. Confirmed classifications are locked and must not be routinely reassessed.",
+        "inputSchema": {"type": "object", "properties": {"subject_id": {"type": "string", "format": "uuid"}}, "required": ["subject_id"], "additionalProperties": False},
+        **_security(READ_SECURITY),
+        "annotations": {"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
+    },
+    {
+        "name": "propose_subject_reclassification",
+        "title": "Propose a more precise subject type",
+        "description": "Submit one independent AI model's evidence-backed refinement to a strict descendant type. One model creates a candidate; agreement by two distinct models automatically moves the subject, confirms and locks it. A locked subject is not reopened by later opinions.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "subject_id": {"type": "string", "format": "uuid"},
+                "target_subject_type": {"type": "string", "minLength": 1},
+                "source_model": {"type": "string", "minLength": 1, "description": "Stable model identity, not the client application name."},
+                "reason": {"type": "string", "minLength": 1},
+                "evidence": {"type": "object", "additionalProperties": True},
+                "evidence_fingerprint": {"type": "string", "minLength": 1},
+            },
+            "required": ["subject_id", "target_subject_type", "source_model", "reason", "evidence"],
+            "additionalProperties": False,
+        },
+        **_security(WRITE_SECURITY),
+        "annotations": {"readOnlyHint": False, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
+    },
+    {
+        "name": "reopen_subject_classification",
+        "title": "Reopen a locked subject classification",
+        "description": "Reopen a confirmed classification only for a user correction, contradictory new evidence, a retired type, or vocabulary invalidation. Ordinary later disagreement never reopens it.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "subject_id": {"type": "string", "format": "uuid"},
+                "trigger": {"type": "string", "enum": ["user_correction", "contradictory_evidence", "type_retired", "vocabulary_invalidated"]},
+                "reason": {"type": "string", "minLength": 1},
+                "evidence": {"type": "object", "additionalProperties": True},
+                "user_approved": {"type": "boolean", "default": False},
+            },
+            "required": ["subject_id", "trigger", "reason", "evidence"],
+            "additionalProperties": False,
+        },
+        **_security(WRITE_SECURITY),
+        "annotations": {"readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": False},
     },
     {"name": "resolve_subject_hierarchy", "title": "Resolve a semantic subject hierarchy", "description": "Use after vocabulary_index when the specific subject type does not yet exist. Submit terms broad-to-specific, for example ['food','recipe']. The server reuses existing dictionary entries, creates only missing provisional nodes in context, adds belongs_to relationships and rejects cycles. Do not include 'review': review is the record type, not a subject category. Semantic placement must be based on meaning, never on which review arrived first.", "inputSchema": {"type": "object", "properties": {"terms": {"type": "array", "minItems": 1, "maxItems": 8, "items": {"type": "string", "minLength": 1}}}, "required": ["terms"], "additionalProperties": False}, **_security(WRITE_SECURITY), "annotations": {"readOnlyHint": False, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False}},
     {"name": "register_subject_type_alias", "title": "Register a subject-type alias", "description": "Map a genuinely equivalent expression to an existing stable subject type. Never use this to express a category relationship.", "inputSchema": {"type": "object", "properties": {"subject_type": {"type": "string"}, "alias": {"type": "string"}}, "required": ["subject_type", "alias"], "additionalProperties": False}, **_security(WRITE_SECURITY), "annotations": {"readOnlyHint": False, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False}},
@@ -1154,7 +1204,7 @@ def _fetch(db, principal, args):
         return _error("Experience not found")
     e, s, t = row
     assessments = list(db.scalars(select(Assessment).where(Assessment.experience_id == e.id).order_by(Assessment.created_at)).all())
-    return _result({"id": str(e.id), "record_type": e.record_type, "subject": {"id": str(s.id), "name": s.name, "canonical_key": s.canonical_key, "subject_type_id": str(t.id), "subject_type": t.canonical_name, "identifiers": s.identifiers_json, "attributes": s.attributes_json, "provenance": s.provenance_json}, "headline": e.headline, "summary": e.summary, "raw_text": e.raw_text, "structured_data": e.structured_data, "submitted_data": e.submitted_data, "normalization_log": e.normalization_log, "provenance": e.provenance, "assessments": [{"id": str(a.id), "assessment_type": a.assessment_type, "evidence": a.evidence_json, "analysis": a.analysis_json, "conclusion": a.conclusion, "confidence": a.confidence, "provenance": a.provenance} for a in assessments], "location": assertions_for_subject(db, s.id, owner_id=principal.user_id), "created_at": e.created_at.isoformat()})
+    return _result({"id": str(e.id), "record_type": e.record_type, "subject": {"id": str(s.id), "name": s.name, "canonical_key": s.canonical_key, "subject_type_id": str(t.id), "subject_type": t.canonical_name, "classification": classification_state(db, s), "identifiers": s.identifiers_json, "attributes": s.attributes_json, "provenance": s.provenance_json}, "headline": e.headline, "summary": e.summary, "raw_text": e.raw_text, "structured_data": e.structured_data, "submitted_data": e.submitted_data, "normalization_log": e.normalization_log, "provenance": e.provenance, "assessments": [{"id": str(a.id), "assessment_type": a.assessment_type, "evidence": a.evidence_json, "analysis": a.analysis_json, "conclusion": a.conclusion, "confidence": a.confidence, "provenance": a.provenance} for a in assessments], "location": assertions_for_subject(db, s.id, owner_id=principal.user_id), "created_at": e.created_at.isoformat()})
 
 
 
@@ -2895,6 +2945,60 @@ def _save_assessment(db, principal, args):
     return _result(body)
 
 
+def _classification_subject(db, principal, subject_id):
+    try:
+        parsed = uuid.UUID(str(subject_id))
+    except (ValueError, TypeError):
+        return None
+    subject = db.get(V2Subject, parsed)
+    if not subject or subject.deleted_at:
+        return None
+    if subject.owner_id == principal.user_id:
+        return subject
+    experience = db.scalar(select(V2Experience.id).where(
+        V2Experience.subject_id == subject.id,
+        V2Experience.owner_id == principal.user_id,
+        V2Experience.deleted_at.is_(None),
+    ))
+    return subject if experience else None
+
+
+def _get_subject_classification(db, principal, args):
+    subject = _classification_subject(db, principal, args.get("subject_id"))
+    if not subject:
+        return _error("Subject not found")
+    return _result(classification_state(db, subject))
+
+
+def _propose_subject_reclassification(db, principal, args):
+    subject = _classification_subject(db, principal, args.get("subject_id"))
+    if not subject:
+        return _error("Subject not found")
+    return _result(propose_reclassification(
+        db, subject,
+        target_subject_type=args["target_subject_type"],
+        source_model=args["source_model"],
+        source_client=f"{principal.client_id}:v3",
+        reason=args["reason"],
+        evidence=args.get("evidence", {}),
+        evidence_fingerprint=args.get("evidence_fingerprint"),
+    ))
+
+
+def _reopen_subject_classification(db, principal, args):
+    subject = _classification_subject(db, principal, args.get("subject_id"))
+    if not subject:
+        return _error("Subject not found")
+    return _result(reopen_classification(
+        db, subject,
+        trigger=args["trigger"],
+        reason=args["reason"],
+        evidence=args.get("evidence", {}),
+        requested_by=f"{principal.client_id}:v3",
+        user_approved=bool(args.get("user_approved", False)),
+    ))
+
+
 @router.post("/mcp-v2")
 async def mcp_v2(request: Request, db: Session = Depends(get_db)):
     body = await request.json(); rpc_id = body.get("id"); method = body.get("method")
@@ -2908,7 +3012,7 @@ async def mcp_v2(request: Request, db: Session = Depends(get_db)):
         result = {"tools": TOOLS}
     elif method == "tools/call":
         params = body.get("params") or {}; name = params.get("name"); args = params.get("arguments") or {}
-        write_names = {"resolve_subject_hierarchy", "register_subject_type_alias", "set_type_relationship", "retire_type_relationship", "register_field", "enrich_subject", "correct_subject_fact", "save_experience", "delete_experience", "save_assessment", "create_deliberation", "claim_deliberation", "submit_contribution", "record_resolution", "assert_location", "resolve_location_assertion"}
+        write_names = {"resolve_subject_hierarchy", "register_subject_type_alias", "set_type_relationship", "retire_type_relationship", "register_field", "enrich_subject", "correct_subject_fact", "save_experience", "delete_experience", "save_assessment", "create_deliberation", "claim_deliberation", "submit_contribution", "record_resolution", "assert_location", "resolve_location_assertion", "propose_subject_reclassification", "reopen_subject_classification"}
         try:
             principal = _principal(request, "reviews:write" if name in write_names else "reviews:read")
         except TokenError as exc:
@@ -2920,6 +3024,9 @@ async def mcp_v2(request: Request, db: Session = Depends(get_db)):
                 elif name == "vocabulary_index": result = _result(vocabulary_index(db))
                 elif name == "resolve_subject_type": result = _resolve(db, args)
                 elif name == "resolve_subject": result = _resolve_subject(db, args)
+                elif name == "get_subject_classification": result = _get_subject_classification(db, principal, args)
+                elif name == "propose_subject_reclassification": result = _propose_subject_reclassification(db, principal, args)
+                elif name == "reopen_subject_classification": result = _reopen_subject_classification(db, principal, args)
                 elif name == "resolve_subject_hierarchy":
                     hierarchy = resolve_subject_hierarchy(db, args["terms"], created_by=f"{principal.client_id}:v3")
                     result = _result({
