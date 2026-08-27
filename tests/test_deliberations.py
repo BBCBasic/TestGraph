@@ -3,7 +3,7 @@ import uuid
 import pytest
 from sqlalchemy import select
 
-from app.api.mcp_v2 import SERVER_VERSION, TOOLS, _search
+from app.api.mcp_v2 import SERVER_VERSION, TOOLS, _create_deliberation, _search
 from app.core.security import Principal
 from app.db.session import SessionLocal
 from app.models.entities import User
@@ -593,7 +593,7 @@ def test_search_paginates_and_reports_same_name_identity_collision():
 
 def test_deliberation_tools_publish_strict_schemas_and_new_version():
     tools = {tool["name"]: tool for tool in TOOLS}
-    assert SERVER_VERSION == "3.20.0-alpha"
+    assert SERVER_VERSION == "3.20.1-alpha"
     assert {
         "create_deliberation",
         "get_deliberation",
@@ -610,3 +610,25 @@ def test_deliberation_tools_publish_strict_schemas_and_new_version():
     assert tools["get_deliberation"]["annotations"]["readOnlyHint"] is True
     assert "cursor" in tools["search"]["inputSchema"]["properties"]
     assert tools["claim_deliberation"]["annotations"]["readOnlyHint"] is False
+
+
+def test_create_deliberation_accepts_advertised_version_check_transport_field():
+    with SessionLocal() as db:
+        owner = _user(db, "versioned-deliberation-owner")
+        principal = Principal(
+            subject="pytest", client_id="pytest", scopes={"reviews:write"}, user_id=owner.id,
+        )
+        canonical_key = f"version-check:{uuid.uuid4()}"
+        result = _create_deliberation(db, principal, {
+            "canonical_key": canonical_key,
+            "title": "Version checked message",
+            "question": "Can a connector pass the exact advertised schema?",
+            "context": {},
+            "constraints": [],
+            "acceptance_criteria": {},
+            "target_model": "claude",
+            "idempotency_key": f"create:{canonical_key}",
+            "version_check": "a" * 64,
+        })
+        assert result["structuredContent"]["created"] is True
+        assert result["structuredContent"]["canonical_key"] == canonical_key
