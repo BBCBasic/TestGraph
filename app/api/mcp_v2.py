@@ -52,7 +52,7 @@ from app.services.write_safety import (
 
 router = APIRouter()
 PROTOCOL_VERSION = "2025-06-18"
-SERVER_VERSION = "3.20.0-alpha"
+SERVER_VERSION = "3.20.1-alpha"
 READ_SECURITY = [{"type": "oauth2", "scopes": ["reviews:read"]}]
 WRITE_SECURITY = [{"type": "oauth2", "scopes": ["reviews:write"]}]
 
@@ -2754,10 +2754,23 @@ def _require_deliberation_user(principal):
         )
 
 
+def _deliberation_write_payload(args):
+    """Remove transport-only fields before strict deliberation validation.
+
+    The version middleware normally strips version_check. Keeping this boundary here as
+    well makes the handlers safe when an MCP adapter invokes them with the advertised
+    schema unchanged, and prevents deployment tokens from affecting idempotency hashes.
+    """
+    return {
+        key: value for key, value in args.items()
+        if key not in {"idempotency_key", "version_check"}
+    }
+
+
 def _create_deliberation(db, principal, args):
     _require_deliberation_user(principal)
     client_id = f"{principal.client_id}:v3"
-    relevant = {k: v for k, v in args.items() if k != "idempotency_key"}
+    relevant = _deliberation_write_payload(args)
     payload_hash, prior = begin_idempotent_write(
         db, client_id=client_id,
         key=f"deliberation-create:{args['idempotency_key']}", payload=relevant,
@@ -2809,7 +2822,7 @@ def _list_open_deliberations(db, principal, args):
 def _claim_deliberation(db, principal, args):
     _require_deliberation_user(principal)
     client_id = f"{principal.client_id}:v3"
-    relevant = {k: v for k, v in args.items() if k != "idempotency_key"}
+    relevant = _deliberation_write_payload(args)
     payload_hash, prior = begin_idempotent_write(
         db, client_id=client_id,
         key=f"deliberation-claim:{args['idempotency_key']}", payload=relevant,
@@ -2832,7 +2845,7 @@ def _claim_deliberation(db, principal, args):
 def _submit_contribution(db, principal, args):
     _require_deliberation_user(principal)
     client_id = f"{principal.client_id}:v3"
-    relevant = {k: v for k, v in args.items() if k != "idempotency_key"}
+    relevant = _deliberation_write_payload(args)
     payload_hash, prior = begin_idempotent_write(
         db, client_id=client_id,
         key=f"deliberation-contribution:{args['idempotency_key']}", payload=relevant,
@@ -2859,7 +2872,7 @@ def _submit_contribution(db, principal, args):
 def _record_resolution(db, principal, args):
     _require_deliberation_user(principal)
     client_id = f"{principal.client_id}:v3"
-    relevant = {k: v for k, v in args.items() if k != "idempotency_key"}
+    relevant = _deliberation_write_payload(args)
     payload_hash, prior = begin_idempotent_write(
         db, client_id=client_id,
         key=f"deliberation-resolution:{args['idempotency_key']}", payload=relevant,

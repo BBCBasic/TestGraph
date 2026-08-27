@@ -63,7 +63,7 @@ def _source(reference="official listing"):
 
 def test_location_tools_are_published():
     names = {tool["name"] for tool in TOOLS}
-    assert SERVER_VERSION == "3.20.0-alpha"
+    assert SERVER_VERSION == "3.20.1-alpha"
     assert {"assert_location", "get_location_assertions", "resolve_location_assertion"} <= names
 
 
