@@ -19,6 +19,7 @@ from app.schemas.v2 import (
     AssessmentCreate, ExperienceCreate, FieldEnsure, SourceCreate, SubjectContextEnsure,
     SubjectEnsure,
 )
+from app.services.deliberation import DeliberationError
 
 
 def normalise_term(value: str) -> str:
@@ -230,6 +231,123 @@ def _fill_missing(existing: dict | None, incoming: dict) -> tuple[dict, bool]:
     return merged, bool(added_paths)
 
 
+def _normalise_identity_value(value) -> str:
+    text = str(value).strip().casefold()
+    if text.startswith(("http://", "https://")):
+        text = text.split("#", 1)[0].rstrip("/")
+    return text
+
+
+def _identifier_pairs(value, key: str | None = None) -> set[tuple[str, str]]:
+    pairs: set[tuple[str, str]] = set()
+    if isinstance(value, dict):
+        for item_key, item in value.items():
+            pairs |= _identifier_pairs(item, str(item_key))
+    elif isinstance(value, list):
+        for item in value:
+            pairs |= _identifier_pairs(item, key)
+    elif key is not None and value not in (None, ""):
+        pairs.add((normalise_term(key).replace(" ", "_"), _normalise_identity_value(value)))
+    return pairs
+
+
+def _types_are_related(db: Session, left_id: uuid.UUID, right_id: uuid.UUID) -> bool:
+    if left_id == right_id:
+        return True
+    found = {left_id}
+    frontier = {left_id}
+    while frontier:
+        rows = list(db.scalars(select(TypeRelationship).where(
+            TypeRelationship.relationship == "belongs_to",
+            TypeRelationship.status == "active",
+            TypeRelationship.target_type_id.in_(frontier),
+        )).all())
+        new = {row.source_type_id for row in rows} - found
+        if right_id in new:
+            return True
+        found |= new
+        frontier = new
+    found = {right_id}
+    frontier = {right_id}
+    while frontier:
+        rows = list(db.scalars(select(TypeRelationship).where(
+            TypeRelationship.relationship == "belongs_to",
+            TypeRelationship.status == "active",
+            TypeRelationship.target_type_id.in_(frontier),
+        )).all())
+        new = {row.source_type_id for row in rows} - found
+        if left_id in new:
+            return True
+        found |= new
+        frontier = new
+    return False
+
+
+def _identity_preflight(
+    db: Session, subject_type: SubjectType, payload: SubjectEnsure,
+) -> list[dict]:
+    incoming_identifiers = _identifier_pairs(payload.identifiers)
+    same_name_warnings = []
+    candidates = list(db.scalars(select(V2Subject).where(
+        V2Subject.deleted_at.is_(None),
+    )).all())
+    for candidate in candidates:
+        same_key = candidate.canonical_key == payload.canonical_key
+        shared_identifiers = sorted(
+            incoming_identifiers & _identifier_pairs(candidate.identifiers_json or {})
+        )
+        same_name = candidate.name.strip().casefold() == payload.name.strip().casefold()
+        if same_name and candidate.subject_type_id == subject_type.id and not same_key:
+            same_name_warnings.append({
+                "kind": "identity_collision_warning",
+                "code": "SAME_NAME_TYPE_COLLISION",
+                "subject_id": str(candidate.id),
+                "subject_name": candidate.name,
+                "existing_canonical_key": candidate.canonical_key,
+                "requested_canonical_key": payload.canonical_key,
+                "instruction": "Display-name equality alone does not merge subjects; verify stable identity before future writes.",
+            })
+        if not same_key and not shared_identifiers:
+            continue
+        candidate_type = db.get(SubjectType, candidate.subject_type_id)
+        details = {
+            "existing_subject_id": str(candidate.id),
+            "existing_subject_type": candidate_type.canonical_name if candidate_type else None,
+            "requested_subject_type": subject_type.canonical_name,
+            "canonical_key": payload.canonical_key,
+            "matched_by": [
+                *(["canonical_key"] if same_key else []),
+                *(["durable_identifier"] if shared_identifiers else []),
+            ],
+            "matching_identifiers": [
+                {"key": key, "value": value} for key, value in shared_identifiers
+            ],
+        }
+        if _types_are_related(db, candidate.subject_type_id, subject_type.id):
+            raise DeliberationError(
+                "RECLASSIFICATION_REQUIRED",
+                "Existing subject identity is already stored under a related classification",
+                {
+                    **details,
+                    "instruction": (
+                        "Reuse the existing subject_id and use propose_subject_reclassification when the "
+                        "requested type is a justified refinement. Do not create a second physical subject."
+                    ),
+                },
+            )
+        raise DeliberationError(
+            "SUBJECT_IDENTITY_CONFLICT",
+            "Stable subject identity matches an existing subject under an unrelated classification",
+            {
+                **details,
+                "instruction": (
+                    "Resolve the identity ambiguity explicitly. Do not silently merge or create another subject."
+                ),
+            },
+        )
+    return same_name_warnings
+
+
 def ensure_subject(
     db: Session, payload: SubjectEnsure, client_id: str = "ai-client",
     *, owner_id: uuid.UUID | None = None, commit: bool = True,
@@ -255,12 +373,15 @@ def ensure_subject(
             else:
                 db.flush()
         return obj
+    write_warnings = _identity_preflight(db, subject_type, payload)
     obj = V2Subject(
         subject_type_id=subject_type.id, owner_id=owner_id,
         name=payload.name, canonical_key=payload.canonical_key,
         identifiers_json=payload.identifiers, attributes_json=payload.attributes,
         provenance_json=payload.provenance,
     )
+    if write_warnings:
+        obj._testgraph_write_warnings = write_warnings
     db.add(obj)
     if commit:
         db.commit(); db.refresh(obj)
@@ -397,6 +518,23 @@ def _source(db: Session, payload: SourceCreate | None) -> Source | None:
     return obj
 
 
+def _seconds_apart(left, right) -> float | None:
+    if left is None or right is None:
+        return None
+    try:
+        return abs((left - right).total_seconds())
+    except TypeError:
+        try:
+            return abs((left.replace(tzinfo=None) - right.replace(tzinfo=None)).total_seconds())
+        except (AttributeError, TypeError):
+            return None
+
+
+def _subject_created_with_experience(subject: V2Subject, experience: V2Experience, *, window_seconds: float = 5.0) -> bool:
+    distance = _seconds_apart(subject.created_at, experience.created_at)
+    return distance is not None and distance <= window_seconds
+
+
 def create_experience(
     db: Session, payload: ExperienceCreate, client_id: str, *, commit: bool = True,
 ) -> V2Experience:
@@ -409,6 +547,8 @@ def create_experience(
     canonical_data, log = normalise_data(
         db, subject_type, payload.structured_data, source=client_id,
     )
+    log = list(log)
+    log.extend(getattr(subject, "_testgraph_write_warnings", []))
     source = _source(db, payload.source)
     enrichment_check = (
         payload.subject_enrichment_check.model_dump(mode="json")
@@ -436,10 +576,19 @@ def create_experience(
         created_by_client=client_id,
     )
     db.add(obj)
+    db.flush()
+    if subject.owner_id is None:
+        prior_experience = db.scalar(select(V2Experience.id).where(
+            V2Experience.subject_id == subject.id,
+            V2Experience.id != obj.id,
+            V2Experience.deleted_at.is_(None),
+        ).limit(1))
+        if not prior_experience and _subject_created_with_experience(subject, obj):
+            subject.owner_id = payload.owner_id
+            db.add(subject)
+            db.flush()
     if commit:
         db.commit(); db.refresh(obj)
-    else:
-        db.flush()
     return obj
 
 
@@ -455,6 +604,10 @@ def delete_owned_experience(
     if not experience:
         raise ValueError("Experience not found")
     subject = db.get(V2Subject, experience.subject_id)
+    legacy_created_with_experience = bool(
+        subject and subject.owner_id is None
+        and _subject_created_with_experience(subject, experience)
+    )
     assessment_ids = list(db.scalars(select(Assessment.id).where(
         Assessment.experience_id == experience.id
     )).all())
@@ -463,7 +616,9 @@ def delete_owned_experience(
     db.flush()
 
     subject_deleted = False
-    if delete_orphan_subject and subject and subject.owner_id == owner_id:
+    if delete_orphan_subject and subject and (
+        subject.owner_id == owner_id or legacy_created_with_experience
+    ):
         remaining_experience = db.scalar(select(V2Experience.id).where(
             V2Experience.subject_id == subject.id,
             V2Experience.deleted_at.is_(None),
