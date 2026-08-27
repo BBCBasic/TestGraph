@@ -156,3 +156,57 @@ def test_another_ai_cannot_recreate_a_retired_relationship():
         rows = list(db.scalars(select(TypeRelationship)).all())
         assert len(rows) == 1
         assert rows[0].status == "retired"
+
+
+def test_new_belongs_to_target_automatically_reclassifies_existing_edge():
+    with _new_session() as db:
+        resolve_subject_hierarchy(db, ["transportation", "makerspace"], created_by="first-ai")
+        resolve_subject_hierarchy(db, ["services", "community space"], created_by="seed")
+        makerspace = resolve_subject_type(db, "makerspace")
+        services = resolve_subject_type(db, "services")
+
+        replacement = add_semantic_relationship(
+            db, makerspace, "belongs_to", services, source="second-ai"
+        )
+
+        rows = list(db.scalars(select(TypeRelationship).where(
+            TypeRelationship.source_type_id == makerspace.id,
+            TypeRelationship.relationship == "belongs_to",
+        )).all())
+        assert len(rows) == 2
+        assert replacement.status == "active"
+        assert replacement.target_type_id == services.id
+        retired = next(row for row in rows if row.status == "retired")
+        assert retired.retired_by == "second-ai"
+        assert "Automatically reclassified" in retired.retired_reason
+        assert vocabulary_index(db)["relationships"] == [
+            {"source": "community space", "relationship": "belongs_to", "target": "services"},
+            {"source": "makerspace", "relationship": "belongs_to", "target": "services"},
+        ]
+
+
+def test_automatic_reclassification_refuses_ambiguous_multiple_active_parents():
+    with _new_session() as db:
+        resolve_subject_hierarchy(db, ["root one", "thing"], created_by="seed")
+        root_two = SubjectType(
+            canonical_name="root two", normalized_name="root two", status="provisional", created_by="seed"
+        )
+        root_three = SubjectType(
+            canonical_name="root three", normalized_name="root three", status="provisional", created_by="seed"
+        )
+        db.add_all([root_two, root_three])
+        db.flush()
+        thing = resolve_subject_type(db, "thing")
+        db.add(TypeRelationship(
+            source_type_id=thing.id,
+            relationship="belongs_to",
+            target_type_id=root_two.id,
+            source="legacy",
+            status="active",
+        ))
+        db.commit()
+
+        with pytest.raises(ValueError, match="multiple active belongs_to relationships"):
+            add_semantic_relationship(
+                db, thing, "belongs_to", root_three, source="new-ai"
+            )
