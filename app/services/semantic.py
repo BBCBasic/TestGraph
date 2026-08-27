@@ -39,7 +39,16 @@ def add_semantic_relationship(
     source: str,
     commit: bool = True,
 ) -> TypeRelationship:
-    """Add a relationship while preventing belongs_to cycles."""
+    """Add a relationship while preventing cycles and safely replacing stale classifications.
+
+    ``belongs_to`` is the canonical classification edge in TestGraph. A subject type may
+    have one active parent classification at a time. When an AI later supplies a different
+    parent through the existing ``set_type_relationship`` tool, the old active edge is
+    retired automatically and retained as provenance instead of forcing a human to perform
+    a separate retire-then-add sequence.
+
+    Previously retired exact edges remain tombstoned and cannot be silently recreated.
+    """
     rel = normalise_term(relationship).replace(" ", "_")
     if source_type.id == target_type.id:
         raise ValueError("A subject type cannot relate to itself")
@@ -60,6 +69,32 @@ def add_semantic_relationship(
                 f"'{target_type.canonical_name}'. It cannot be recreated automatically."
             )
         return existing
+
+    # Classification is editable. If an AI supplies a new belongs_to target, retire the
+    # previous active parent automatically while keeping a full audit trail. A database
+    # containing multiple active parents is treated as ambiguous legacy state rather than
+    # guessed at automatically.
+    if rel == "belongs_to":
+        active_parents = list(db.scalars(select(TypeRelationship).where(
+            TypeRelationship.source_type_id == source_type.id,
+            TypeRelationship.relationship == "belongs_to",
+            TypeRelationship.status == "active",
+        )).all())
+        if len(active_parents) > 1:
+            raise ValueError(
+                f"Cannot automatically reclassify '{source_type.canonical_name}': "
+                "multiple active belongs_to relationships already exist. Retire the incorrect edges first."
+            )
+        if active_parents:
+            previous = active_parents[0]
+            previous.status = "retired"
+            previous.retired_reason = (
+                f"Automatically reclassified from the previous belongs_to target by {source}"
+            )
+            previous.retired_by = source
+            previous.retired_at = datetime.now(timezone.utc)
+            db.flush()
+
     obj = TypeRelationship(
         source_type_id=source_type.id,
         relationship=rel,
