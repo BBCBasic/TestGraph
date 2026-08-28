@@ -24,7 +24,7 @@ WRITE_TOOL_NAMES = {
     "retire_type_relationship", "register_field", "enrich_subject", "correct_subject_fact",
     "save_experience", "delete_experience", "save_assessment", "create_deliberation",
     "claim_deliberation", "submit_contribution", "record_resolution", "assert_location",
-    "resolve_location_assertion",
+    "resolve_location_assertion", "propose_subject_reclassification", "reopen_subject_classification",
 }
 
 GET_INDUCTION_TOOL = {
@@ -116,6 +116,15 @@ def apply_guidance_tool_policy(tools: list[dict]) -> None:
         if "version_check" not in required:
             required.append("version_check")
         item["description"] = item.get("description", "") + " VERSION SAFETY: immediately before calling this write, call get_server_info and pass its write_version_token as version_check. The server blocks stale or unchecked writes."
+    enrichment = by_name.get("enrich_subject")
+    if enrichment:
+        enrichment["description"] += (
+            " CLASSIFICATION HAND-OFF: after any successful enrichment that changes the subject or its relationships, "
+            "immediately call get_subject_classification. If the classification is not confirmed and the enriched "
+            "evidence supports a more precise strict-descendant type, call propose_subject_reclassification with this "
+            "model's stable identity, the reason and the enrichment evidence. Do not leave classification convergence "
+            "pending merely because enrichment succeeded."
+        )
     contribution = by_name.get("submit_contribution")
     if contribution:
         enum = contribution.get("inputSchema", {}).get("properties", {}).get("contribution_type", {}).setdefault("enum", [])
