@@ -31,7 +31,7 @@ from app.services.deliberation import (
     record_resolution, submit_contribution,
 )
 from app.services.classification import (
-    classification_state, propose_reclassification, reopen_classification,
+    affirm_classification, classification_state, propose_reclassification, reopen_classification,
 )
 from app.services.location import (
     LocationError, assertion_body, assertions_for_subject, create_location_assertion,
@@ -52,7 +52,7 @@ from app.services.write_safety import (
 
 router = APIRouter()
 PROTOCOL_VERSION = "2025-06-18"
-SERVER_VERSION = "3.20.1-alpha"
+SERVER_VERSION = "3.20.2-alpha"
 READ_SECURITY = [{"type": "oauth2", "scopes": ["reviews:read"]}]
 WRITE_SECURITY = [{"type": "oauth2", "scopes": ["reviews:write"]}]
 
@@ -164,6 +164,25 @@ TOOLS = [
         "inputSchema": {"type": "object", "properties": {"subject_id": {"type": "string", "format": "uuid"}}, "required": ["subject_id"], "additionalProperties": False},
         **_security(READ_SECURITY),
         "annotations": {"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
+    },
+    {
+        "name": "affirm_subject_classification",
+        "title": "Affirm the current subject type",
+        "description": "Submit one independent AI model's evidence-backed agreement with the subject's existing provisional type. Two distinct model identities agreeing on that type automatically confirm and lock it without moving the subject. Use this when the current type is already correct and no stricter descendant is justified.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "subject_id": {"type": "string", "format": "uuid"},
+                "source_model": {"type": "string", "minLength": 1, "description": "Stable model identity, not the client application name."},
+                "reason": {"type": "string", "minLength": 1},
+                "evidence": {"type": "object", "additionalProperties": True},
+                "evidence_fingerprint": {"type": "string", "minLength": 1},
+            },
+            "required": ["subject_id", "source_model", "reason", "evidence"],
+            "additionalProperties": False,
+        },
+        **_security(WRITE_SECURITY),
+        "annotations": {"readOnlyHint": False, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
     },
     {
         "name": "propose_subject_reclassification",
@@ -2998,6 +3017,20 @@ def _propose_subject_reclassification(db, principal, args):
     ))
 
 
+def _affirm_subject_classification(db, principal, args):
+    subject = _classification_subject(db, principal, args.get("subject_id"))
+    if not subject:
+        return _error("Subject not found")
+    return _result(affirm_classification(
+        db, subject,
+        source_model=args["source_model"],
+        source_client=f"{principal.client_id}:v3",
+        reason=args["reason"],
+        evidence=args.get("evidence", {}),
+        evidence_fingerprint=args.get("evidence_fingerprint"),
+    ))
+
+
 def _reopen_subject_classification(db, principal, args):
     subject = _classification_subject(db, principal, args.get("subject_id"))
     if not subject:
@@ -3025,7 +3058,7 @@ async def mcp_v2(request: Request, db: Session = Depends(get_db)):
         result = {"tools": TOOLS}
     elif method == "tools/call":
         params = body.get("params") or {}; name = params.get("name"); args = params.get("arguments") or {}
-        write_names = {"resolve_subject_hierarchy", "register_subject_type_alias", "set_type_relationship", "retire_type_relationship", "register_field", "enrich_subject", "correct_subject_fact", "save_experience", "delete_experience", "save_assessment", "create_deliberation", "claim_deliberation", "submit_contribution", "record_resolution", "assert_location", "resolve_location_assertion", "propose_subject_reclassification", "reopen_subject_classification"}
+        write_names = {"resolve_subject_hierarchy", "register_subject_type_alias", "set_type_relationship", "retire_type_relationship", "register_field", "enrich_subject", "correct_subject_fact", "save_experience", "delete_experience", "save_assessment", "create_deliberation", "claim_deliberation", "submit_contribution", "record_resolution", "assert_location", "resolve_location_assertion", "affirm_subject_classification", "propose_subject_reclassification", "reopen_subject_classification"}
         try:
             principal = _principal(request, "reviews:write" if name in write_names else "reviews:read")
         except TokenError as exc:
@@ -3038,6 +3071,7 @@ async def mcp_v2(request: Request, db: Session = Depends(get_db)):
                 elif name == "resolve_subject_type": result = _resolve(db, args)
                 elif name == "resolve_subject": result = _resolve_subject(db, args)
                 elif name == "get_subject_classification": result = _get_subject_classification(db, principal, args)
+                elif name == "affirm_subject_classification": result = _affirm_subject_classification(db, principal, args)
                 elif name == "propose_subject_reclassification": result = _propose_subject_reclassification(db, principal, args)
                 elif name == "reopen_subject_classification": result = _reopen_subject_classification(db, principal, args)
                 elif name == "resolve_subject_hierarchy":
