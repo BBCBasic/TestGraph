@@ -6,6 +6,7 @@ All notable changes to TestGraph will be documented in this file.
 
 ### Added
 
+- `affirm_subject_classification` lets independent AIs agree with an already-correct provisional type; two distinct model identities now confirm and lock it without forcing a fake reclassification.
 - Subject-level classification convergence: one AI creates a candidate and two distinct model identities agreeing on the same strict-descendant type automatically move, confirm, and lock the subject.
 - Persistent classification decision audit records, including model identity, evidence, reason, prior type, target type, and outcome.
 - Explicit, governed reopening for user correction, contradictory evidence, retired types, or vocabulary invalidation; ordinary later disagreement is recorded without reopening a confirmed classification.

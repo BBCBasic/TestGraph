@@ -12,17 +12,19 @@ def test_enrichment_requires_classification_handoff_guidance():
 
     assert "CLASSIFICATION HAND-OFF" in description
     assert "get_subject_classification" in description
+    assert "affirm_subject_classification" in description
     assert "propose_subject_reclassification" in description
 
 
 def test_classification_writes_use_live_version_safety():
+    assert "affirm_subject_classification" in WRITE_TOOL_NAMES
     assert "propose_subject_reclassification" in WRITE_TOOL_NAMES
     assert "reopen_subject_classification" in WRITE_TOOL_NAMES
 
     tools = deepcopy(TOOLS)
     apply_guidance_tool_policy(tools)
     by_name = {tool["name"]: tool for tool in tools}
-    for name in ("propose_subject_reclassification", "reopen_subject_classification"):
+    for name in ("affirm_subject_classification", "propose_subject_reclassification", "reopen_subject_classification"):
         schema = by_name[name]["inputSchema"]
         assert "version_check" in schema["properties"]
         assert "version_check" in schema["required"]

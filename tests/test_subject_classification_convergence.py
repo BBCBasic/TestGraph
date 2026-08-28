@@ -4,7 +4,7 @@ from sqlalchemy.orm import Session
 
 from app.db.base import Base
 from app.models.v2 import SubjectClassificationDecision, V2Subject
-from app.services.classification import propose_reclassification, reopen_classification
+from app.services.classification import affirm_classification, propose_reclassification, reopen_classification
 from app.services.semantic import resolve_subject_hierarchy
 from app.services.v2 import resolve_subject_type
 
@@ -44,6 +44,17 @@ def _propose(db, subject, model, target="electric car"):
     )
 
 
+def _affirm(db, subject, model):
+    return affirm_classification(
+        db, subject,
+        source_model=model,
+        source_client=f"{model}-client",
+        reason="The existing vehicle classification is supported by the evidence",
+        evidence={"make": "Renault", "model": "Zoe"},
+        evidence_fingerprint="zoe-is-vehicle",
+    )
+
+
 def test_first_ai_creates_candidate_without_moving_subject():
     with _new_session() as db:
         subject = _zoe(db)
@@ -74,6 +85,28 @@ def test_same_model_cannot_supply_both_votes():
         assert first["status"] == second["status"] == "candidate"
         decisions = list(db.scalars(select(SubjectClassificationDecision)).all())
         assert len(decisions) == 1
+
+
+def test_two_distinct_models_can_confirm_current_type_without_moving_subject():
+    with _new_session() as db:
+        subject = _zoe(db)
+        vehicle_id = subject.subject_type_id
+        first = _affirm(db, subject, "gpt-5")
+        assert first["status"] == "candidate"
+        state = _affirm(db, subject, "claude-sonnet")
+        assert state["status"] == "confirmed"
+        assert state["subject_type"] == "vehicle"
+        assert subject.subject_type_id == vehicle_id
+        assert state["locked_at"] is not None
+        assert {d["source_model"] for d in state["active_decisions"]} == {"gpt-5", "claude-sonnet"}
+        assert {d["outcome"] for d in state["active_decisions"]} == {"confirmed"}
+
+
+def test_reclassification_tool_still_rejects_same_type():
+    with _new_session() as db:
+        subject = _zoe(db)
+        with pytest.raises(ValueError, match="affirm_subject_classification"):
+            _propose(db, subject, "gpt-5", target="vehicle")
 
 
 def test_later_disagreement_is_audited_but_does_not_reopen_lock():

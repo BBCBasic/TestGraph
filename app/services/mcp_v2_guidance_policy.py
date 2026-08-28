@@ -24,7 +24,8 @@ WRITE_TOOL_NAMES = {
     "retire_type_relationship", "register_field", "enrich_subject", "correct_subject_fact",
     "save_experience", "delete_experience", "save_assessment", "create_deliberation",
     "claim_deliberation", "submit_contribution", "record_resolution", "assert_location",
-    "resolve_location_assertion", "propose_subject_reclassification", "reopen_subject_classification",
+    "resolve_location_assertion", "affirm_subject_classification", "propose_subject_reclassification",
+    "reopen_subject_classification",
 }
 
 GET_INDUCTION_TOOL = {
@@ -121,9 +122,10 @@ def apply_guidance_tool_policy(tools: list[dict]) -> None:
         enrichment["description"] += (
             " CLASSIFICATION HAND-OFF: after any successful enrichment that changes the subject or its relationships, "
             "immediately call get_subject_classification. If the classification is not confirmed and the enriched "
-            "evidence supports a more precise strict-descendant type, call propose_subject_reclassification with this "
-            "model's stable identity, the reason and the enrichment evidence. Do not leave classification convergence "
-            "pending merely because enrichment succeeded."
+            "evidence supports the current type and no more precise strict descendant is justified, call "
+            "affirm_subject_classification. If a more precise strict-descendant type is supported, call "
+            "propose_subject_reclassification instead. Pass this model's stable identity, the reason and the enrichment "
+            "evidence. Do not leave classification convergence pending merely because enrichment succeeded."
         )
     contribution = by_name.get("submit_contribution")
     if contribution:
