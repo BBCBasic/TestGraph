@@ -90,6 +90,8 @@ class Settings(BaseSettings):
                 raise ValueError("OAUTH_CONNECTION_CODE must be a long private value in production")
             if self.app_secret == "change-me" or len(self.app_secret) < 32:
                 raise ValueError("APP_SECRET must be a long random value in production")
+            if self.development_api_key == "dev-secret" or len(self.development_api_key) < 20:
+                raise ValueError("DEVELOPMENT_API_KEY must be a long private value in production")
         return self
 
 
