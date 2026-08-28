@@ -70,6 +70,7 @@ def classification_state(db: Session, subject: V2Subject) -> dict:
 def propose_reclassification(
     db: Session, subject: V2Subject, *, target_subject_type: str, source_model: str,
     source_client: str, reason: str, evidence: dict, evidence_fingerprint: str | None = None,
+    allow_current_type: bool = False,
 ) -> dict:
     model = source_model.strip()
     if not model:
@@ -93,10 +94,16 @@ def propose_reclassification(
             raise ValueError("This AI model already made a different decision in the current classification round")
         return classification_state(db, subject)
 
-    if subject.classification_status != "confirmed" and not _is_descendant(db, target.id, current.id):
-        raise ValueError(
-            f"'{target.canonical_name}' is not a strict descendant of current type '{current.canonical_name}'"
-        )
+    if subject.classification_status != "confirmed":
+        affirms_current = target.id == current.id
+        if affirms_current and not allow_current_type:
+            raise ValueError(
+                "Use affirm_subject_classification to agree with the current provisional type"
+            )
+        if not affirms_current and not _is_descendant(db, target.id, current.id):
+            raise ValueError(
+                f"'{target.canonical_name}' is not a strict descendant of current type '{current.canonical_name}'"
+            )
 
     decision = SubjectClassificationDecision(
         subject_id=subject.id,
@@ -142,6 +149,27 @@ def propose_reclassification(
     db.commit()
     db.refresh(subject)
     return classification_state(db, subject)
+
+
+def affirm_classification(
+    db: Session, subject: V2Subject, *, source_model: str, source_client: str,
+    reason: str, evidence: dict, evidence_fingerprint: str | None = None,
+) -> dict:
+    """Record an independent AI agreement with the subject's current type."""
+    current = db.get(SubjectType, subject.subject_type_id)
+    if not current:
+        raise ValueError("Current subject type not found")
+    return propose_reclassification(
+        db,
+        subject,
+        target_subject_type=current.canonical_name,
+        source_model=source_model,
+        source_client=source_client,
+        reason=reason,
+        evidence=evidence,
+        evidence_fingerprint=evidence_fingerprint,
+        allow_current_type=True,
+    )
 
 
 def reopen_classification(
