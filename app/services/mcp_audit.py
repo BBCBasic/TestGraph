@@ -37,6 +37,24 @@ def _summarise_payload(value: Any) -> dict:
     return {"redacted_payload": True, "type": type(value).__name__}
 
 
+def compact_mcp_interaction_result(summary: Any) -> dict:
+    """Return a fixed-size summary for interaction-log inspection results."""
+    if not isinstance(summary, dict):
+        return {"type": type(summary).__name__}
+    items = summary.get("items")
+    if isinstance(items, list):
+        item_count = len(items)
+    elif isinstance(items, dict) and items.get("type") == "array":
+        item_count = int(items.get("length") or 0)
+    else:
+        item_count = 0
+    return {
+        "count": summary.get("count", item_count),
+        "items": {"redacted_payload": True, "type": "array", "length": item_count},
+        "privacy": summary.get("privacy"),
+    }
+
+
 def redact_arguments(payload: Any, *, parent_key: str | None = None) -> Any:
     if isinstance(payload, dict):
         result = {}
@@ -58,11 +76,13 @@ def redact_arguments(payload: Any, *, parent_key: str | None = None) -> Any:
     return payload
 
 
-def _result_summary(result: Any) -> dict:
+def _result_summary(result: Any, *, tool_name: str | None = None) -> dict:
     if not isinstance(result, dict):
         return {"type": type(result).__name__}
     structured = result.get("structuredContent")
     if isinstance(structured, dict):
+        if tool_name == "list_my_mcp_interactions":
+            return compact_mcp_interaction_result(structured)
         return redact_arguments(structured)
     summary = {}
     if result.get("isError"):
@@ -101,7 +121,7 @@ def record_mcp_interaction(
             workflow_run_id=workflow_run_id,
             workflow_step=workflow_step,
             arguments_summary=redact_arguments(arguments),
-            result_summary=_result_summary(result),
+            result_summary=_result_summary(result, tool_name=tool_name),
             outcome=outcome,
             latency_ms=latency_ms,
             server_version=server_version,
