@@ -18,6 +18,7 @@ def test_mcp_policy_does_not_add_a_consensus_gate_for_aliases():
         {"name": "resolve_subject_type", "description": "Resolve."},
         {"name": "register_subject_type_alias", "description": "Alias."},
         {"name": "resolve_subject_hierarchy", "description": "Hierarchy."},
+        {"name": "propose_subject_reclassification", "description": "Reclassify."},
         {"name": "set_type_relationship", "description": "Relationship."},
     ]
 
@@ -28,3 +29,10 @@ def test_mcp_policy_does_not_add_a_consensus_gate_for_aliases():
     assert "stable subject-type ID is the identity boundary" in by_name["resolve_subject_type"]["description"]
     assert "Retrieval is deliberately softer than canonical naming" in by_name["search"]["description"]
     assert "semantic assertion, not a naming choice" in by_name["set_type_relationship"]["description"]
+
+    for name in ("vocabulary_index", "resolve_subject_hierarchy", "propose_subject_reclassification", "set_type_relationship"):
+        description = by_name[name]["description"]
+        assert "what a subject fundamentally is" in description
+        assert "Material, arrangement/grouping, state/condition" in description
+        assert "not a simplistic head-noun rule" in description
+        assert "server independently validates structural writes" in description
