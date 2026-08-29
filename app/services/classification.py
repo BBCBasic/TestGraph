@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 from app.models.v2 import (
     SubjectClassificationDecision, SubjectType, TypeRelationship, V2Subject, now_utc,
 )
+from app.services.semantic_head import validate_semantic_type_name
 from app.services.v2 import resolve_subject_type
 
 
@@ -125,7 +126,7 @@ def classification_state(db: Session, subject: V2Subject) -> dict:
 def propose_reclassification(
     db: Session, subject: V2Subject, *, target_subject_type: str, source_model: str,
     source_client: str, reason: str, evidence: dict, evidence_fingerprint: str | None = None,
-    allow_current_type: bool = False,
+    allow_current_type: bool = False, semantic_justification: str | None = None,
 ) -> dict:
     model = source_model.strip()
     if not model:
@@ -135,6 +136,10 @@ def propose_reclassification(
     target = resolve_subject_type(db, target_subject_type)
     if not target:
         raise ValueError(f"Unknown target subject type '{target_subject_type}'")
+    validate_semantic_type_name(
+        target.canonical_name,
+        distinct_class_justification=semantic_justification,
+    )
     current = db.get(SubjectType, subject.subject_type_id)
     if not current:
         raise ValueError("Current subject type not found")
