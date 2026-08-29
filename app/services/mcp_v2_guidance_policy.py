@@ -151,6 +151,9 @@ def _restore_body(request: Request, raw: bytes) -> None:
         sent = True
         return {"type": "http.request", "body": raw, "more_body": False}
 
+    request._body = raw
+    if hasattr(request, "_json"):
+        delattr(request, "_json")
     request._receive = receive
 
 
