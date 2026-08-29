@@ -20,6 +20,7 @@ from app.models.entities import AuditEvent, OAuthAuthorizationCode, OAuthClient
 from app.models.v2 import V2Experience, V2Subject
 from app.services.guidance import get_induction
 from app.services.mcp_audit import record_mcp_interaction
+from app.services.workflow_inspection import list_mcp_interactions, list_workflows
 from app.services.workflows import (
     start_or_resume_enrichment_workflow,
     sync_enrichment_classification_workflow,
@@ -110,6 +111,36 @@ SET_REVIEW_VISIBILITY_TOOL = {
         "additionalProperties": False,
     },
     "annotations": {"readOnlyHint": False, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
+}
+
+LIST_MY_WORKFLOWS_TOOL = {
+    "name": "list_my_workflows",
+    "title": "List my TestGraph workflows",
+    "description": (
+        "List durable server-owned workflow state for the authenticated TestGraph user. "
+        "Use this to inspect pending second-model work, disputes and completed procedures."
+    ),
+    "inputSchema": {
+        "type": "object",
+        "properties": {"limit": {"type": "integer", "minimum": 1, "maximum": 100, "default": 20}},
+        "additionalProperties": False,
+    },
+    "annotations": {"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
+}
+
+LIST_MY_MCP_INTERACTIONS_TOOL = {
+    "name": "list_my_mcp_interactions",
+    "title": "List my MCP interaction audit",
+    "description": (
+        "List the authenticated user's structured, redacted MCP interaction telemetry. "
+        "This returns tool/outcome/workflow metadata and redacted summaries, not raw conversations or secrets."
+    ),
+    "inputSchema": {
+        "type": "object",
+        "properties": {"limit": {"type": "integer", "minimum": 1, "maximum": 200, "default": 50}},
+        "additionalProperties": False,
+    },
+    "annotations": {"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
 }
 
 _VISIBILITIES = {"private", "unlisted", "public", "aggregate_only"}
@@ -233,6 +264,8 @@ def apply_guidance_tool_policy(tools: list[dict]) -> None:
     for definition, template in (
         (GET_SERVER_INFO_TOOL, read_template),
         (GET_INDUCTION_TOOL, read_template),
+        (LIST_MY_WORKFLOWS_TOOL, read_template),
+        (LIST_MY_MCP_INTERACTIONS_TOOL, read_template),
         (LIST_REVIEWS_BY_VISIBILITY_TOOL, read_template),
         (SET_REVIEW_VISIBILITY_TOOL, write_template),
     ):
@@ -568,7 +601,8 @@ def install_get_induction_middleware(app, mcp_module) -> None:
             raw = json.dumps(clean_body, separators=(",", ":")).encode("utf-8")
 
         intercepted = method == "tools/call" and tool_name in {
-            "get_induction", "get_server_info", "list_reviews_by_visibility", "set_review_visibility"
+            "get_induction", "get_server_info", "list_reviews_by_visibility", "set_review_visibility",
+            "list_my_workflows", "list_my_mcp_interactions",
         }
         if intercepted:
             rpc_id = body.get("id")
@@ -588,6 +622,14 @@ def install_get_induction_middleware(app, mcp_module) -> None:
                 elif tool_name == "set_review_visibility":
                     with SessionLocal() as db:
                         result = _set_review_visibility(db, principal, args)
+                elif tool_name == "list_my_workflows":
+                    with SessionLocal() as db:
+                        rows = list_workflows(db, owner_id=principal.user_id, limit=args.get("limit", 20))
+                    result = mcp_module._result({"count": len(rows), "items": rows})
+                elif tool_name == "list_my_mcp_interactions":
+                    with SessionLocal() as db:
+                        rows = list_mcp_interactions(db, owner_id=principal.user_id, limit=args.get("limit", 50))
+                    result = mcp_module._result({"count": len(rows), "items": rows, "privacy": "structured_redacted_no_raw_conversation"})
                 else:
                     with SessionLocal() as db:
                         induction = get_induction(db, owner_id=principal.user_id, source_model=args.get("source_model"))
