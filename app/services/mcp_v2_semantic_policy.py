@@ -17,6 +17,16 @@ RETRIEVAL_POLICY = (
     "labels, determine identity."
 )
 
+SEMANTIC_HEAD_POLICY = (
+    "Classification vocabulary should represent what a subject fundamentally is. Before creating, selecting, "
+    "relating or proposing a subject type, identify the semantic head and descriptive modifiers. Material, "
+    "arrangement/grouping, state/condition, quantity, colour, size, location and purpose/use normally belong "
+    "in attributes or relationships rather than subject-type names. This is not a simplistic head-noun rule: "
+    "a compound may remain a distinct type when the combined concept has materially different identity, "
+    "behaviour, relationships, classification meaning or realistic retrieval needs. The server independently "
+    "validates structural writes, so client guidance cannot bypass this rule."
+)
+
 
 def _append_description(tool: dict, text: str) -> None:
     current = str(tool.get("description") or "").strip()
@@ -25,11 +35,7 @@ def _append_description(tool: dict, text: str) -> None:
 
 
 def apply_semantic_naming_policy(tools: list[dict]) -> None:
-    """Layer the low-overhead naming/semantic distinction onto MCP tool guidance.
-
-    This intentionally changes guidance rather than adding a consensus gate. Subject-type aliases already
-    resolve to the same stable ID; semantic edges remain independently editable and governable.
-    """
+    """Layer naming, retrieval and semantic-head policy onto MCP tool guidance."""
     by_name = {tool.get("name"): tool for tool in tools}
 
     search = by_name.get("search")
@@ -39,6 +45,7 @@ def apply_semantic_naming_policy(tools: list[dict]) -> None:
     vocabulary = by_name.get("vocabulary_index")
     if vocabulary:
         _append_description(vocabulary, NAMING_POLICY)
+        _append_description(vocabulary, SEMANTIC_HEAD_POLICY)
 
     resolve_type = by_name.get("resolve_subject_type")
     if resolve_type:
@@ -63,6 +70,11 @@ def apply_semantic_naming_policy(tools: list[dict]) -> None:
             "Before creating a new semantic node, distinguish a genuinely different concept from a mere naming "
             "variant. Naming variants should reuse identity; genuine meaning differences may remain separate.",
         )
+        _append_description(hierarchy, SEMANTIC_HEAD_POLICY)
+
+    reclassification = by_name.get("propose_subject_reclassification")
+    if reclassification:
+        _append_description(reclassification, SEMANTIC_HEAD_POLICY)
 
     relationship = by_name.get("set_type_relationship")
     if relationship:
@@ -71,3 +83,4 @@ def apply_semantic_naming_policy(tools: list[dict]) -> None:
             "This is a semantic assertion, not a naming choice. If independent AIs materially disagree about the "
             "meaning of the edge, preserve the disagreement rather than treating alternate labels as proof of it.",
         )
+        _append_description(relationship, SEMANTIC_HEAD_POLICY)
