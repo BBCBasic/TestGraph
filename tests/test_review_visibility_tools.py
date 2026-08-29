@@ -1,10 +1,14 @@
 import uuid
 
-from app.api.mcp_v2 import TOOLS, _list_reviews_by_visibility, _set_review_visibility
+from app.api.mcp_v2 import TOOLS
 from app.core.security import Principal
 from app.db.session import SessionLocal
 from app.models.entities import User
 from app.models.v2 import SubjectType, V2Experience, V2Subject
+from app.services.mcp_v2_guidance_policy import (
+    _list_reviews_by_visibility,
+    _set_review_visibility,
+)
 
 
 def _principal(user_id):
@@ -46,6 +50,8 @@ def _make_review(db, user, visibility, headline):
 def test_review_visibility_tools_are_published():
     names = {tool["name"] for tool in TOOLS}
     assert {"list_reviews_by_visibility", "set_review_visibility"} <= names
+    setter = next(tool for tool in TOOLS if tool["name"] == "set_review_visibility")
+    assert "version_check" in setter["inputSchema"]["required"]
 
 
 def test_list_reviews_by_visibility_returns_stable_ids_and_positions():
