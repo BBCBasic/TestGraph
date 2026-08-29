@@ -2,9 +2,11 @@ from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 
 from app.db.base import Base
+from app.models.entities import IdempotencyRecord
 from app.models.v2 import SubjectClassificationDecision, SubjectType, V2Subject
 from app.models.workflow import WorkflowEvent, WorkflowRun
 from app.services.workflows import start_or_resume_enrichment_workflow, sync_enrichment_classification_workflow, workflow_body
+from app.services.write_safety import finish_idempotent_write
 
 
 def _session():
@@ -96,3 +98,22 @@ def test_enrichment_workflow_marks_disagreement():
         run = sync_enrichment_classification_workflow(db, subject, actor_client="pytest", actor_model="model-b")
         assert run.state == "disputed"
         assert workflow_body(run)["next_action"] == "resolve_disagreement"
+
+
+def test_subject_enrichment_idempotent_commit_includes_initial_workflow_checkpoint():
+    with _session() as db:
+        subject, _ = _subject(db)
+        body = {"subject_id": str(subject.id), "changed": True}
+        finish_idempotent_write(
+            db,
+            client_id="pytest:v3",
+            key="subject-enrichment:atomic-test",
+            payload_hash="hash",
+            response_body=body,
+        )
+
+        run = db.scalar(select(WorkflowRun).where(WorkflowRun.subject_id == subject.id))
+        stored = db.scalar(select(IdempotencyRecord).where(IdempotencyRecord.key == "subject-enrichment:atomic-test"))
+        assert run is not None
+        assert body["workflow"]["workflow_run_id"] == str(run.id)
+        assert stored.response_body["workflow"]["workflow_run_id"] == str(run.id)
