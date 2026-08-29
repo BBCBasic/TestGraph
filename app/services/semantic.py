@@ -7,6 +7,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.models.v2 import SubjectType, TypeRelationship
+from app.services.semantic_head import validate_semantic_type_name
 from app.services.v2 import ensure_subject_type, normalise_term, resolve_subject_type
 
 
@@ -38,8 +39,9 @@ def add_semantic_relationship(
     *,
     source: str,
     commit: bool = True,
+    semantic_justification: str | None = None,
 ) -> TypeRelationship:
-    """Add a relationship while preventing cycles and safely replacing stale classifications.
+    """Add a relationship while preventing semantic-head mistakes, cycles and stale classifications.
 
     ``belongs_to`` is the canonical classification edge in TestGraph. A subject type may
     have one active parent classification at a time. When an AI later supplies a different
@@ -49,6 +51,15 @@ def add_semantic_relationship(
 
     Previously retired exact edges remain tombstoned and cannot be silently recreated.
     """
+    validate_semantic_type_name(
+        source_type.canonical_name,
+        distinct_class_justification=semantic_justification,
+    )
+    validate_semantic_type_name(
+        target_type.canonical_name,
+        distinct_class_justification=semantic_justification,
+    )
+
     rel = normalise_term(relationship).replace(" ", "_")
     if source_type.id == target_type.id:
         raise ValueError("A subject type cannot relate to itself")
@@ -145,18 +156,31 @@ def retire_semantic_relationship(
     return obj
 
 
-def resolve_subject_hierarchy(db: Session, terms: list[str], *, created_by: str) -> dict:
+def resolve_subject_hierarchy(
+    db: Session,
+    terms: list[str],
+    *,
+    created_by: str,
+    semantic_justification: str | None = None,
+) -> dict:
     """Resolve/create a broad-to-specific semantic hierarchy as one transaction.
 
-    Semantic judgement belongs to the AI/client after it has inspected the whole
-    vocabulary. This function supplies deterministic governance: dictionary reuse,
-    provisional creation only in context, validated belongs_to links and cycle safety.
+    The semantic-head guard is server-owned: obvious material, arrangement, state,
+    colour, size, quantity, location and purpose modifiers are rejected as type nodes
+    unless a distinct-class justification is supplied. The rest of the function supplies
+    deterministic dictionary reuse, provisional creation, belongs_to links and cycle safety.
     """
     cleaned = [str(term).strip() for term in terms if str(term).strip()]
     if not cleaned:
         raise ValueError("At least one hierarchy term is required")
     if len(cleaned) > 8:
         raise ValueError("Hierarchy is implausibly deep; use at most 8 broad-to-specific terms")
+
+    for term in cleaned:
+        validate_semantic_type_name(
+            term,
+            distinct_class_justification=semantic_justification,
+        )
 
     keys = [normalise_term(term) for term in cleaned]
     if len(set(keys)) != len(keys):
@@ -193,6 +217,7 @@ def resolve_subject_hierarchy(db: Session, terms: list[str], *, created_by: str)
                 parent,
                 source=created_by,
                 commit=False,
+                semantic_justification=semantic_justification,
             )
 
         db.commit()
