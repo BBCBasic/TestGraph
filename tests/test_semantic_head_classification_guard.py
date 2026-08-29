@@ -73,8 +73,9 @@ def test_set_type_relationship_rejects_descriptor_derived_type():
         source = _type(db, "red machine")
         target = _root(db)
         db.commit()
-        with pytest.raises(ValueError, match="semantic head"):
+        with pytest.raises(ValueError) as exc:
             add_semantic_relationship(db, source, "belongs_to", target, source="pytest")
+        assert "semantic head" in str(exc.value).casefold()
 
 
 def test_reclassification_rejects_descriptor_derived_target():
@@ -102,7 +103,7 @@ def test_reclassification_rejects_descriptor_derived_target():
         db.commit()
         db.refresh(subject)
 
-        with pytest.raises(ValueError, match="semantic head"):
+        with pytest.raises(ValueError) as exc:
             propose_reclassification(
                 db,
                 subject,
@@ -112,6 +113,7 @@ def test_reclassification_rejects_descriptor_derived_target():
                 reason="legacy child exists",
                 evidence={},
             )
+        assert "semantic head" in str(exc.value).casefold()
 
 
 def test_cycle_protection_still_applies_after_semantic_guard():
