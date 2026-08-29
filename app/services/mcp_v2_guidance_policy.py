@@ -16,6 +16,7 @@ from app.core.config import get_settings
 from app.core.security import TokenError
 from app.db.session import SessionLocal
 from app.models.entities import AuditEvent, OAuthAuthorizationCode, OAuthClient
+from app.models.v2 import V2Experience, V2Subject
 from app.services.guidance import get_induction
 
 
@@ -25,7 +26,7 @@ WRITE_TOOL_NAMES = {
     "save_experience", "delete_experience", "save_assessment", "create_deliberation",
     "claim_deliberation", "submit_contribution", "record_resolution", "assert_location",
     "resolve_location_assertion", "affirm_subject_classification", "propose_subject_reclassification",
-    "reopen_subject_classification",
+    "reopen_subject_classification", "set_review_visibility",
 }
 
 GET_INDUCTION_TOOL = {
@@ -58,6 +59,135 @@ GET_SERVER_INFO_TOOL = {
     "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
     "annotations": {"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
 }
+
+LIST_REVIEWS_BY_VISIBILITY_TOOL = {
+    "name": "list_reviews_by_visibility",
+    "title": "List my reviews by visibility",
+    "description": (
+        "List the authenticated user's reviews in one visibility state and return stable experience IDs plus "
+        "1-based positions for conversational shorthand. Positions are display-only: all later mutations must use "
+        "the returned experience_id, never the position itself."
+    ),
+    "inputSchema": {
+        "type": "object",
+        "properties": {
+            "visibility": {
+                "type": "string",
+                "enum": ["private", "unlisted", "public", "aggregate_only"],
+            }
+        },
+        "required": ["visibility"],
+        "additionalProperties": False,
+    },
+    "annotations": {"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
+}
+
+SET_REVIEW_VISIBILITY_TOOL = {
+    "name": "set_review_visibility",
+    "title": "Change review visibility",
+    "description": (
+        "Change one authenticated-user-owned review to private, unlisted, public or aggregate_only using its stable "
+        "experience_id. Use a preceding list_reviews_by_visibility result to translate conversational list numbers "
+        "back to stable IDs. Setting public also ensures publication_status=published."
+    ),
+    "inputSchema": {
+        "type": "object",
+        "properties": {
+            "experience_id": {"type": "string", "format": "uuid"},
+            "visibility": {
+                "type": "string",
+                "enum": ["private", "unlisted", "public", "aggregate_only"],
+            },
+        },
+        "required": ["experience_id", "visibility"],
+        "additionalProperties": False,
+    },
+    "annotations": {"readOnlyHint": False, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
+}
+
+_VISIBILITIES = {"private", "unlisted", "public", "aggregate_only"}
+
+
+def _tool_result(payload):
+    return {
+        "content": [{"type": "text", "text": json.dumps(payload, default=str, separators=(",", ":"))}],
+        "structuredContent": payload,
+    }
+
+
+def _tool_error(message, details=None):
+    payload = {"error": message}
+    if details is not None:
+        payload["details"] = details
+    return {**_tool_result(payload), "isError": True}
+
+
+def _list_reviews_by_visibility(db, principal, args):
+    visibility = str(args.get("visibility", "")).strip()
+    if visibility not in _VISIBILITIES:
+        return _tool_error("Invalid review visibility")
+    if principal.user_id is None:
+        return _tool_error("Authenticated TestGraph user is required")
+    rows = db.execute(
+        select(V2Experience, V2Subject)
+        .join(V2Subject, V2Experience.subject_id == V2Subject.id)
+        .where(
+            V2Experience.owner_id == principal.user_id,
+            V2Experience.deleted_at.is_(None),
+            V2Experience.visibility == visibility,
+        )
+        .order_by(V2Experience.created_at.desc(), V2Experience.id.desc())
+    ).all()
+    return _tool_result({
+        "visibility": visibility,
+        "count": len(rows),
+        "items": [
+            {
+                "position": index,
+                "experience_id": str(experience.id),
+                "subject_name": subject.name,
+                "headline": experience.headline,
+            }
+            for index, (experience, subject) in enumerate(rows, start=1)
+        ],
+        "numbering_rule": (
+            "Positions are conversational shorthand only. Use experience_id for every visibility change."
+        ),
+    })
+
+
+def _set_review_visibility(db, principal, args):
+    visibility = str(args.get("visibility", "")).strip()
+    if visibility not in _VISIBILITIES:
+        return _tool_error("Invalid review visibility")
+    if principal.user_id is None:
+        return _tool_error("Authenticated TestGraph user is required")
+    try:
+        experience_id = uuid.UUID(str(args.get("experience_id", "")))
+    except ValueError:
+        return _tool_error("Invalid experience ID")
+    experience = db.scalar(select(V2Experience).where(
+        V2Experience.id == experience_id,
+        V2Experience.owner_id == principal.user_id,
+        V2Experience.deleted_at.is_(None),
+    ))
+    if experience is None:
+        return _tool_error(
+            "Experience not found",
+            {"code": "REVIEW_NOT_FOUND_OR_NOT_OWNED"},
+        )
+    previous = experience.visibility
+    experience.visibility = visibility
+    if visibility == "public":
+        experience.publication_status = "published"
+    db.commit()
+    return _tool_result({
+        "changed": previous != visibility,
+        "experience_id": str(experience.id),
+        "previous_visibility": previous,
+        "visibility": experience.visibility,
+        "publication_status": experience.publication_status,
+    })
 
 
 def _server_info(mcp_module) -> dict:
@@ -97,13 +227,19 @@ def _version_error(mcp_module, *, supplied=None):
 def apply_guidance_tool_policy(tools: list[dict]) -> None:
     by_name = {item.get("name"): item for item in tools}
     read_template = by_name.get("fetch") or by_name.get("search") or {}
-    for definition in (GET_SERVER_INFO_TOOL, GET_INDUCTION_TOOL):
+    write_template = by_name.get("save_experience") or read_template
+    for definition, template in (
+        (GET_SERVER_INFO_TOOL, read_template),
+        (GET_INDUCTION_TOOL, read_template),
+        (LIST_REVIEWS_BY_VISIBILITY_TOOL, read_template),
+        (SET_REVIEW_VISIBILITY_TOOL, write_template),
+    ):
         if definition["name"] not in by_name:
             tool = dict(definition)
-            if "securitySchemes" in read_template:
-                tool["securitySchemes"] = read_template["securitySchemes"]
-            if "_meta" in read_template:
-                tool["_meta"] = read_template["_meta"]
+            if "securitySchemes" in template:
+                tool["securitySchemes"] = template["securitySchemes"]
+            if "_meta" in template:
+                tool["_meta"] = template["_meta"]
             tools.insert(0, tool)
     for item in tools:
         if item.get("name") not in WRITE_TOOL_NAMES:
@@ -291,14 +427,17 @@ def install_get_induction_middleware(app, mcp_module) -> None:
             clean_params["arguments"] = clean_args
             clean_body["params"] = clean_params
             raw = json.dumps(clean_body, separators=(",", ":")).encode("utf-8")
-        intercepted = method == "tools/call" and tool_name in {"get_induction", "get_server_info"}
+        intercepted = method == "tools/call" and tool_name in {
+            "get_induction", "get_server_info", "list_reviews_by_visibility", "set_review_visibility"
+        }
         if not intercepted:
             _restore_body(request, raw)
             return await call_next(request)
         rpc_id = body.get("id")
         args = params.get("arguments") or {}
+        scope = "reviews:write" if tool_name == "set_review_visibility" else "reviews:read"
         try:
-            principal = mcp_module._principal(request, "reviews:read")
+            principal = mcp_module._principal(request, scope)
         except TokenError as exc:
             result = mcp_module._auth_error(str(exc))
         else:
@@ -306,6 +445,12 @@ def install_get_induction_middleware(app, mcp_module) -> None:
                 result = mcp_module._result(_server_info(mcp_module))
             elif principal.user_id is None:
                 result = mcp_module._error("Authenticated TestGraph user is required")
+            elif tool_name == "list_reviews_by_visibility":
+                with SessionLocal() as db:
+                    result = _list_reviews_by_visibility(db, principal, args)
+            elif tool_name == "set_review_visibility":
+                with SessionLocal() as db:
+                    result = _set_review_visibility(db, principal, args)
             else:
                 with SessionLocal() as db:
                     induction = get_induction(db, owner_id=principal.user_id, source_model=args.get("source_model"))
