@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session
 
 from app.models.v2 import SubjectClassificationDecision, V2Subject, now_utc
 from app.models.workflow import WorkflowEvent, WorkflowRun
+from app.services.write_safety import register_write_finalize_hook
 
 
 _ACTIVE_STATES = {
@@ -183,3 +184,27 @@ def workflow_body(run: WorkflowRun) -> dict:
         "next_action": next_action,
         "completed": run.state == "completed",
     }
+
+
+def _finalize_subject_enrichment(db: Session, *, client_id: str, response_body: dict) -> None:
+    raw_subject_id = response_body.get("subject_id")
+    if not raw_subject_id:
+        return
+    try:
+        import uuid
+        subject_id = uuid.UUID(str(raw_subject_id))
+    except (TypeError, ValueError):
+        return
+    subject = db.get(V2Subject, subject_id)
+    if subject is None:
+        return
+    run = start_or_resume_enrichment_workflow(
+        db,
+        subject,
+        owner_id=subject.owner_id,
+        actor_client=client_id,
+    )
+    response_body["workflow"] = workflow_body(run)
+
+
+register_write_finalize_hook("subject-enrichment", _finalize_subject_enrichment)
