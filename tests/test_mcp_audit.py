@@ -55,3 +55,39 @@ def test_record_mcp_interaction_persists_structured_summary():
         assert row.arguments_summary["version_check"] == "[redacted]"
         assert row.result_summary["changed"] is True
         assert row.outcome == "success"
+
+
+def test_log_inspection_result_is_stored_as_a_fixed_size_summary():
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        record_mcp_interaction(
+            db,
+            request_id="req-log-read",
+            user_id=None,
+            client_id="pytest",
+            source_model=None,
+            tool_name="list_my_mcp_interactions",
+            arguments={"limit": 10},
+            result={
+                "structuredContent": {
+                    "count": 2,
+                    "items": [
+                        {"interaction_id": "first", "result_summary": {"changed": True}},
+                        {"interaction_id": "second", "result_summary": {"changed": False}},
+                    ],
+                    "privacy": "structured_redacted_no_raw_conversation",
+                }
+            },
+            outcome="success",
+            latency_ms=4,
+            server_version="test",
+            build_sha="sha",
+        )
+
+        row = db.scalar(select(McpInteraction))
+        assert row.result_summary == {
+            "count": 2,
+            "items": {"redacted_payload": True, "type": "array", "length": 2},
+            "privacy": "structured_redacted_no_raw_conversation",
+        }
