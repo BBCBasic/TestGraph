@@ -43,3 +43,33 @@ def test_inspection_queries_are_owner_scoped():
         assert len(interactions) == 1
         assert interactions[0]["client_id"] == "chatgpt"
         assert interactions[0]["tool_name"] == "enrich_subject"
+
+
+def test_inspection_compacts_legacy_recursive_log_results():
+    from app.services.workflow_inspection import list_mcp_interactions
+
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    owner = uuid.uuid4()
+    with Session(engine) as db:
+        db.add(McpInteraction(
+            user_id=owner,
+            client_id="chatgpt",
+            tool_name="list_my_mcp_interactions",
+            arguments_summary={"limit": 10},
+            result_summary={
+                "count": 1,
+                "items": [{"interaction_id": "nested", "result_summary": {"items": []}}],
+                "privacy": "structured_redacted_no_raw_conversation",
+            },
+            outcome="success",
+        ))
+        db.commit()
+
+        interactions = list_mcp_interactions(db, owner_id=owner, limit=20)
+
+        assert interactions[0]["result_summary"] == {
+            "count": 1,
+            "items": {"redacted_payload": True, "type": "array", "length": 1},
+            "privacy": "structured_redacted_no_raw_conversation",
+        }

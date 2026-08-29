@@ -4,6 +4,7 @@ from sqlalchemy import desc, select
 from sqlalchemy.orm import Session
 
 from app.models.workflow import McpInteraction, WorkflowRun
+from app.services.mcp_audit import compact_mcp_interaction_result
 from app.services.workflows import workflow_body
 
 
@@ -43,7 +44,11 @@ def list_mcp_interactions(db: Session, *, owner_id, limit: int = 50) -> list[dic
             "workflow_run_id": str(row.workflow_run_id) if row.workflow_run_id else None,
             "workflow_step": row.workflow_step,
             "arguments_summary": row.arguments_summary,
-            "result_summary": row.result_summary,
+            "result_summary": (
+                compact_mcp_interaction_result(row.result_summary)
+                if row.tool_name == "list_my_mcp_interactions"
+                else row.result_summary
+            ),
             "outcome": row.outcome,
             "latency_ms": row.latency_ms,
             "server_version": row.server_version,
