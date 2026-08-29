@@ -1,0 +1,113 @@
+from __future__ import annotations
+
+from typing import Any
+
+from sqlalchemy.orm import Session
+
+from app.models.workflow import McpInteraction
+
+
+_SECRET_KEYS = {
+    "authorization", "token", "access_token", "refresh_token", "api_key", "apikey",
+    "password", "secret", "client_secret", "connection_secret", "oauth_code", "code",
+    "version_check",
+}
+_LARGE_TEXT_KEYS = {
+    "raw_text", "summary", "headline", "reason", "conclusion", "analysis", "prompt",
+    "message", "content", "provenance", "evidence", "submitted_data", "structured_data",
+}
+_SAFE_TEXT_LIMIT = 160
+
+
+def _key(name: Any) -> str:
+    return str(name or "").strip().lower()
+
+
+def _summarise_text(value: str) -> dict:
+    return {"redacted_text": True, "type": "string", "length": len(value)}
+
+
+def _summarise_payload(value: Any) -> dict:
+    if isinstance(value, dict):
+        return {"redacted_payload": True, "type": "object", "keys": sorted(str(k) for k in value.keys())[:30]}
+    if isinstance(value, list):
+        return {"redacted_payload": True, "type": "array", "length": len(value)}
+    if isinstance(value, str):
+        return _summarise_text(value)
+    return {"redacted_payload": True, "type": type(value).__name__}
+
+
+def redact_arguments(payload: Any, *, parent_key: str | None = None) -> Any:
+    if isinstance(payload, dict):
+        result = {}
+        for key, value in payload.items():
+            normalised = _key(key)
+            if normalised in _SECRET_KEYS or normalised.endswith("_token") or normalised.endswith("_secret"):
+                result[str(key)] = "[redacted]"
+            elif normalised in _LARGE_TEXT_KEYS:
+                result[str(key)] = _summarise_payload(value)
+            else:
+                result[str(key)] = redact_arguments(value, parent_key=normalised)
+        return result
+    if isinstance(payload, list):
+        if len(payload) > 30:
+            return {"redacted_payload": True, "type": "array", "length": len(payload)}
+        return [redact_arguments(item, parent_key=parent_key) for item in payload]
+    if isinstance(payload, str) and len(payload) > _SAFE_TEXT_LIMIT:
+        return _summarise_text(payload)
+    return payload
+
+
+def _result_summary(result: Any) -> dict:
+    if not isinstance(result, dict):
+        return {"type": type(result).__name__}
+    structured = result.get("structuredContent")
+    if isinstance(structured, dict):
+        return redact_arguments(structured)
+    summary = {}
+    if result.get("isError"):
+        summary["isError"] = True
+    content = result.get("content")
+    if isinstance(content, list):
+        summary["content_items"] = len(content)
+    return summary
+
+
+def record_mcp_interaction(
+    db: Session,
+    *,
+    request_id: str | None,
+    user_id,
+    client_id: str | None,
+    source_model: str | None,
+    tool_name: str,
+    arguments: dict,
+    result: Any,
+    outcome: str,
+    latency_ms: int | None,
+    server_version: str | None,
+    build_sha: str | None,
+    workflow_run_id=None,
+    workflow_step: str | None = None,
+) -> None:
+    """Best-effort structured telemetry; failures must never block the domain call."""
+    try:
+        row = McpInteraction(
+            request_id=request_id,
+            user_id=user_id,
+            client_id=client_id,
+            source_model=source_model,
+            tool_name=tool_name,
+            workflow_run_id=workflow_run_id,
+            workflow_step=workflow_step,
+            arguments_summary=redact_arguments(arguments),
+            result_summary=_result_summary(result),
+            outcome=outcome,
+            latency_ms=latency_ms,
+            server_version=server_version,
+            build_sha=build_sha,
+        )
+        db.add(row)
+        db.commit()
+    except Exception:
+        db.rollback()

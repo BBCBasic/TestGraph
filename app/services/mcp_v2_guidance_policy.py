@@ -4,11 +4,12 @@ import hashlib
 import hmac
 import json
 import os
+import time
 import uuid
 from html import escape
 from urllib.parse import parse_qs
 
-from fastapi import HTTPException, Request
+from fastapi import HTTPException, Request, Response
 from fastapi.responses import HTMLResponse, JSONResponse
 from sqlalchemy import desc, select
 
@@ -18,6 +19,12 @@ from app.db.session import SessionLocal
 from app.models.entities import AuditEvent, OAuthAuthorizationCode, OAuthClient
 from app.models.v2 import V2Experience, V2Subject
 from app.services.guidance import get_induction
+from app.services.mcp_audit import record_mcp_interaction
+from app.services.workflows import (
+    start_or_resume_enrichment_workflow,
+    sync_enrichment_classification_workflow,
+    workflow_body,
+)
 
 
 WRITE_TOOL_NAMES = {
@@ -150,9 +157,7 @@ def _list_reviews_by_visibility(db, principal, args):
             }
             for index, (experience, subject) in enumerate(rows, start=1)
         ],
-        "numbering_rule": (
-            "Positions are conversational shorthand only. Use experience_id for every visibility change."
-        ),
+        "numbering_rule": "Positions are conversational shorthand only. Use experience_id for every visibility change.",
     })
 
 
@@ -172,10 +177,7 @@ def _set_review_visibility(db, principal, args):
         V2Experience.deleted_at.is_(None),
     ))
     if experience is None:
-        return _tool_error(
-            "Experience not found",
-            {"code": "REVIEW_NOT_FOUND_OR_NOT_OWNED"},
-        )
+        return _tool_error("Experience not found", {"code": "REVIEW_NOT_FOUND_OR_NOT_OWNED"})
     previous = experience.visibility
     experience.visibility = visibility
     if visibility == "public":
@@ -256,12 +258,9 @@ def apply_guidance_tool_policy(tools: list[dict]) -> None:
     enrichment = by_name.get("enrich_subject")
     if enrichment:
         enrichment["description"] += (
-            " CLASSIFICATION HAND-OFF: after any successful enrichment that changes the subject or its relationships, "
-            "immediately call get_subject_classification. If the classification is not confirmed and the enriched "
-            "evidence supports the current type and no more precise strict descendant is justified, call "
-            "affirm_subject_classification. If a more precise strict-descendant type is supported, call "
-            "propose_subject_reclassification instead. Pass this model's stable identity, the reason and the enrichment "
-            "evidence. Do not leave classification convergence pending merely because enrichment succeeded."
+            " WORKFLOW: the server now owns the post-enrichment procedure. A successful response includes durable "
+            "workflow state and the next required classification action. Follow workflow.next_action rather than "
+            "reconstructing the procedure yourself."
         )
     contribution = by_name.get("submit_contribution")
     if contribution:
@@ -339,7 +338,6 @@ def _record_oauth_connection(request: Request, raw: bytes, mcp_module) -> None:
             db.add(event)
             db.commit()
     except Exception:
-        # Connection auditing must never break OAuth.
         return
 
 
@@ -364,6 +362,145 @@ def _connection_table(events: list[AuditEvent]) -> HTMLResponse:
     response.headers["Cache-Control"] = "no-store"
     response.headers["X-Robots-Tag"] = "noindex, nofollow"
     return response
+
+
+def _result_outcome(result: dict) -> str:
+    if not isinstance(result, dict) or not result.get("isError"):
+        return "success"
+    payload = result.get("structuredContent") or {}
+    code = str(payload.get("error_code") or payload.get("details", {}).get("code") or "")
+    if code == "MCP_VERSION_CHECK_REQUIRED":
+        return "stale_version"
+    if "AUTH" in code.upper():
+        return "auth_error"
+    if "POLICY" in code.upper() or payload.get("write_blocked"):
+        return "policy_block"
+    return "validation_error"
+
+
+def _principal_for_audit(request: Request, mcp_module, tool_name: str):
+    try:
+        scope = "reviews:write" if tool_name in WRITE_TOOL_NAMES else "reviews:read"
+        return mcp_module._principal(request, scope)
+    except Exception:
+        return None
+
+
+def _workflow_from_result(result: dict):
+    payload = result.get("structuredContent") if isinstance(result, dict) else None
+    workflow = payload.get("workflow") if isinstance(payload, dict) else None
+    if not isinstance(workflow, dict):
+        return None, None
+    try:
+        run_id = uuid.UUID(str(workflow.get("workflow_run_id")))
+    except (TypeError, ValueError):
+        run_id = None
+    return run_id, workflow.get("current_step")
+
+
+def _record_tool_audit(request, mcp_module, tool_name, args, result, started, *, forced_outcome=None):
+    principal = _principal_for_audit(request, mcp_module, tool_name)
+    info = _server_info(mcp_module)
+    workflow_run_id, workflow_step = _workflow_from_result(result)
+    with SessionLocal() as db:
+        record_mcp_interaction(
+            db,
+            request_id=getattr(request.state, "request_id", None),
+            user_id=getattr(principal, "user_id", None),
+            client_id=getattr(principal, "client_id", None),
+            source_model=args.get("source_model") if isinstance(args, dict) else None,
+            tool_name=tool_name or "unknown",
+            arguments=args if isinstance(args, dict) else {},
+            result=result,
+            outcome=forced_outcome or _result_outcome(result),
+            latency_ms=max(0, int((time.perf_counter() - started) * 1000)),
+            server_version=info["server_version"],
+            build_sha=info["build_sha"],
+            workflow_run_id=workflow_run_id,
+            workflow_step=workflow_step,
+        )
+
+
+def _attach_workflow(result: dict, workflow: dict) -> dict:
+    if not isinstance(result, dict) or result.get("isError"):
+        return result
+    payload = result.get("structuredContent")
+    if not isinstance(payload, dict):
+        return result
+    payload = dict(payload)
+    payload["workflow"] = workflow
+    updated = dict(result)
+    updated["structuredContent"] = payload
+    content = list(updated.get("content") or [])
+    if content and isinstance(content[0], dict) and content[0].get("type") == "text":
+        first = dict(content[0])
+        first["text"] = json.dumps(payload, default=str, separators=(",", ":"))
+        content[0] = first
+        updated["content"] = content
+    return updated
+
+
+def _advance_workflow_after_tool(tool_name: str, args: dict, result: dict, principal) -> dict:
+    if not isinstance(result, dict) or result.get("isError"):
+        return result
+    payload = result.get("structuredContent")
+    if not isinstance(payload, dict):
+        return result
+    try:
+        with SessionLocal() as db:
+            if tool_name == "enrich_subject":
+                raw_subject_id = payload.get("subject_id")
+                if not raw_subject_id:
+                    return result
+                subject = db.get(V2Subject, uuid.UUID(str(raw_subject_id)))
+                if not subject:
+                    return result
+                run = start_or_resume_enrichment_workflow(
+                    db,
+                    subject,
+                    owner_id=getattr(principal, "user_id", None),
+                    actor_client=getattr(principal, "client_id", None),
+                )
+            elif tool_name in {"affirm_subject_classification", "propose_subject_reclassification"}:
+                raw_subject_id = args.get("subject_id")
+                if not raw_subject_id:
+                    return result
+                subject = db.get(V2Subject, uuid.UUID(str(raw_subject_id)))
+                if not subject:
+                    return result
+                run = sync_enrichment_classification_workflow(
+                    db,
+                    subject,
+                    actor_client=getattr(principal, "client_id", None),
+                    actor_model=args.get("source_model"),
+                )
+                if run is None:
+                    return result
+            else:
+                return result
+            db.commit()
+            return _attach_workflow(result, workflow_body(run))
+    except Exception:
+        return result
+
+
+async def _consume_response(response: Response):
+    if not hasattr(response, "body_iterator"):
+        return bytes(getattr(response, "body", b"")), response
+    chunks = []
+    async for chunk in response.body_iterator:
+        chunks.append(chunk if isinstance(chunk, bytes) else chunk.encode("utf-8"))
+    body = b"".join(chunks)
+    headers = dict(response.headers)
+    headers.pop("content-length", None)
+    rebuilt = Response(
+        content=body,
+        status_code=response.status_code,
+        headers=headers,
+        media_type=response.media_type,
+        background=response.background,
+    )
+    return body, rebuilt
 
 
 def install_get_induction_middleware(app, mcp_module) -> None:
@@ -393,7 +530,6 @@ def install_get_induction_middleware(app, mcp_module) -> None:
         if request.method == "GET" and request.url.path == "/version":
             return JSONResponse(_server_info(mcp_module))
 
-        # Observe successful OAuth authorisation without modifying OAuth itself.
         if request.method == "POST" and request.url.path == "/oauth/authorize":
             raw = await request.body()
             _restore_body(request, raw)
@@ -405,6 +541,7 @@ def install_get_induction_middleware(app, mcp_module) -> None:
         if request.method != "POST" or request.url.path != "/mcp-v2":
             return await call_next(request)
 
+        started = time.perf_counter()
         raw = await request.body()
         try:
             body = json.loads(raw or b"{}")
@@ -413,12 +550,14 @@ def install_get_induction_middleware(app, mcp_module) -> None:
         params = body.get("params") or {}
         method = body.get("method")
         tool_name = params.get("name")
+        args = params.get("arguments") or {}
+
         if method == "tools/call" and tool_name in WRITE_TOOL_NAMES:
-            args = params.get("arguments") or {}
             supplied = args.get("version_check")
             expected = _server_info(mcp_module)["write_version_token"]
             if supplied != expected:
                 result = _version_error(mcp_module, supplied=supplied)
+                _record_tool_audit(request, mcp_module, tool_name, args, result, started, forced_outcome="stale_version")
                 return JSONResponse({"jsonrpc": "2.0", "id": body.get("id"), "result": result})
             clean_body = dict(body)
             clean_params = dict(params)
@@ -427,32 +566,57 @@ def install_get_induction_middleware(app, mcp_module) -> None:
             clean_params["arguments"] = clean_args
             clean_body["params"] = clean_params
             raw = json.dumps(clean_body, separators=(",", ":")).encode("utf-8")
+
         intercepted = method == "tools/call" and tool_name in {
             "get_induction", "get_server_info", "list_reviews_by_visibility", "set_review_visibility"
         }
-        if not intercepted:
-            _restore_body(request, raw)
-            return await call_next(request)
-        rpc_id = body.get("id")
-        args = params.get("arguments") or {}
-        scope = "reviews:write" if tool_name == "set_review_visibility" else "reviews:read"
-        try:
-            principal = mcp_module._principal(request, scope)
-        except TokenError as exc:
-            result = mcp_module._auth_error(str(exc))
-        else:
-            if tool_name == "get_server_info":
-                result = mcp_module._result(_server_info(mcp_module))
-            elif principal.user_id is None:
-                result = mcp_module._error("Authenticated TestGraph user is required")
-            elif tool_name == "list_reviews_by_visibility":
-                with SessionLocal() as db:
-                    result = _list_reviews_by_visibility(db, principal, args)
-            elif tool_name == "set_review_visibility":
-                with SessionLocal() as db:
-                    result = _set_review_visibility(db, principal, args)
+        if intercepted:
+            rpc_id = body.get("id")
+            scope = "reviews:write" if tool_name == "set_review_visibility" else "reviews:read"
+            try:
+                principal = mcp_module._principal(request, scope)
+            except TokenError as exc:
+                result = mcp_module._auth_error(str(exc))
             else:
-                with SessionLocal() as db:
-                    induction = get_induction(db, owner_id=principal.user_id, source_model=args.get("source_model"))
-                result = mcp_module._result(induction)
-        return JSONResponse({"jsonrpc": "2.0", "id": rpc_id, "result": result})
+                if tool_name == "get_server_info":
+                    result = mcp_module._result(_server_info(mcp_module))
+                elif principal.user_id is None:
+                    result = mcp_module._error("Authenticated TestGraph user is required")
+                elif tool_name == "list_reviews_by_visibility":
+                    with SessionLocal() as db:
+                        result = _list_reviews_by_visibility(db, principal, args)
+                elif tool_name == "set_review_visibility":
+                    with SessionLocal() as db:
+                        result = _set_review_visibility(db, principal, args)
+                else:
+                    with SessionLocal() as db:
+                        induction = get_induction(db, owner_id=principal.user_id, source_model=args.get("source_model"))
+                    result = mcp_module._result(induction)
+            _record_tool_audit(request, mcp_module, tool_name, args, result, started)
+            return JSONResponse({"jsonrpc": "2.0", "id": rpc_id, "result": result})
+
+        _restore_body(request, raw)
+        response = await call_next(request)
+        if method != "tools/call" or not tool_name:
+            return response
+
+        response_body, rebuilt = await _consume_response(response)
+        try:
+            rpc_payload = json.loads(response_body or b"{}")
+            result = rpc_payload.get("result") or {}
+        except (TypeError, ValueError, json.JSONDecodeError):
+            _record_tool_audit(request, mcp_module, tool_name, args, {"isError": True}, started, forced_outcome="server_error")
+            return rebuilt
+
+        principal = _principal_for_audit(request, mcp_module, tool_name)
+        result = _advance_workflow_after_tool(tool_name, args, result, principal)
+        rpc_payload["result"] = result
+        _record_tool_audit(request, mcp_module, tool_name, args, result, started)
+        headers = dict(rebuilt.headers)
+        headers.pop("content-length", None)
+        return JSONResponse(
+            rpc_payload,
+            status_code=rebuilt.status_code,
+            headers=headers,
+            background=rebuilt.background,
+        )

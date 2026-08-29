@@ -4,7 +4,11 @@ import base64
 import hashlib
 import re
 
+from sqlalchemy import select
+
 from app.core.config import get_settings
+from app.db.session import SessionLocal
+from app.models.workflow import McpInteraction
 
 
 def _pkce(verifier):
@@ -49,3 +53,11 @@ def test_oauth_mcp_v2_resource_flow(client,auth,monkeypatch):
     assert "subject_context" in properties
     assert "subject_enrichment_check" in properties
     assert "subject_enrichment_check" in save_tool["inputSchema"]["required"]
+
+    info=_rpc(client,"/mcp-v2","tools/call",params={"name":"get_server_info","arguments":{}},token=access,call_id=3)
+    assert info.json()["result"]["structuredContent"]["service"]=="TestGraph"
+    with SessionLocal() as db:
+        interaction=db.scalar(select(McpInteraction).where(McpInteraction.tool_name=="get_server_info").order_by(McpInteraction.created_at.desc()))
+        assert interaction is not None
+        assert interaction.client_id==client_id
+        assert interaction.outcome=="success"
