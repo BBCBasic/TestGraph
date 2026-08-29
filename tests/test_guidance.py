@@ -2,6 +2,7 @@ import uuid
 
 import pytest
 from pydantic import ValidationError
+from starlette.requests import Request
 
 from app.db.session import SessionLocal
 from app.models.entities import User
@@ -17,7 +18,7 @@ from app.services.deliberation import (
     submit_contribution,
 )
 from app.services.guidance import get_induction
-from app.services.mcp_v2_guidance_policy import apply_guidance_tool_policy
+from app.services.mcp_v2_guidance_policy import _restore_body, apply_guidance_tool_policy
 
 
 def _user(db, label="guidance-owner"):
@@ -192,3 +193,15 @@ def test_guidance_policy_exposes_get_induction_and_vote_once():
     assert names.count("get_induction") == 1
     submit = next(tool for tool in tools if tool["name"] == "submit_contribution")
     assert submit["inputSchema"]["properties"]["contribution_type"]["enum"].count("vote") == 1
+
+
+def test_restore_body_replaces_cached_body_after_version_check_stripping():
+    request = Request({"type": "http", "method": "POST", "path": "/mcp-v2", "headers": []})
+    request._body = b'{"version_check":"stale-original"}'
+    request._json = {"version_check": "stale-original"}
+
+    clean = b'{"canonical_name":"engine_size"}'
+    _restore_body(request, clean)
+
+    assert request._body == clean
+    assert not hasattr(request, "_json")
