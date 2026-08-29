@@ -1,10 +1,28 @@
 from __future__ import annotations
 
+from collections.abc import Callable
+
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.models.entities import AuditEvent, IdempotencyRecord
 from app.services.core import request_hash
+
+
+WriteFinalizeHook = Callable[..., None]
+_WRITE_FINALIZE_HOOKS: dict[str, WriteFinalizeHook] = {}
+
+
+def register_write_finalize_hook(operation_scope: str, hook: WriteFinalizeHook) -> None:
+    """Register one pre-commit hook for an idempotent write operation scope.
+
+    Hooks may add/flush rows and mutate response_body, but must not commit. The
+    idempotency finalizer owns the single transaction commit.
+    """
+    scope = str(operation_scope or "").strip()
+    if not scope:
+        raise ValueError("operation_scope is required")
+    _WRITE_FINALIZE_HOOKS[scope] = hook
 
 
 class IdempotencyKeyConflictError(ValueError):
@@ -75,7 +93,19 @@ def begin_idempotent_write(db: Session, *, client_id: str, key: str, payload: di
     return payload_hash, None
 
 
-def finish_idempotent_write(db: Session, *, client_id: str, key: str, payload_hash: str, response_body: dict, response_status: int = 201):
+def finish_idempotent_write(
+    db: Session,
+    *,
+    client_id: str,
+    key: str,
+    payload_hash: str,
+    response_body: dict,
+    response_status: int = 201,
+):
+    operation_scope = key.split(":", 1)[0]
+    hook = _WRITE_FINALIZE_HOOKS.get(operation_scope)
+    if hook is not None:
+        hook(db, client_id=client_id, response_body=response_body)
     db.add(IdempotencyRecord(
         client_id=client_id,
         key=key,
