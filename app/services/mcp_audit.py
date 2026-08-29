@@ -4,6 +4,7 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
+from app.models.entities import OAuthClient
 from app.models.workflow import McpInteraction
 
 
@@ -93,6 +94,43 @@ def _result_summary(result: Any, *, tool_name: str | None = None) -> dict:
     return summary
 
 
+def _normalise_client_family(client_name: str | None) -> str | None:
+    value = str(client_name or "").strip().casefold()
+    if not value:
+        return None
+    if "chatgpt" in value or "openai" in value:
+        return "chatgpt"
+    if "claude" in value or "anthropic" in value:
+        return "claude"
+    if "cursor" in value:
+        return "cursor"
+    if "copilot" in value or "github" in value:
+        return "github_copilot"
+    return value[:120]
+
+
+def _attribution_summary(db: Session, *, client_id: str | None, source_model: str | None) -> dict:
+    client_name = None
+    if client_id:
+        client = db.get(OAuthClient, client_id)
+        if client is not None:
+            client_name = client.client_name
+    family = _normalise_client_family(client_name)
+    return {
+        "oauth_client_id": client_id,
+        "oauth_client_name": client_name,
+        "client_family": family,
+        "source_model": source_model,
+        "source_model_source": "tool_argument" if source_model else "not_reported",
+        "model_attribution_status": "reported" if source_model else "unknown",
+        "note": (
+            "Exact model identity is caller-reported; OAuth client identity is server-resolved."
+            if source_model
+            else "OAuth client identity is server-resolved; this call did not report an exact model identity."
+        ),
+    }
+
+
 def record_mcp_interaction(
     db: Session,
     *,
@@ -112,6 +150,12 @@ def record_mcp_interaction(
 ) -> None:
     """Best-effort structured telemetry; failures must never block the domain call."""
     try:
+        arguments_summary = redact_arguments(arguments)
+        if not isinstance(arguments_summary, dict):
+            arguments_summary = {"payload": arguments_summary}
+        arguments_summary["_attribution"] = _attribution_summary(
+            db, client_id=client_id, source_model=source_model
+        )
         row = McpInteraction(
             request_id=request_id,
             user_id=user_id,
@@ -120,7 +164,7 @@ def record_mcp_interaction(
             tool_name=tool_name,
             workflow_run_id=workflow_run_id,
             workflow_step=workflow_step,
-            arguments_summary=redact_arguments(arguments),
+            arguments_summary=arguments_summary,
             result_summary=_result_summary(result, tool_name=tool_name),
             outcome=outcome,
             latency_ms=latency_ms,
