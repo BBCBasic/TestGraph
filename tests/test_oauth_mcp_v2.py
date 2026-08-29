@@ -46,7 +46,7 @@ def test_oauth_mcp_v2_resource_flow(client,auth,monkeypatch):
     assert "list_open_deliberations" in instructions
     assert "next_cursor" in instructions
     tools=_rpc(client,"/mcp-v2","tools/list",token=access,call_id=2).json()["result"]["tools"]
-    assert {tool["name"] for tool in tools}=={"get_server_info","get_induction","list_reviews_by_visibility","set_review_visibility","search","fetch","vocabulary_index","resolve_subject_type","resolve_subject","get_subject_classification","affirm_subject_classification","propose_subject_reclassification","reopen_subject_classification","resolve_subject_hierarchy","register_subject_type_alias","set_type_relationship","retire_type_relationship","register_field","enrich_subject","correct_subject_fact","save_experience","delete_experience","save_assessment","create_deliberation","get_deliberation","list_open_deliberations","claim_deliberation","submit_contribution","record_resolution","assert_location","get_location_assertions","resolve_location_assertion"}
+    assert {tool["name"] for tool in tools}=={"get_server_info","get_induction","list_my_workflows","list_my_mcp_interactions","list_reviews_by_visibility","set_review_visibility","search","fetch","vocabulary_index","resolve_subject_type","resolve_subject","get_subject_classification","affirm_subject_classification","propose_subject_reclassification","reopen_subject_classification","resolve_subject_hierarchy","register_subject_type_alias","set_type_relationship","retire_type_relationship","register_field","enrich_subject","correct_subject_fact","save_experience","delete_experience","save_assessment","create_deliberation","get_deliberation","list_open_deliberations","claim_deliberation","submit_contribution","record_resolution","assert_location","get_location_assertions","resolve_location_assertion"}
     save_tool=next(tool for tool in tools if tool["name"]=="save_experience")
     properties=save_tool["inputSchema"]["properties"]
     assert "experienced_at" in properties
@@ -61,3 +61,8 @@ def test_oauth_mcp_v2_resource_flow(client,auth,monkeypatch):
         assert interaction is not None
         assert interaction.client_id==client_id
         assert interaction.outcome=="success"
+
+    audit=_rpc(client,"/mcp-v2","tools/call",params={"name":"list_my_mcp_interactions","arguments":{"limit":10}},token=access,call_id=4)
+    audit_body=audit.json()["result"]["structuredContent"]
+    assert audit_body["privacy"]=="structured_redacted_no_raw_conversation"
+    assert any(item["tool_name"]=="get_server_info" for item in audit_body["items"])
