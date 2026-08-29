@@ -2,7 +2,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
 from app.db.base import Base
-from app.models.v2 import McpInteraction, WorkflowEvent, WorkflowRun
+from app.models.workflow import McpInteraction, WorkflowEvent, WorkflowRun
 
 
 def test_workflow_and_mcp_audit_models_persist():
