@@ -35,6 +35,58 @@ def _is_descendant(db: Session, child_id: uuid.UUID, ancestor_id: uuid.UUID) -> 
     return False
 
 
+def _direct_child_types(db: Session, parent_id: uuid.UUID) -> list[SubjectType]:
+    child_ids = list(db.scalars(select(TypeRelationship.source_type_id).where(
+        TypeRelationship.target_type_id == parent_id,
+        TypeRelationship.relationship == "belongs_to",
+        TypeRelationship.status == "active",
+    )).all())
+    children = [db.get(SubjectType, child_id) for child_id in child_ids]
+    return sorted(
+        (child for child in children if child is not None),
+        key=lambda child: child.canonical_name.casefold(),
+    )
+
+
+def _validate_direct_child_assessment(db: Session, current: SubjectType, evidence: dict) -> None:
+    """Do not affirm a broad type until every immediate stricter child has been considered."""
+    children = _direct_child_types(db, current.id)
+    if not children:
+        return
+
+    assessment = evidence.get("direct_child_assessment") if isinstance(evidence, dict) else None
+    if not isinstance(assessment, dict):
+        raise ValueError(
+            "Affirmation requires direct child classification review. "
+            "Call get_subject_classification, assess every direct child type in evidence.direct_child_assessment, "
+            "and use propose_subject_reclassification when any child is applicable."
+        )
+
+    expected = {child.canonical_name for child in children}
+    supplied = set(assessment)
+    missing = sorted(expected - supplied)
+    if missing:
+        raise ValueError(
+            "Affirmation is missing direct child classification assessments for: " + ", ".join(missing)
+        )
+
+    for child in children:
+        item = assessment.get(child.canonical_name)
+        if not isinstance(item, dict):
+            raise ValueError(
+                f"Direct child assessment for '{child.canonical_name}' must contain applicable and reason"
+            )
+        if not isinstance(item.get("applicable"), bool) or not str(item.get("reason", "")).strip():
+            raise ValueError(
+                f"Direct child assessment for '{child.canonical_name}' must contain boolean applicable and a reason"
+            )
+        if item["applicable"]:
+            raise ValueError(
+                f"Direct child type '{child.canonical_name}' is marked applicable; "
+                "use propose_subject_reclassification instead of affirming the broader current type"
+            )
+
+
 def _decision_body(db: Session, decision: SubjectClassificationDecision) -> dict:
     target = db.get(SubjectType, decision.target_type_id)
     return {
@@ -56,12 +108,15 @@ def classification_state(db: Session, subject: V2Subject) -> dict:
         SubjectClassificationDecision.subject_id == subject.id,
     ).order_by(SubjectClassificationDecision.created_at)).all())
     active = [d for d in decisions if d.classification_version == subject.classification_version]
+    direct_children = _direct_child_types(db, subject.subject_type_id)
     return {
         "subject_id": str(subject.id),
         "subject_type": current_type.canonical_name if current_type else None,
         "status": subject.classification_status,
         "version": subject.classification_version,
         "locked_at": subject.classification_locked_at.isoformat() if subject.classification_locked_at else None,
+        "direct_child_types": [child.canonical_name for child in direct_children],
+        "specificity_review_required": bool(direct_children) and subject.classification_status != "confirmed",
         "active_decisions": [_decision_body(db, d) for d in active],
         "audit_history": [_decision_body(db, d) for d in decisions],
     }
@@ -100,6 +155,8 @@ def propose_reclassification(
             raise ValueError(
                 "Use affirm_subject_classification to agree with the current provisional type"
             )
+        if affirms_current and allow_current_type:
+            _validate_direct_child_assessment(db, current, evidence)
         if not affirms_current and not _is_descendant(db, target.id, current.id):
             raise ValueError(
                 f"'{target.canonical_name}' is not a strict descendant of current type '{current.canonical_name}'"
