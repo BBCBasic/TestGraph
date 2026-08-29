@@ -34,16 +34,20 @@ def list_mcp_interactions(db: Session, *, owner_id, limit: int = 50) -> list[dic
         .order_by(desc(McpInteraction.created_at))
         .limit(max(1, min(int(limit), 200)))
     ).all())
-    return [
-        {
+    items = []
+    for row in rows:
+        arguments_summary = row.arguments_summary or {}
+        attribution = arguments_summary.get("_attribution") if isinstance(arguments_summary, dict) else None
+        items.append({
             "interaction_id": str(row.id),
             "request_id": row.request_id,
             "client_id": row.client_id,
             "source_model": row.source_model,
+            "attribution": attribution,
             "tool_name": row.tool_name,
             "workflow_run_id": str(row.workflow_run_id) if row.workflow_run_id else None,
             "workflow_step": row.workflow_step,
-            "arguments_summary": row.arguments_summary,
+            "arguments_summary": arguments_summary,
             "result_summary": (
                 compact_mcp_interaction_result(row.result_summary)
                 if row.tool_name == "list_my_mcp_interactions"
@@ -54,6 +58,5 @@ def list_mcp_interactions(db: Session, *, owner_id, limit: int = 50) -> list[dic
             "server_version": row.server_version,
             "build_sha": row.build_sha,
             "created_at": row.created_at.isoformat() if row.created_at else None,
-        }
-        for row in rows
-    ]
+        })
+    return items

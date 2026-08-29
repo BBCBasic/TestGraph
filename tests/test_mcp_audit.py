@@ -2,8 +2,10 @@ from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 
 from app.db.base import Base
+from app.models.entities import OAuthClient
 from app.models.workflow import McpInteraction
 from app.services.mcp_audit import record_mcp_interaction, redact_arguments
+from app.services.workflow_inspection import list_mcp_interactions
 
 
 def test_redact_arguments_removes_secrets_and_summarises_large_text():
@@ -53,8 +55,43 @@ def test_record_mcp_interaction_persists_structured_summary():
         row = db.scalar(select(McpInteraction))
         assert row is not None
         assert row.arguments_summary["version_check"] == "[redacted]"
+        assert row.arguments_summary["_attribution"]["source_model"] == "gpt-test"
+        assert row.arguments_summary["_attribution"]["source_model_source"] == "tool_argument"
         assert row.result_summary["changed"] is True
         assert row.outcome == "success"
+
+
+def test_oauth_client_identity_is_resolved_without_inventing_exact_model():
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        db.add(OAuthClient(
+            client_id="chatgpt-client-1",
+            redirect_uris=["https://example.test/callback"],
+            client_name="ChatGPT",
+            token_endpoint_auth_method="none",
+        ))
+        db.commit()
+        record_mcp_interaction(
+            db,
+            request_id="req-client",
+            user_id=None,
+            client_id="chatgpt-client-1",
+            source_model=None,
+            tool_name="search",
+            arguments={"query": "zoe"},
+            result={"structuredContent": {"count": 0}},
+            outcome="success",
+            latency_ms=3,
+            server_version="test",
+            build_sha="sha",
+        )
+        row = db.scalar(select(McpInteraction))
+        attribution = row.arguments_summary["_attribution"]
+        assert attribution["oauth_client_name"] == "ChatGPT"
+        assert attribution["client_family"] == "chatgpt"
+        assert attribution["source_model"] is None
+        assert attribution["model_attribution_status"] == "unknown"
 
 
 def test_log_inspection_result_is_stored_as_a_fixed_size_summary():
