@@ -55,7 +55,11 @@ def test_public_v2_feed_excludes_private_data_and_internal_metadata(client):
     payload = response.json()
     rendered = response.text
     assert payload["counts"]["experiences"] >= 1
-    assert any(item["headline"] == "Visible headline" for item in payload["experiences"])
+    visible = next(item for item in payload["experiences"] if item["headline"] == "Visible headline")
+    assert visible["subject"]["classification"]["status"] == "provisional"
+    assert visible["subject"]["classification"]["version"] == 1
+    assert visible["subject"]["classification"]["locked"] is False
+    assert visible["subject"]["classification"]["decisions"] == []
     assert "Private headline" not in rendered
     assert "owner_id" not in rendered
     assert "created_by_client" not in rendered
