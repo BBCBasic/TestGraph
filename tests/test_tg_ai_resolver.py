@@ -7,7 +7,7 @@ from app.core.config import get_settings
 from app.db.session import SessionLocal
 from app.models.entities import User
 from app.models.v2 import SubjectClassificationDecision, SubjectType, V2Subject
-from app.services.tg_ai_resolver import ResolverDecision, resolve_classification_dispute
+from app.services.tg_ai_resolver import ResolverDecision, check_resolver_connectivity, resolve_classification_dispute
 
 
 def _subject_with_candidates(db):
@@ -73,3 +73,49 @@ def test_resolver_accepts_valid_candidate(monkeypatch):
         assert isinstance(result, ResolverDecision)
         assert result.target_subject_type == a.canonical_name
         assert result.action == "select_candidate"
+
+
+def test_connectivity_check_reports_disabled_without_calling_openai(monkeypatch):
+    settings = get_settings()
+    monkeypatch.setattr(settings, "tg_ai_resolver_enabled", False)
+    monkeypatch.setattr(settings, "openai_api_key", "test-key")
+    monkeypatch.setattr("httpx.post", lambda *args, **kwargs: pytest.fail("OpenAI should not be called"))
+
+    result = check_resolver_connectivity()
+
+    assert result == {
+        "ok": False,
+        "enabled": False,
+        "api_key_present": True,
+        "model": settings.tg_ai_resolver_model,
+        "error": "TG-AI resolver is disabled",
+    }
+
+
+def test_connectivity_check_makes_non_mutating_openai_request(monkeypatch):
+    settings = get_settings()
+    monkeypatch.setattr(settings, "tg_ai_resolver_enabled", True)
+    monkeypatch.setattr(settings, "openai_api_key", "test-key")
+    calls = []
+
+    class FakeResponse:
+        def raise_for_status(self):
+            return None
+        def json(self):
+            return {"id": "resp_test", "output": [{"content": [{"type": "output_text", "text": "TG_AI_OK"}]}]}
+
+    def fake_post(*args, **kwargs):
+        calls.append((args, kwargs))
+        return FakeResponse()
+
+    monkeypatch.setattr("httpx.post", fake_post)
+    result = check_resolver_connectivity()
+
+    assert result["ok"] is True
+    assert result["enabled"] is True
+    assert result["api_key_present"] is True
+    assert result["model"] == settings.tg_ai_resolver_model
+    assert result["response_id"] == "resp_test"
+    assert result["response_text"] == "TG_AI_OK"
+    assert len(calls) == 1
+    assert calls[0][0][0] == "https://api.openai.com/v1/responses"
