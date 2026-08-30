@@ -7,9 +7,13 @@ from sqlalchemy.orm import Session
 from app.db.base import Base
 from app.models.v2 import SubjectType, V2Subject
 from app.schemas.v2 import ExperienceCreate
+from app.services.classification import affirm_classification
 from app.services.deliberation import DeliberationError
 from app.services.v2 import create_experience
-from app.services.workflows import start_or_resume_enrichment_workflow
+from app.services.workflows import (
+    start_or_resume_enrichment_workflow,
+    sync_enrichment_classification_workflow,
+)
 
 
 CLIENT = "chatgpt:v3"
@@ -66,6 +70,23 @@ def _experience(db, subject, headline="Review"):
     )
 
 
+def _record_first_decision(db, subject):
+    affirm_classification(
+        db,
+        subject,
+        source_model="model-a",
+        source_client=CLIENT,
+        reason="This subject independently supports its current classification.",
+        evidence={},
+    )
+    sync_enrichment_classification_workflow(
+        db,
+        subject,
+        actor_client=CLIENT,
+        actor_model="model-a",
+    )
+
+
 def test_new_subject_is_blocked_until_previous_first_classification_decision():
     with _session() as db:
         first_type = _type(db, "kettle")
@@ -83,6 +104,23 @@ def test_new_subject_is_blocked_until_previous_first_classification_decision():
         assert exc.value.code == "CLASSIFICATION_WORKFLOW_PENDING"
         assert exc.value.details["pending_subject_id"] == str(first.id)
         assert exc.value.details["required_action"] == "get_subject_classification"
+
+
+def test_client_can_continue_after_its_first_decision_without_waiting_for_second_model():
+    with _session() as db:
+        first_type = _type(db, "kettle")
+        second_type = _type(db, "book")
+        first = _subject(db, first_type, "First kettle", "first-kettle")
+        _experience(db, first)
+        start_or_resume_enrichment_workflow(
+            db, first, owner_id=OWNER, actor_client=CLIENT
+        )
+        _record_first_decision(db, first)
+        second = _subject(db, second_type, "Second book", "second-book")
+
+        saved = _experience(db, second)
+
+        assert saved.id is not None
 
 
 def test_existing_subject_with_historical_experience_is_not_batch_gated():
