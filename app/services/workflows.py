@@ -181,7 +181,6 @@ def workflow_body(run: WorkflowRun) -> dict:
             "agree": "affirm_subject_classification",
             "different_type": "propose_subject_reclassification",
         }
-        version_tool = "get_server_info"
         actor_instruction = (
             "An independent model must inspect the current classification"
             if run.state == "awaiting_second_model"
@@ -196,18 +195,15 @@ def workflow_body(run: WorkflowRun) -> dict:
         next_action_instruction = (
             f"{actor_instruction} by calling next_action with next_action_arguments, then call exactly one "
             "of decision_tools: agree when the existing type is supported, or different_type when evidence "
-            "supports another type. Immediately before that write, call version_tool and pass its "
-            "write_version_token unchanged as version_check. Use the acting model's own stable source_model identity."
+            "supports another type. Use the acting model's own stable source_model identity."
             f"{independence_instruction}"
         )
     elif run.state == "disputed":
-        next_action = "get_server_info"
-        decision_tools = {"reconcile": "create_deliberation"}
+        next_action = "create_deliberation"
         next_action_instruction = (
-            "Call next_action to obtain a live write_version_token, then call decision_tools.reconcile to preserve "
-            "and reconcile the classification disagreement; do not silently choose either candidate. Include the "
-            f"subject_id {subject_id} and workflow_run_id {run.id} in its context. Supply canonical_key, title, "
-            "question and idempotency_key, and pass the token unchanged as version_check."
+            "Call next_action to preserve and reconcile the classification disagreement; do not silently choose either "
+            f"candidate. Include subject_id {subject_id} and workflow_run_id {run.id} in its context. Supply "
+            "canonical_key, title, question and idempotency_key."
         )
     elif run.state == "blocked":
         next_action = None
