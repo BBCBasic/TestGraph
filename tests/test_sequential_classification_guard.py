@@ -4,20 +4,24 @@ import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
+from app.api.mcp_v2 import _affirm_subject_classification
+from app.core.security import Principal
 from app.db.base import Base
 from app.models.v2 import SubjectType, V2Subject
 from app.schemas.v2 import ExperienceCreate
-from app.services.classification import affirm_classification
 from app.services.deliberation import DeliberationError
 from app.services.v2 import create_experience
-from app.services.workflows import (
-    start_or_resume_enrichment_workflow,
-    sync_enrichment_classification_workflow,
-)
+from app.services.workflows import start_or_resume_enrichment_workflow
 
 
 CLIENT = "chatgpt:v3"
 OWNER = uuid.uuid4()
+PRINCIPAL = Principal(
+    subject="test-user",
+    client_id="chatgpt",
+    scopes={"reviews:write"},
+    user_id=OWNER,
+)
 
 
 def _session():
@@ -70,21 +74,18 @@ def _experience(db, subject, headline="Review"):
     )
 
 
-def _record_first_decision(db, subject):
-    affirm_classification(
+def _record_first_decision_through_mcp(db, subject):
+    result = _affirm_subject_classification(
         db,
-        subject,
-        source_model="model-a",
-        source_client=CLIENT,
-        reason="This subject independently supports its current classification.",
-        evidence={},
+        PRINCIPAL,
+        {
+            "subject_id": str(subject.id),
+            "source_model": "model-a",
+            "reason": "This subject independently supports its current classification.",
+            "evidence": {},
+        },
     )
-    sync_enrichment_classification_workflow(
-        db,
-        subject,
-        actor_client=CLIENT,
-        actor_model="model-a",
-    )
+    assert result.get("isError") is not True
 
 
 def test_new_subject_is_blocked_until_previous_first_classification_decision():
@@ -106,7 +107,7 @@ def test_new_subject_is_blocked_until_previous_first_classification_decision():
         assert exc.value.details["required_action"] == "get_subject_classification"
 
 
-def test_client_can_continue_after_its_first_decision_without_waiting_for_second_model():
+def test_client_can_continue_after_mcp_first_decision_without_waiting_for_second_model():
     with _session() as db:
         first_type = _type(db, "kettle")
         second_type = _type(db, "book")
@@ -115,7 +116,7 @@ def test_client_can_continue_after_its_first_decision_without_waiting_for_second
         start_or_resume_enrichment_workflow(
             db, first, owner_id=OWNER, actor_client=CLIENT
         )
-        _record_first_decision(db, first)
+        _record_first_decision_through_mcp(db, first)
         second = _subject(db, second_type, "Second book", "second-book")
 
         saved = _experience(db, second)
