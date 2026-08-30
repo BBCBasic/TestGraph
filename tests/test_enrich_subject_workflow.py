@@ -73,7 +73,7 @@ def test_enrichment_workflow_requires_classification_review_for_unconfirmed_subj
             "agree": "affirm_subject_classification",
             "different_type": "propose_subject_reclassification",
         }
-        assert body["version_tool"] == "get_server_info"
+        assert body["version_tool"] is None
         assert db.scalar(select(WorkflowEvent).where(WorkflowEvent.workflow_run_id == run.id)) is not None
 
 
@@ -88,7 +88,7 @@ def test_enrichment_workflow_waits_durably_for_second_model():
         body = workflow_body(run)
         assert body["next_action"] == "get_subject_classification"
         assert body["next_action_arguments"] == {"subject_id": str(subject.id)}
-        assert body["version_tool"] == "get_server_info"
+        assert body["version_tool"] is None
         assert "source_model must differ from every active_decisions[].source_model" in body["next_action_instruction"]
         assert "stop and hand this workflow to another model" in body["next_action_instruction"]
 
@@ -124,10 +124,11 @@ def test_enrichment_workflow_marks_disagreement():
         run = sync_enrichment_classification_workflow(db, subject, actor_client="pytest", actor_model="model-b")
         assert run.state == "disputed"
         body = workflow_body(run)
-        assert body["next_action"] == "get_server_info"
-        assert body["decision_tools"] == {"reconcile": "create_deliberation"}
-        for required in ("canonical_key", "title", "question", "idempotency_key", "version_check"):
+        assert body["next_action"] == "create_deliberation"
+        assert body["decision_tools"] == {}
+        for required in ("canonical_key", "title", "question", "idempotency_key"):
             assert required in body["next_action_instruction"]
+        assert "version_check" not in body["next_action_instruction"]
 
 
 def test_blocked_workflow_does_not_point_back_to_an_uninformative_tool():
