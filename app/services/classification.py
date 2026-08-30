@@ -125,6 +125,85 @@ def classification_state(db: Session, subject: V2Subject) -> dict:
     }
 
 
+def apply_resolver_arbitration(db: Session, subject: V2Subject, *, resolver_decision) -> dict:
+    """Apply TG-AI's choice as arbitration, not as an ordinary third consensus vote."""
+    from app.core.config import get_settings
+
+    if subject.classification_status != "disputed":
+        raise ValueError("Resolver arbitration requires a disputed classification")
+
+    active = list(db.scalars(select(SubjectClassificationDecision).where(
+        SubjectClassificationDecision.subject_id == subject.id,
+        SubjectClassificationDecision.classification_version == subject.classification_version,
+        SubjectClassificationDecision.outcome == "candidate",
+    ).order_by(SubjectClassificationDecision.created_at)).all())
+    if len({item.target_type_id for item in active}) < 2:
+        raise ValueError("Resolver arbitration requires at least two distinct active candidates")
+
+    target = resolve_subject_type(db, resolver_decision.target_subject_type)
+    if target is None or target.id not in {item.target_type_id for item in active}:
+        raise ValueError("Resolver selected a type outside the current candidate set")
+
+    collision = db.scalar(select(V2Subject).where(
+        V2Subject.id != subject.id,
+        V2Subject.subject_type_id == target.id,
+        V2Subject.canonical_key == subject.canonical_key,
+        V2Subject.deleted_at.is_(None),
+    ))
+    if collision:
+        raise ValueError("Resolver arbitration would collide with an existing subject")
+
+    settings = get_settings()
+    resolver_model = f"tg-ai:{settings.tg_ai_resolver_model}"
+    existing_resolver = db.scalar(select(SubjectClassificationDecision).where(
+        SubjectClassificationDecision.subject_id == subject.id,
+        SubjectClassificationDecision.classification_version == subject.classification_version,
+        SubjectClassificationDecision.source_model == resolver_model,
+    ))
+    if existing_resolver is not None:
+        raise ValueError("TG-AI resolver already arbitrated this classification round")
+
+    current = db.get(SubjectType, subject.subject_type_id)
+    if current is None:
+        raise ValueError("Current subject type not found")
+
+    resolver_audit = SubjectClassificationDecision(
+        subject_id=subject.id,
+        classification_version=subject.classification_version,
+        from_type_id=current.id,
+        target_type_id=target.id,
+        source_model=resolver_model,
+        source_client="testgraph-resolver",
+        reason=resolver_decision.reason.strip(),
+        evidence_json={
+            "resolver_confidence": resolver_decision.confidence,
+            "resolver_action": resolver_decision.action,
+            "arbitration": True,
+        },
+        outcome="resolver_selected",
+    )
+    db.add(resolver_audit)
+
+    for item in active:
+        item.outcome = "confirmed" if item.target_type_id == target.id else "rejected_resolver"
+
+    subject.subject_type_id = target.id
+    subject.classification_status = "confirmed"
+    subject.classification_locked_at = now_utc()
+    target.status = "confirmed"
+
+    logger.info(
+        "TG-AI arbitration applied subject=%s target=%s resolver_model=%s candidates=%s",
+        subject.id,
+        target.canonical_name,
+        resolver_model,
+        [str(item.target_type_id) for item in active],
+    )
+    db.commit()
+    db.refresh(subject)
+    return classification_state(db, subject)
+
+
 def propose_reclassification(
     db: Session, subject: V2Subject, *, target_subject_type: str, source_model: str,
     source_client: str, reason: str, evidence: dict, evidence_fingerprint: str | None = None,
@@ -221,22 +300,20 @@ def propose_reclassification(
     db.refresh(subject)
 
     if created_dispute and not model.startswith("tg-ai:"):
+        logger.info("TG-AI dispute hook entered subject=%s", subject.id)
         try:
-            from app.core.config import get_settings
             from app.services.tg_ai_resolver import resolve_classification_dispute
 
             resolver_decision = resolve_classification_dispute(db, subject)
             if resolver_decision is not None:
-                settings = get_settings()
-                return propose_reclassification(
-                    db,
-                    subject,
-                    target_subject_type=resolver_decision.target_subject_type,
-                    source_model=f"tg-ai:{settings.tg_ai_resolver_model}",
-                    source_client="testgraph-resolver",
-                    reason=resolver_decision.reason,
-                    evidence={"resolver_confidence": resolver_decision.confidence, "resolver_action": resolver_decision.action},
+                logger.info(
+                    "TG-AI dispute hook received decision subject=%s target=%s confidence=%s",
+                    subject.id,
+                    resolver_decision.target_subject_type,
+                    resolver_decision.confidence,
                 )
+                return apply_resolver_arbitration(db, subject, resolver_decision=resolver_decision)
+            logger.warning("TG-AI dispute hook returned no decision subject=%s", subject.id)
         except Exception:
             logger.exception("TG-AI resolver failed for subject %s", subject.id)
 
