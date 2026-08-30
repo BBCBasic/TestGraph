@@ -3,7 +3,7 @@ from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 
 from app.db.base import Base
-from app.models.v2 import SubjectClassificationDecision, V2Subject
+from app.models.v2 import SubjectClassificationDecision, SubjectType, V2Subject
 from app.services.classification import affirm_classification, propose_reclassification, reopen_classification
 from app.services.semantic import resolve_subject_hierarchy
 from app.services.v2 import resolve_subject_type
@@ -53,6 +53,45 @@ def _affirm(db, subject, model):
         evidence={"make": "Renault", "model": "Zoe"},
         evidence_fingerprint="zoe-is-vehicle",
     )
+
+
+def _luggage(db):
+    subject_type = SubjectType(
+        canonical_name="luggage",
+        normalized_name="luggage",
+        status="provisional",
+        created_by="seed",
+    )
+    db.add(subject_type)
+    db.flush()
+    subject = V2Subject(
+        subject_type_id=subject_type.id,
+        name="Osprey Sojourn 80L",
+        canonical_key="osprey-sojourn-80l",
+        identifiers_json={},
+        attributes_json={"brand": "Osprey", "capacity": "80L"},
+        provenance_json={},
+    )
+    db.add(subject)
+    db.commit()
+    db.refresh(subject)
+    db.refresh(subject_type)
+    return subject, subject_type
+
+
+def test_type_status_follows_two_model_affirmation_convergence():
+    with _new_session() as db:
+        subject, subject_type = _luggage(db)
+
+        first = _affirm(db, subject, "gpt-5")
+        db.refresh(subject_type)
+        assert first["status"] == "candidate"
+        assert subject_type.status == "candidate"
+
+        second = _affirm(db, subject, "claude-sonnet")
+        db.refresh(subject_type)
+        assert second["status"] == "confirmed"
+        assert subject_type.status == "confirmed"
 
 
 def test_first_ai_creates_candidate_without_moving_subject():

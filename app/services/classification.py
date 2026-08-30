@@ -201,12 +201,17 @@ def propose_reclassification(
             subject.subject_type_id = target.id
             subject.classification_status = "confirmed"
             subject.classification_locked_at = now_utc()
+            target.status = "confirmed"
             for item in active:
                 item.outcome = "confirmed"
         elif len(counts) > 1:
             subject.classification_status = "disputed"
+            if target.status == "provisional":
+                target.status = "candidate"
         else:
             subject.classification_status = "candidate"
+            if target.status == "provisional":
+                target.status = "candidate"
 
     db.commit()
     db.refresh(subject)
