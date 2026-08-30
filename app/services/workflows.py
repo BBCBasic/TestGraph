@@ -168,13 +168,56 @@ def sync_enrichment_classification_workflow(
 
 
 def workflow_body(run: WorkflowRun) -> dict:
-    next_action = {
-        "classification_review_required": "submit_classification_decision",
-        "awaiting_second_model": "await_independent_model",
-        "disputed": "resolve_disagreement",
-        "blocked": "resolve_blocker",
-        "completed": None,
-    }.get(run.state)
+    subject_id = str(run.subject_id) if run.subject_id else None
+    decision_tools = {}
+    next_action_arguments = {}
+    next_action_instruction = None
+    version_tool = None
+
+    if run.state in {"classification_review_required", "awaiting_second_model"}:
+        next_action = "get_subject_classification"
+        next_action_arguments = {"subject_id": subject_id}
+        decision_tools = {
+            "agree": "affirm_subject_classification",
+            "different_type": "propose_subject_reclassification",
+        }
+        version_tool = "get_server_info"
+        actor_instruction = (
+            "An independent model must inspect the current classification"
+            if run.state == "awaiting_second_model"
+            else "The current model must inspect the current classification"
+        )
+        independence_instruction = (
+            " source_model must differ from every active_decisions[].source_model returned by the inspection. "
+            "If you are not a distinct model, stop and hand this workflow to another model."
+            if run.state == "awaiting_second_model"
+            else ""
+        )
+        next_action_instruction = (
+            f"{actor_instruction} by calling next_action with next_action_arguments, then call exactly one "
+            "of decision_tools: agree when the existing type is supported, or different_type when evidence "
+            "supports another type. Immediately before that write, call version_tool and pass its "
+            "write_version_token unchanged as version_check. Use the acting model's own stable source_model identity."
+            f"{independence_instruction}"
+        )
+    elif run.state == "disputed":
+        next_action = "get_server_info"
+        decision_tools = {"reconcile": "create_deliberation"}
+        next_action_instruction = (
+            "Call next_action to obtain a live write_version_token, then call decision_tools.reconcile to preserve "
+            "and reconcile the classification disagreement; do not silently choose either candidate. Include the "
+            f"subject_id {subject_id} and workflow_run_id {run.id} in its context. Supply canonical_key, title, "
+            "question and idempotency_key, and pass the token unchanged as version_check."
+        )
+    elif run.state == "blocked":
+        next_action = None
+        next_action_instruction = (
+            "No automatic MCP action is available for this blocker. Do not retry or invent an unblocking write; "
+            "the blocker must be resolved explicitly before this workflow can continue."
+        )
+    else:
+        next_action = None
+
     return {
         "workflow_run_id": str(run.id),
         "workflow_type": run.workflow_type,
@@ -182,6 +225,10 @@ def workflow_body(run: WorkflowRun) -> dict:
         "current_step": run.current_step,
         "required_actor": run.required_actor,
         "next_action": next_action,
+        "next_action_arguments": next_action_arguments,
+        "next_action_instruction": next_action_instruction,
+        "decision_tools": decision_tools,
+        "version_tool": version_tool,
         "completed": run.state == "completed",
     }
 

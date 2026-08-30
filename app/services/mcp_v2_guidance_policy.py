@@ -292,7 +292,8 @@ def apply_guidance_tool_policy(tools: list[dict]) -> None:
     if enrichment:
         enrichment["description"] += (
             " WORKFLOW: the server now owns the post-enrichment procedure. A successful response includes durable "
-            "workflow state and the next required classification action. Follow workflow.next_action rather than "
+            "workflow state and the next required classification action. workflow.next_action names an exposed MCP tool; "
+            "call it with workflow.next_action_arguments and follow workflow.next_action_instruction rather than "
             "reconstructing the procedure yourself."
         )
     contribution = by_name.get("submit_contribution")

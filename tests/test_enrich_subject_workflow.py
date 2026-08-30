@@ -1,11 +1,16 @@
+import uuid
+from copy import deepcopy
+
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 
+from app.api.mcp_v2 import TOOLS
 from app.db.base import Base
 from app.models.entities import IdempotencyRecord
 from app.models.v2 import SubjectClassificationDecision, SubjectType, V2Subject
 from app.models.workflow import WorkflowEvent, WorkflowRun
 from app.services.workflows import start_or_resume_enrichment_workflow, sync_enrichment_classification_workflow, workflow_body
+from app.services.mcp_v2_guidance_policy import apply_guidance_tool_policy
 from app.services.write_safety import finish_idempotent_write
 
 
@@ -50,13 +55,25 @@ def _decision(db, subject, target, model, outcome="candidate"):
     return row
 
 
+def _exposed_tool_names():
+    tools = deepcopy(TOOLS)
+    apply_guidance_tool_policy(tools)
+    return {tool["name"] for tool in tools}
+
+
 def test_enrichment_workflow_requires_classification_review_for_unconfirmed_subject():
     with _session() as db:
         subject, _ = _subject(db)
         run = start_or_resume_enrichment_workflow(db, subject, owner_id=None, actor_client="pytest")
         body = workflow_body(run)
         assert body["state"] == "classification_review_required"
-        assert body["next_action"] == "submit_classification_decision"
+        assert body["next_action"] == "get_subject_classification"
+        assert body["next_action_arguments"] == {"subject_id": str(subject.id)}
+        assert body["decision_tools"] == {
+            "agree": "affirm_subject_classification",
+            "different_type": "propose_subject_reclassification",
+        }
+        assert body["version_tool"] == "get_server_info"
         assert db.scalar(select(WorkflowEvent).where(WorkflowEvent.workflow_run_id == run.id)) is not None
 
 
@@ -68,16 +85,25 @@ def test_enrichment_workflow_waits_durably_for_second_model():
         run = sync_enrichment_classification_workflow(db, subject, actor_client="pytest", actor_model="model-a")
         assert run.id is not None
         assert run.state == "awaiting_second_model"
-        assert workflow_body(run)["next_action"] == "await_independent_model"
+        body = workflow_body(run)
+        assert body["next_action"] == "get_subject_classification"
+        assert body["next_action_arguments"] == {"subject_id": str(subject.id)}
+        assert body["version_tool"] == "get_server_info"
+        assert "source_model must differ from every active_decisions[].source_model" in body["next_action_instruction"]
+        assert "stop and hand this workflow to another model" in body["next_action_instruction"]
 
 
 def test_enrichment_workflow_completes_when_classification_confirmed():
     with _session() as db:
         subject, _ = _subject(db, status="confirmed")
         run = start_or_resume_enrichment_workflow(db, subject, owner_id=None, actor_client="pytest")
+        body = workflow_body(run)
         assert run.state == "completed"
         assert run.completed_at is not None
-        assert workflow_body(run)["next_action"] is None
+        assert body["next_action"] is None
+        assert body["next_action_instruction"] is None
+        assert body["decision_tools"] == {}
+        assert body["version_tool"] is None
 
 
 def test_enrichment_workflow_marks_disagreement():
@@ -97,7 +123,52 @@ def test_enrichment_workflow_marks_disagreement():
         db.commit()
         run = sync_enrichment_classification_workflow(db, subject, actor_client="pytest", actor_model="model-b")
         assert run.state == "disputed"
-        assert workflow_body(run)["next_action"] == "resolve_disagreement"
+        body = workflow_body(run)
+        assert body["next_action"] == "get_server_info"
+        assert body["decision_tools"] == {"reconcile": "create_deliberation"}
+        for required in ("canonical_key", "title", "question", "idempotency_key", "version_check"):
+            assert required in body["next_action_instruction"]
+
+
+def test_blocked_workflow_does_not_point_back_to_an_uninformative_tool():
+    run = WorkflowRun(
+        id=uuid.uuid4(),
+        workflow_type="enrich_subject",
+        subject_id=uuid.uuid4(),
+        state="blocked",
+        current_step="test",
+        context_json={"blocker": "test blocker"},
+    )
+
+    body = workflow_body(run)
+
+    assert body["next_action"] is None
+    assert "no automatic mcp action" in body["next_action_instruction"].lower()
+
+
+def test_every_workflow_next_action_names_an_exposed_mcp_tool():
+    exposed = _exposed_tool_names()
+    for state in (
+        "classification_review_required",
+        "awaiting_second_model",
+        "disputed",
+        "blocked",
+    ):
+        run = WorkflowRun(
+            id=uuid.uuid4(),
+            workflow_type="enrich_subject",
+            subject_id=uuid.uuid4(),
+            state=state,
+            current_step="test",
+            context_json={},
+        )
+        body = workflow_body(run)
+        referenced = {
+            body["next_action"],
+            body.get("version_tool"),
+            *body.get("decision_tools", {}).values(),
+        } - {None}
+        assert referenced <= exposed
 
 
 def test_subject_enrichment_idempotent_commit_includes_initial_workflow_checkpoint():

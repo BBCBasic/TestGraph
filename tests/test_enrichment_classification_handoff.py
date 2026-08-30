@@ -13,6 +13,7 @@ def test_enrichment_uses_server_owned_workflow_guidance():
     assert "WORKFLOW" in description
     assert "server now owns the post-enrichment procedure" in description
     assert "workflow.next_action" in description
+    assert "names an exposed MCP tool" in description
     assert "reconstructing the procedure yourself" in description
 
 
