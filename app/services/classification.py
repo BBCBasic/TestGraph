@@ -137,11 +137,20 @@ def apply_resolver_arbitration(db: Session, subject: V2Subject, *, resolver_deci
         SubjectClassificationDecision.classification_version == subject.classification_version,
         SubjectClassificationDecision.outcome == "candidate",
     ).order_by(SubjectClassificationDecision.created_at)).all())
-    if len({item.target_type_id for item in active}) < 2:
+    active_target_ids = {item.target_type_id for item in active}
+    if len(active_target_ids) < 2:
         raise ValueError("Resolver arbitration requires at least two distinct active candidates")
 
-    target = resolve_subject_type(db, resolver_decision.target_subject_type)
-    if target is None or target.id not in {item.target_type_id for item in active}:
+    candidate_types = [db.get(SubjectType, target_id) for target_id in active_target_ids]
+    target = next(
+        (
+            candidate
+            for candidate in candidate_types
+            if candidate is not None and candidate.canonical_name == resolver_decision.target_subject_type
+        ),
+        None,
+    )
+    if target is None:
         raise ValueError("Resolver selected a type outside the current candidate set")
 
     collision = db.scalar(select(V2Subject).where(
