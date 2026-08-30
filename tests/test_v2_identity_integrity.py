@@ -9,14 +9,12 @@ from app.api.mcp_v2 import _save_experience
 from app.core.security import Principal
 from app.db.base import Base
 from app.models.v2 import V2Experience, V2Subject
-from app.services.classification import affirm_classification
 from app.services.deliberation import DeliberationError
 from app.services.v2 import (
     add_type_relationship,
     delete_owned_experience,
     ensure_subject_type,
 )
-from app.services.workflows import sync_enrichment_classification_workflow
 
 
 @pytest.fixture()
@@ -66,41 +64,6 @@ def _save_args(subject_type, canonical_key, *, name="Stress EV Alpha", identifie
 
 def _body(result):
     return json.loads(result["content"][0]["text"])
-
-
-def _advance_first_classification(db, principal, saved_body):
-    subject = db.get(V2Subject, uuid.UUID(saved_body["subject_id"]))
-    affirm_classification(
-        db,
-        subject,
-        source_model="fixture-model-a",
-        source_client=f"{principal.client_id}:v3",
-        reason="Fixture completes the first classification decision before the next new subject.",
-        evidence={},
-    )
-    sync_enrichment_classification_workflow(
-        db,
-        subject,
-        actor_client=f"{principal.client_id}:v3",
-        actor_model="fixture-model-a",
-    )
-
-
-def _confirm_reused_type(args):
-    args["subject_provenance"] = {
-        **args.get("subject_provenance", {}),
-        "classification_confirmation": {
-            "subject_ref": args["canonical_key"],
-            "independently_assessed": True,
-            "evidence": (
-                f"{args['name'] if 'name' in args else args['subject_name']} was independently assessed as this vehicle."
-            ),
-            "specificity_checked": True,
-            "specificity_reason": (
-                f"No more specific confirmed descendant type is justified for {args['subject_name']}."
-            ),
-        },
-    }
 
 
 def test_related_type_with_same_identity_requires_reclassification(db, principal):
@@ -157,12 +120,10 @@ def test_same_name_different_identity_warns_without_merging(db, principal):
         db, principal,
         _save_args("vehicle", "same-name-one", name="Same Name", identifier="ONE", suffix="same-name-one"),
     ))
-    _advance_first_classification(db, principal, first)
-    second_args = _save_args(
-        "vehicle", "same-name-two", name="Same Name", identifier="TWO", suffix="same-name-two"
-    )
-    _confirm_reused_type(second_args)
-    second = _body(_save_experience(db, principal, second_args))
+    second = _body(_save_experience(
+        db, principal,
+        _save_args("vehicle", "same-name-two", name="Same Name", identifier="TWO", suffix="same-name-two"),
+    ))
 
     assert first["subject_id"] != second["subject_id"]
     assert any(

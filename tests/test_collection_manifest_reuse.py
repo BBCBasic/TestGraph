@@ -10,9 +10,7 @@ from app.api.mcp_v2 import _save_experience, _search
 from app.core.security import Principal
 from app.db.base import Base
 from app.models.v2 import V2Subject
-from app.services.classification import affirm_classification
 from app.services.v2 import ensure_subject_type
-from app.services.workflows import sync_enrichment_classification_workflow
 
 
 DIRECTORY = "https://example.test/locations"
@@ -63,41 +61,6 @@ def _base_save(subject_name, canonical_key, idempotency_key):
         "visibility": "private",
         "user_approved": True,
         "idempotency_key": idempotency_key,
-    }
-
-
-def _advance_first_classification(db, principal, saved_body):
-    subject = db.get(V2Subject, uuid.UUID(saved_body["subject_id"]))
-    affirm_classification(
-        db,
-        subject,
-        source_model="fixture-model-a",
-        source_client=f"{principal.client_id}:v3",
-        reason="Fixture completes the first classification decision before the next new subject.",
-        evidence={},
-    )
-    sync_enrichment_classification_workflow(
-        db,
-        subject,
-        actor_client=f"{principal.client_id}:v3",
-        actor_model="fixture-model-a",
-    )
-
-
-def _confirm_reused_type(args):
-    args["subject_provenance"] = {
-        **args.get("subject_provenance", {}),
-        "classification_confirmation": {
-            "subject_ref": args["canonical_key"],
-            "independently_assessed": True,
-            "evidence": (
-                f"{args['subject_name']} was independently inspected and its evidence supports the cafe type."
-            ),
-            "specificity_checked": True,
-            "specificity_reason": (
-                f"No more specific confirmed descendant type is justified for {args['subject_name']}."
-            ),
-        },
     }
 
 
@@ -177,11 +140,9 @@ def test_later_review_reuses_verified_manifest_without_resubmitting_members(db, 
     assert stored["status"] == "verified"
     assert len(stored["member_subject_ids"]) == 3
 
-    _advance_first_classification(db, principal, first)
     later = _base_save(
         "Example Group North", "example-group-north", "reuse-manifest-2"
     )
-    _confirm_reused_type(later)
     later["subject_context"] = {"subjects": [], "relationships": []}
     later["collection_assessment"] = {
         "status": "member",
@@ -231,11 +192,9 @@ def test_existing_full_save_is_backfilled_and_reused_without_resubmission(db, pr
     collection.provenance_json = provenance
     db.commit()
 
-    _advance_first_classification(db, principal, first)
     later = _base_save(
         "Example Group South", "example-group-south", "legacy-manifest-4"
     )
-    _confirm_reused_type(later)
     later["subject_context"] = {"subjects": [], "relationships": []}
     later["collection_assessment"] = {
         "status": "member",
@@ -309,3 +268,4 @@ def test_legacy_partial_manifest_cannot_support_tetbury_absence_or_reuse(db, pri
     assert body["details"]["code"] == "collection_manifest_coverage_incomplete"
     assert body["details"]["coverage_status"] == "partial"
     assert body["details"]["absence_claim_allowed"] is False
+

@@ -123,25 +123,6 @@ def classification_state(db: Session, subject: V2Subject) -> dict:
     }
 
 
-def _sync_enrichment_workflow_after_decision(
-    db: Session,
-    subject: V2Subject,
-    *,
-    source_client: str,
-    source_model: str,
-) -> None:
-    # Local import avoids adding a module-level dependency cycle between the
-    # classification and workflow service layers.
-    from app.services.workflows import sync_enrichment_classification_workflow
-
-    sync_enrichment_classification_workflow(
-        db,
-        subject,
-        actor_client=source_client,
-        actor_model=source_model,
-    )
-
-
 def propose_reclassification(
     db: Session, subject: V2Subject, *, target_subject_type: str, source_model: str,
     source_client: str, reason: str, evidence: dict, evidence_fingerprint: str | None = None,
@@ -171,12 +152,6 @@ def propose_reclassification(
     if existing:
         if existing.target_type_id != target.id:
             raise ValueError("This AI model already made a different decision in the current classification round")
-        _sync_enrichment_workflow_after_decision(
-            db,
-            subject,
-            source_client=source_client,
-            source_model=model,
-        )
         return classification_state(db, subject)
 
     if subject.classification_status != "confirmed":
@@ -240,12 +215,6 @@ def propose_reclassification(
 
     db.commit()
     db.refresh(subject)
-    _sync_enrichment_workflow_after_decision(
-        db,
-        subject,
-        source_client=source_client,
-        source_model=model,
-    )
     return classification_state(db, subject)
 
 

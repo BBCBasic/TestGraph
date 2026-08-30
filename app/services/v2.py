@@ -19,7 +19,6 @@ from app.schemas.v2 import (
     AssessmentCreate, ExperienceCreate, FieldEnsure, SourceCreate, SubjectContextEnsure,
     SubjectEnsure,
 )
-from app.services.classification_write_guard import enforce_sequential_classification_write
 from app.services.deliberation import DeliberationError
 
 
@@ -544,9 +543,6 @@ def create_experience(
     subject = db.get(V2Subject, payload.subject_id)
     if not subject or subject.deleted_at:
         raise ValueError("Subject not found")
-    classification_confirmation = enforce_sequential_classification_write(
-        db, subject, owner_id=payload.owner_id, client_id=client_id
-    )
     subject_type = db.get(SubjectType, subject.subject_type_id)
     canonical_data, log = normalise_data(
         db, subject_type, payload.structured_data, source=client_id,
@@ -574,7 +570,6 @@ def create_experience(
         publication_status="published",
         provenance={
             "kind": "direct_user_experience", "source_client": client_id,
-            **({"classification_confirmation": classification_confirmation} if classification_confirmation else {}),
             **({"subject_enrichment_check": enrichment_check} if enrichment_check else {}),
             **({"collection_assessment": collection_assessment} if collection_assessment else {}),
         },
