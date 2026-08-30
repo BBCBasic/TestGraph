@@ -255,3 +255,4 @@ def _finalize_subject_enrichment(db: Session, *, client_id: str, response_body: 
 
 
 register_write_finalize_hook("subject-enrichment", _finalize_subject_enrichment)
+register_write_finalize_hook("experience", _finalize_subject_enrichment)
