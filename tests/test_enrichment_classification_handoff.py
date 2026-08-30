@@ -17,7 +17,7 @@ def test_enrichment_uses_server_owned_workflow_guidance():
     assert "reconstructing the procedure yourself" in description
 
 
-def test_classification_writes_use_live_version_safety():
+def test_classification_writes_keep_write_scope_without_per_call_version_probe():
     assert "affirm_subject_classification" in WRITE_TOOL_NAMES
     assert "propose_subject_reclassification" in WRITE_TOOL_NAMES
     assert "reopen_subject_classification" in WRITE_TOOL_NAMES
@@ -27,5 +27,5 @@ def test_classification_writes_use_live_version_safety():
     by_name = {tool["name"]: tool for tool in tools}
     for name in ("affirm_subject_classification", "propose_subject_reclassification", "reopen_subject_classification"):
         schema = by_name[name]["inputSchema"]
-        assert "version_check" in schema["properties"]
-        assert "version_check" in schema["required"]
+        assert "version_check" not in schema["properties"]
+        assert "version_check" not in schema["required"]

@@ -59,10 +59,9 @@ GET_SERVER_INFO_TOOL = {
     "name": "get_server_info",
     "title": "Get TestGraph server and deployment version",
     "description": (
-        "Return the exact TestGraph MCP server version and live deployment identity. Call this immediately before "
-        "any write operation and pass the returned write_version_token unchanged as version_check. A token from a "
-        "different or older deployment is rejected before any write is attempted. Compare build_sha and deployment_id "
-        "with the public /version endpoint when diagnosing stale MCP connections or endpoint mismatches."
+        "Return the exact TestGraph MCP server version and live deployment identity for diagnostics. Use this when "
+        "checking a stale connection, endpoint mismatch or deployment issue; ordinary writes do not require a preceding "
+        "version probe. Compare build_sha and deployment_id with the public /version endpoint when troubleshooting."
     ),
     "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
     "annotations": {"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
@@ -236,7 +235,7 @@ def _server_info(mcp_module) -> dict:
         "service_id": os.getenv("RAILWAY_SERVICE_ID") or "unknown",
         "environment": os.getenv("RAILWAY_ENVIRONMENT_NAME") or os.getenv("RAILWAY_ENVIRONMENT") or "unknown",
         "mcp_endpoint": endpoint, "version_endpoint": f"{base}/version", "write_version_token": write_version_token,
-        "write_requirement": "Call get_server_info immediately before every write and pass write_version_token as version_check.",
+        "write_requirement": "No per-write version probe is required. Use get_server_info only for deployment diagnostics.",
     }
 
 
@@ -247,8 +246,7 @@ def _version_error(mcp_module, *, supplied=None):
         "error": message, "error_code": "MCP_VERSION_CHECK_REQUIRED", "user_message": message,
         "write_blocked": True, "no_write_performed": True,
         "action_required": (
-            "Call get_server_info on the current TestGraph connection immediately before the write, then retry using "
-            "its write_version_token as version_check. If get_server_info is not visible, refresh or reconnect TestGraph."
+            "Refresh or reconnect TestGraph when diagnosing a stale MCP connection."
         ),
         "current_server": {key: current[key] for key in ("server_version", "protocol_version", "build_sha", "deployment_id", "mcp_endpoint")},
     }
@@ -276,18 +274,6 @@ def apply_guidance_tool_policy(tools: list[dict]) -> None:
             if "_meta" in template:
                 tool["_meta"] = template["_meta"]
             tools.insert(0, tool)
-    for item in tools:
-        if item.get("name") not in WRITE_TOOL_NAMES:
-            continue
-        schema = item.setdefault("inputSchema", {"type": "object", "properties": {}})
-        schema.setdefault("properties", {})["version_check"] = {
-            "type": "string", "minLength": 64, "maxLength": 64,
-            "description": "Required live deployment token. Call get_server_info immediately before this write and pass write_version_token unchanged. Stale or missing tokens are rejected before any write occurs.",
-        }
-        required = schema.setdefault("required", [])
-        if "version_check" not in required:
-            required.append("version_check")
-        item["description"] = item.get("description", "") + " VERSION SAFETY: immediately before calling this write, call get_server_info and pass its write_version_token as version_check. The server blocks stale or unchecked writes."
     enrichment = by_name.get("enrich_subject")
     if enrichment:
         enrichment["description"] += (
@@ -301,7 +287,7 @@ def apply_guidance_tool_policy(tools: list[dict]) -> None:
         enum = contribution.get("inputSchema", {}).get("properties", {}).get("contribution_type", {}).setdefault("enum", [])
         if "vote" not in enum:
             enum.append("vote")
-        contribution["description"] = "Add an immutable proposal, critique, counterproposal, reconciliation or vote. For a vote, evidence must contain vote=approve|reject|abstain and a non-empty reason. Preserve attribution and disagreement. Votes are advisory and never resolve a deliberation or activate guidance. The server independently checks machine-verifiable acceptance criteria and referenced review IDs. VERSION SAFETY: immediately before calling this write, call get_server_info and pass its write_version_token as version_check."
+        contribution["description"] = "Add an immutable proposal, critique, counterproposal, reconciliation or vote. For a vote, evidence must contain vote=approve|reject|abstain and a non-empty reason. Preserve attribution and disagreement. Votes are advisory and never resolve a deliberation or activate guidance. The server independently checks machine-verifiable acceptance criteria and referenced review IDs."
     create = by_name.get("create_deliberation")
     if create:
         create["description"] += " To propose an induction-guidance change, set context.governance_kind='induction_guidance', context.guidance_key to the stable section key, context.guidance_scope to 'global' or 'model', and context.target_model when scope is model. The proposal remains inactive until explicit user approval."
@@ -585,21 +571,6 @@ def install_get_induction_middleware(app, mcp_module) -> None:
         method = body.get("method")
         tool_name = params.get("name")
         args = params.get("arguments") or {}
-
-        if method == "tools/call" and tool_name in WRITE_TOOL_NAMES:
-            supplied = args.get("version_check")
-            expected = _server_info(mcp_module)["write_version_token"]
-            if supplied != expected:
-                result = _version_error(mcp_module, supplied=supplied)
-                _record_tool_audit(request, mcp_module, tool_name, args, result, started, forced_outcome="stale_version")
-                return JSONResponse({"jsonrpc": "2.0", "id": body.get("id"), "result": result})
-            clean_body = dict(body)
-            clean_params = dict(params)
-            clean_args = dict(args)
-            clean_args.pop("version_check", None)
-            clean_params["arguments"] = clean_args
-            clean_body["params"] = clean_params
-            raw = json.dumps(clean_body, separators=(",", ":")).encode("utf-8")
 
         intercepted = method == "tools/call" and tool_name in {
             "get_induction", "get_server_info", "list_reviews_by_visibility", "set_review_visibility",
