@@ -7,6 +7,7 @@ from app.core.config import get_settings
 from app.db.session import SessionLocal
 from app.models.entities import User
 from app.models.v2 import SubjectClassificationDecision, SubjectType, V2Subject
+from app.services.classification import apply_resolver_arbitration
 from app.services.tg_ai_resolver import ResolverDecision, check_resolver_connectivity, resolve_classification_dispute
 
 
@@ -73,6 +74,39 @@ def test_resolver_accepts_valid_candidate(monkeypatch):
         assert isinstance(result, ResolverDecision)
         assert result.target_subject_type == a.canonical_name
         assert result.action == "select_candidate"
+
+
+def test_resolver_arbitration_confirms_winner_and_preserves_audit():
+    settings = get_settings()
+    with SessionLocal() as db:
+        subject, a, b = _subject_with_candidates(db)
+        result = apply_resolver_arbitration(
+            db,
+            subject,
+            resolver_decision=ResolverDecision(
+                target_subject_type=a.canonical_name,
+                confidence=0.95,
+                reason="A is the more specific supported candidate",
+                action="select_candidate",
+            ),
+        )
+
+        assert result["status"] == "confirmed"
+        assert result["subject_type"] == a.canonical_name
+        assert result["locked_at"] is not None
+
+        by_model = {item["source_model"]: item for item in result["active_decisions"]}
+        assert by_model["model-a"]["outcome"] == "confirmed"
+        assert by_model["model-b"]["outcome"] == "rejected_resolver"
+        resolver = by_model[f"tg-ai:{settings.tg_ai_resolver_model}"]
+        assert resolver["target_subject_type"] == a.canonical_name
+        assert resolver["outcome"] == "resolver_selected"
+        assert resolver["evidence"]["arbitration"] is True
+
+        stored_subject = db.get(V2Subject, subject.id)
+        assert stored_subject.subject_type_id == a.id
+        assert stored_subject.classification_status == "confirmed"
+        assert db.get(SubjectType, b.id).status == "candidate"
 
 
 def test_connectivity_check_reports_disabled_without_calling_openai(monkeypatch):
