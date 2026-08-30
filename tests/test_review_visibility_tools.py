@@ -47,11 +47,12 @@ def _make_review(db, user, visibility, headline):
     return review
 
 
-def test_review_visibility_tools_are_published():
+def test_review_visibility_tools_are_published_without_per_call_version_probe():
     names = {tool["name"] for tool in TOOLS}
     assert {"list_reviews_by_visibility", "set_review_visibility"} <= names
     setter = next(tool for tool in TOOLS if tool["name"] == "set_review_visibility")
-    assert "version_check" in setter["inputSchema"]["required"]
+    assert "version_check" not in setter["inputSchema"]["required"]
+    assert "version_check" not in setter["inputSchema"]["properties"]
 
 
 def test_list_reviews_by_visibility_returns_stable_ids_and_positions():
