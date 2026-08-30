@@ -14,9 +14,12 @@ from app.services.tg_ai_resolver import ResolverDecision, check_resolver_connect
 def _subject_with_candidates(db):
     user = User(display_name=f"resolver-{uuid.uuid4()}", profile_data={})
     db.add(user); db.flush()
-    current = SubjectType(canonical_name=f"parent-{uuid.uuid4()}", normalized_name=f"parent-{uuid.uuid4()}", status="provisional", created_by="pytest")
-    a = SubjectType(canonical_name=f"candidate-a-{uuid.uuid4()}", normalized_name=f"candidate-a-{uuid.uuid4()}", status="candidate", created_by="pytest")
-    b = SubjectType(canonical_name=f"candidate-b-{uuid.uuid4()}", normalized_name=f"candidate-b-{uuid.uuid4()}", status="candidate", created_by="pytest")
+    current_name = f"parent-{uuid.uuid4()}"
+    a_name = f"candidate-a-{uuid.uuid4()}"
+    b_name = f"candidate-b-{uuid.uuid4()}"
+    current = SubjectType(canonical_name=current_name, normalized_name=current_name, status="provisional", created_by="pytest")
+    a = SubjectType(canonical_name=a_name, normalized_name=a_name, status="candidate", created_by="pytest")
+    b = SubjectType(canonical_name=b_name, normalized_name=b_name, status="candidate", created_by="pytest")
     db.add_all([current, a, b]); db.flush()
     subject = V2Subject(subject_type_id=current.id, owner_id=user.id, name="Resolver subject", canonical_key=f"resolver-{uuid.uuid4()}", identifiers_json={}, attributes_json={}, provenance_json={}, classification_status="disputed")
     db.add(subject); db.flush()
