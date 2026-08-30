@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import uuid
 from collections import Counter
 
@@ -13,6 +14,7 @@ from app.services.semantic_head import validate_semantic_type_name
 from app.services.v2 import resolve_subject_type
 
 
+logger = logging.getLogger(__name__)
 REOPEN_TRIGGERS = {"user_correction", "contradictory_evidence", "type_retired", "vocabulary_invalidated"}
 
 
@@ -182,6 +184,7 @@ def propose_reclassification(
     db.add(decision)
     db.flush()
 
+    created_dispute = False
     if subject.classification_status != "confirmed":
         active = list(db.scalars(select(SubjectClassificationDecision).where(
             SubjectClassificationDecision.subject_id == subject.id,
@@ -205,6 +208,7 @@ def propose_reclassification(
             for item in active:
                 item.outcome = "confirmed"
         elif len(counts) > 1:
+            created_dispute = subject.classification_status != "disputed"
             subject.classification_status = "disputed"
             if target.status == "provisional":
                 target.status = "candidate"
@@ -215,6 +219,27 @@ def propose_reclassification(
 
     db.commit()
     db.refresh(subject)
+
+    if created_dispute and not model.startswith("tg-ai:"):
+        try:
+            from app.core.config import get_settings
+            from app.services.tg_ai_resolver import resolve_classification_dispute
+
+            resolver_decision = resolve_classification_dispute(db, subject)
+            if resolver_decision is not None:
+                settings = get_settings()
+                return propose_reclassification(
+                    db,
+                    subject,
+                    target_subject_type=resolver_decision.target_subject_type,
+                    source_model=f"tg-ai:{settings.tg_ai_resolver_model}",
+                    source_client="testgraph-resolver",
+                    reason=resolver_decision.reason,
+                    evidence={"resolver_confidence": resolver_decision.confidence, "resolver_action": resolver_decision.action},
+                )
+        except Exception:
+            logger.exception("TG-AI resolver failed for subject %s", subject.id)
+
     return classification_state(db, subject)
 
 
