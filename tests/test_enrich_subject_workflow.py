@@ -188,3 +188,22 @@ def test_subject_enrichment_idempotent_commit_includes_initial_workflow_checkpoi
         assert run is not None
         assert body["workflow"]["workflow_run_id"] == str(run.id)
         assert stored.response_body["workflow"]["workflow_run_id"] == str(run.id)
+
+
+def test_save_experience_idempotent_commit_includes_initial_workflow_checkpoint():
+    with _session() as db:
+        subject, _ = _subject(db)
+        body = {"subject_id": str(subject.id), "experience_id": str(uuid.uuid4())}
+        finish_idempotent_write(
+            db,
+            client_id="pytest:v3",
+            key="experience:atomic-test",
+            payload_hash="hash",
+            response_body=body,
+        )
+
+        run = db.scalar(select(WorkflowRun).where(WorkflowRun.subject_id == subject.id))
+        stored = db.scalar(select(IdempotencyRecord).where(IdempotencyRecord.key == "experience:atomic-test"))
+        assert run is not None
+        assert body["workflow"]["workflow_run_id"] == str(run.id)
+        assert stored.response_body["workflow"]["workflow_run_id"] == str(run.id)
