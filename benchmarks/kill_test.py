@@ -68,20 +68,31 @@ def kill_verdict(simple_summary: dict, testgraph_summary: dict, reduction_target
 
 def load_cases(path: str | Path) -> list[BenchmarkCase]:
     raw = json.loads(Path(path).read_text(encoding="utf-8"))
+    compact = isinstance(raw, dict) and "cases" in raw
+    items = raw["cases"] if compact else raw
     seen: set[str] = set()
     cases: list[BenchmarkCase] = []
-    for item in raw:
-        case_id = str(item["id"])
+    for item in items:
+        if compact:
+            case_id, observation, category, expected_type, acceptable_types, trap = item
+        else:
+            case_id = item["id"]
+            observation = item["observation"]
+            category = item["category"]
+            expected_type = item["expected_type"]
+            acceptable_types = item.get("acceptable_types", ())
+            trap = item.get("trap")
+        case_id = str(case_id)
         if case_id in seen:
             raise ValueError(f"duplicate benchmark case id: {case_id}")
         seen.add(case_id)
         cases.append(BenchmarkCase(
             id=case_id,
-            observation=str(item["observation"]),
-            category=str(item["category"]),
-            expected_type=str(item["expected_type"]),
-            acceptable_types=tuple(item.get("acceptable_types", ())),
-            trap=item.get("trap"),
+            observation=str(observation),
+            category=str(category),
+            expected_type=str(expected_type),
+            acceptable_types=tuple(acceptable_types or ()),
+            trap=trap,
         ))
     return cases
 
