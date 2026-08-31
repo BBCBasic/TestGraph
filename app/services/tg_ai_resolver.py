@@ -14,6 +14,7 @@ from app.models.v2 import SubjectClassificationDecision, SubjectType, V2Subject
 
 logger = logging.getLogger(__name__)
 OPENAI_RESPONSES_URL = "https://api.openai.com/v1/responses"
+RESOLVER_MAX_ATTEMPTS = 2
 
 
 class ResolverDecision(BaseModel):
@@ -33,16 +34,35 @@ def _extract_output_text(payload: dict) -> str:
 
 def _openai_post(*, input_text: str):
     settings = get_settings()
-    logger.info("TG-AI OpenAI request sending model=%s", settings.tg_ai_resolver_model)
-    response = httpx.post(
-        OPENAI_RESPONSES_URL,
-        headers={"Authorization": f"Bearer {settings.openai_api_key}", "Content-Type": "application/json"},
-        json={"model": settings.tg_ai_resolver_model, "input": input_text},
-        timeout=settings.tg_ai_resolver_timeout_seconds,
-    )
-    logger.info("TG-AI OpenAI response received status=%s", getattr(response, "status_code", "unknown"))
-    response.raise_for_status()
-    return response
+    for attempt in range(1, RESOLVER_MAX_ATTEMPTS + 1):
+        logger.info(
+            "TG-AI OpenAI request sending model=%s attempt=%s/%s timeout=%ss",
+            settings.tg_ai_resolver_model,
+            attempt,
+            RESOLVER_MAX_ATTEMPTS,
+            settings.tg_ai_resolver_timeout_seconds,
+        )
+        try:
+            response = httpx.post(
+                OPENAI_RESPONSES_URL,
+                headers={"Authorization": f"Bearer {settings.openai_api_key}", "Content-Type": "application/json"},
+                json={"model": settings.tg_ai_resolver_model, "input": input_text},
+                timeout=settings.tg_ai_resolver_timeout_seconds,
+            )
+        except httpx.TimeoutException:
+            if attempt >= RESOLVER_MAX_ATTEMPTS:
+                raise
+            logger.warning(
+                "TG-AI OpenAI request timed out; retrying model=%s attempt=%s/%s",
+                settings.tg_ai_resolver_model,
+                attempt,
+                RESOLVER_MAX_ATTEMPTS,
+            )
+            continue
+        logger.info("TG-AI OpenAI response received status=%s", getattr(response, "status_code", "unknown"))
+        response.raise_for_status()
+        return response
+    raise RuntimeError("TG-AI resolver retry loop exhausted unexpectedly")
 
 
 def check_resolver_connectivity() -> dict:
