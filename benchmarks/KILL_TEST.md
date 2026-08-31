@@ -6,9 +6,9 @@ This benchmark is deliberately hostile to TestGraph. Its purpose is to decide wh
 
 Compare three regimes on the same frozen cases and evidence:
 
-- `single`: one model decides.
-- `simple`: two models decide independently; agreement is accepted, disagreement goes to an independent resolver.
-- `testgraph`: the real TestGraph V2 classification/convergence workflow is used, including server-enforced independent decisions, dispute state and resolver behavior.
+- `single`: use the first decision from one frozen blind model pair.
+- `simple`: use both decisions from that same frozen blind pair; agreement is accepted, disagreement goes to an independent resolver.
+- `testgraph`: replay that exact same frozen blind pair through the real TestGraph V2 classification/convergence workflow, including server-enforced independent decisions, dispute state and resolver behavior.
 
 The primary endpoint is **wrong canonicalisation rate**: among items promoted to canonical/confirmed status, the proportion whose final type is not in the frozen answer key.
 
@@ -46,48 +46,67 @@ export ANTHROPIC_API_KEY=...
 
 Default model IDs are `gpt-5.6-terra` and `claude-sonnet-5`. Pin different IDs without changing code by setting `KILL_TEST_OPENAI_MODEL` / `KILL_TEST_ANTHROPIC_MODEL`, or pin an individual slot with `KILL_TEST_FIRST_MODEL`, `KILL_TEST_SECOND_MODEL`, and `KILL_TEST_RESOLVER_MODEL`.
 
-Run the 10-case machinery shakedown first:
+### Freeze the blind decisions once
+
+The experiment makes exactly one blind GPT/Claude decision pair per case. That pair is then reused by all three regimes. This prevents stochastic sampling differences from being mistaken for a protocol effect.
+
+Ten-case shakedown collection:
+
+```bash
+python scripts/run_kill_test.py \
+  --regime testgraph-collect \
+  --shakedown \
+  --output /tmp/kill-frozen-shakedown.jsonl \
+  --audit-output /tmp/kill-frozen-shakedown-audit.jsonl
+```
+
+Full collection:
+
+```bash
+python scripts/run_kill_test.py \
+  --regime testgraph-collect \
+  --output kill-frozen-decisions.jsonl \
+  --audit-output kill-frozen-decisions-audit.jsonl
+```
+
+`testgraph-collect` is deliberately **not a scored result**. It freezes the two independent first decisions with `pending_replay=true`. Model B receives the same observation prompt and cannot see model A's answer.
+
+### Score Single from the frozen first decision
+
+```bash
+python scripts/run_kill_test.py \
+  --regime single \
+  --collected-input kill-frozen-decisions.jsonl \
+  --output kill-single.jsonl \
+  --audit-output kill-single-audit.jsonl
+```
+
+### Score Simple from the same frozen pair
 
 ```bash
 python scripts/run_kill_test.py \
   --regime simple \
-  --shakedown \
-  --output /tmp/kill-simple-shakedown.jsonl \
-  --audit-output /tmp/kill-simple-shakedown-audit.jsonl
+  --collected-input kill-frozen-decisions.jsonl \
+  --output kill-simple.jsonl \
+  --audit-output kill-simple-audit.jsonl
 ```
 
-Then collect the full single-model and simple-ensemble baselines:
+If the two frozen decisions agree, Simple accepts the shared answer without another model call. If they disagree, only the independent Simple resolver is called.
 
-```bash
-python scripts/run_kill_test.py --regime single \
-  --output kill-single.jsonl --audit-output kill-single-audit.jsonl
-
-python scripts/run_kill_test.py --regime simple \
-  --output kill-simple.jsonl --audit-output kill-simple-audit.jsonl
-```
-
-The first two blind decisions for the TestGraph regime are collected separately so benchmark subjects are not written into the normal graph:
-
-```bash
-python scripts/run_kill_test.py --regime testgraph-collect \
-  --output kill-testgraph-decisions.jsonl \
-  --audit-output kill-testgraph-decisions-audit.jsonl
-```
-
-`testgraph-collect` is deliberately **not a scored TestGraph result**. It freezes the two independent first decisions with `pending_replay=true`.
+The direct live `single` and `simple` runner paths remain available for diagnostics, but **must not be used for the final comparative benchmark** because they would resample the first decisions.
 
 ## Isolated TestGraph replay
 
-Replay the frozen TestGraph decisions through the real classification, dispute and `tg-ai` resolver services in a separate SQLite database. The normal application database is never opened by this stage.
+Replay the same frozen decisions through the real classification, dispute and `tg-ai` resolver services in a separate SQLite database. The normal application database is never opened by this stage.
 
 Ten-case shakedown:
 
 ```bash
 python scripts/replay_kill_test.py \
-  --collected kill-testgraph-decisions.jsonl \
-  --results kill-testgraph-shakedown.jsonl \
-  --audit kill-testgraph-shakedown-audit.jsonl \
-  --database sqlite+pysqlite:///kill-test-shakedown.db \
+  --collected /tmp/kill-frozen-shakedown.jsonl \
+  --results /tmp/kill-testgraph-shakedown.jsonl \
+  --audit /tmp/kill-testgraph-shakedown-audit.jsonl \
+  --database sqlite+pysqlite:////tmp/kill-test-shakedown.db \
   --shakedown 10
 ```
 
@@ -95,7 +114,7 @@ Full replay:
 
 ```bash
 python scripts/replay_kill_test.py \
-  --collected kill-testgraph-decisions.jsonl \
+  --collected kill-frozen-decisions.jsonl \
   --results kill-testgraph.jsonl \
   --audit kill-testgraph-audit.jsonl \
   --database sqlite+pysqlite:///kill-test-replay.db
@@ -108,12 +127,13 @@ Use `--case-id h001` (repeatable) for targeted model-runner diagnosis or `--limi
 ## Run discipline
 
 1. Freeze the corpus before seeing outputs.
-2. Give each regime identical observation text and the same available vocabulary/context.
-3. For independent first decisions, prevent model B from seeing model A's answer.
+2. Collect one blind first/second model pair per case and reuse that exact pair for Single, Simple and TestGraph.
+3. Prevent model B from seeing model A's answer during the frozen collection.
 4. Use different model identities for the two first decisions where possible.
 5. Do not repair TestGraph during a benchmark run. A stuck/incorrect workflow is an operational failure.
 6. Keep raw provider responses and TestGraph interaction IDs outside the scored file for later audit.
 7. Run all regimes across the complete corpus before looking at the final verdict.
+8. Do not change prompts, answer keys or protocol based on classification correctness observed in the 10-case machinery shakedown.
 
 ## Scoring
 
@@ -125,3 +145,5 @@ python scripts/score_kill_test.py --results kill-results.jsonl --output kill-rep
 ```
 
 The JSON report includes correctness, wrong-canonicalisation rate, false-consensus rate, operational-failure rate, model/resolver calls, cost, and the predetermined `CONTINUE`/`ARCHIVE` verdict.
+
+Provider `cost_usd` is currently zero unless explicit pricing is supplied by the runner. Do not claim a comparative dollar-cost result from zero-valued records; model and resolver call counts remain valid operational-cost proxies.

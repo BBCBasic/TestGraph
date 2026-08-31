@@ -6,7 +6,7 @@ from pathlib import Path
 
 from benchmarks.kill_test import load_cases
 from benchmarks.providers import AnthropicProvider, OpenAIProvider
-from benchmarks.runner import run_cases, write_jsonl
+from benchmarks.runner import read_jsonl, run_cases, run_cases_from_collected, write_jsonl
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -30,6 +30,7 @@ def parse_args(argv=None):
     parser.add_argument("--cases", default=str(DEFAULT_CASES))
     parser.add_argument("--output", required=True)
     parser.add_argument("--audit-output", required=True)
+    parser.add_argument("--collected-input", help="Reuse frozen testgraph-collect decisions for single/simple scoring")
     parser.add_argument("--first-provider", choices=["openai", "anthropic"], default="openai")
     parser.add_argument("--second-provider", choices=["openai", "anthropic"], default="anthropic")
     parser.add_argument("--resolver-provider", choices=["openai", "anthropic"], default="openai")
@@ -53,22 +54,35 @@ def main(argv=None):
             raise SystemExit("--limit must be at least 1")
         cases = cases[: args.limit]
 
-    first = provider_from_name(args.first_provider, "first")
-    second = None
-    resolver = None
-    if args.regime in {"simple", "testgraph-collect"}:
-        second = provider_from_name(args.second_provider, "second")
-    if args.regime == "simple":
-        resolver = provider_from_name(args.resolver_provider, "resolver")
+    if args.collected_input:
+        if args.regime not in {"single", "simple"}:
+            raise SystemExit("--collected-input is only valid for single or simple regimes")
+        collected_rows = read_jsonl(args.collected_input)
+        resolver = provider_from_name(args.resolver_provider, "resolver") if args.regime == "simple" else None
+        records, audits = run_cases_from_collected(
+            cases,
+            args.regime,
+            collected_rows,
+            resolver=resolver,
+            shakedown=10 if args.shakedown else None,
+        )
+    else:
+        first = provider_from_name(args.first_provider, "first")
+        second = None
+        resolver = None
+        if args.regime in {"simple", "testgraph-collect"}:
+            second = provider_from_name(args.second_provider, "second")
+        if args.regime == "simple":
+            resolver = provider_from_name(args.resolver_provider, "resolver")
 
-    records, audits = run_cases(
-        cases,
-        args.regime,
-        first=first,
-        second=second,
-        resolver=resolver,
-        shakedown=10 if args.shakedown else None,
-    )
+        records, audits = run_cases(
+            cases,
+            args.regime,
+            first=first,
+            second=second,
+            resolver=resolver,
+            shakedown=10 if args.shakedown else None,
+        )
     write_jsonl(args.output, records)
     write_jsonl(args.audit_output, audits)
     print(f"wrote {len(records)} {args.regime} records to {args.output}")
