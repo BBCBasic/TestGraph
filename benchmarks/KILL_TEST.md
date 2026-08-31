@@ -74,9 +74,36 @@ python scripts/run_kill_test.py --regime testgraph-collect \
   --audit-output kill-testgraph-decisions-audit.jsonl
 ```
 
-`testgraph-collect` is deliberately **not a scored TestGraph result**. It freezes the two independent first decisions with `pending_replay=true`. A subsequent isolated replay stage must submit those decisions through the real TestGraph V2 classification/convergence workflow and record the actual final server state. This separation prevents the benchmark runner from polluting the production ontology while preserving blind first judgments.
+`testgraph-collect` is deliberately **not a scored TestGraph result**. It freezes the two independent first decisions with `pending_replay=true`.
 
-Use `--case-id h001` (repeatable) for targeted diagnosis or `--limit N` for a bounded runner check. Do not use a subset result to decide the project verdict.
+## Isolated TestGraph replay
+
+Replay the frozen TestGraph decisions through the real classification, dispute and `tg-ai` resolver services in a separate SQLite database. The normal application database is never opened by this stage.
+
+Ten-case shakedown:
+
+```bash
+python scripts/replay_kill_test.py \
+  --collected kill-testgraph-decisions.jsonl \
+  --results kill-testgraph-shakedown.jsonl \
+  --audit kill-testgraph-shakedown-audit.jsonl \
+  --database sqlite+pysqlite:///kill-test-shakedown.db \
+  --shakedown 10
+```
+
+Full replay:
+
+```bash
+python scripts/replay_kill_test.py \
+  --collected kill-testgraph-decisions.jsonl \
+  --results kill-testgraph.jsonl \
+  --audit kill-testgraph-audit.jsonl \
+  --database sqlite+pysqlite:///kill-test-replay.db
+```
+
+Each benchmark case starts from a synthetic `benchmark entity` type with the two frozen candidate types placed beneath it only inside the isolated database. The two model decisions are submitted through `propose_reclassification`. If they disagree, the existing `tg-ai` dispute hook is allowed to run normally. If the resolver is disabled, missing credentials, rejects the case, or otherwise leaves the subject disputed, that case is an operational failure. Final scoring uses `classification_state` from the server services; it never substitutes a model claim for server state.
+
+Use `--case-id h001` (repeatable) for targeted model-runner diagnosis or `--limit N` for a bounded collection check. Do not use a subset result to decide the project verdict.
 
 ## Run discipline
 
@@ -90,7 +117,10 @@ Use `--case-id h001` (repeatable) for targeted diagnosis or `--limit N` for a bo
 
 ## Scoring
 
+Combine the three scoreable regime files before scoring, for example:
+
 ```bash
+cat kill-single.jsonl kill-simple.jsonl kill-testgraph.jsonl > kill-results.jsonl
 python scripts/score_kill_test.py --results kill-results.jsonl --output kill-report.json
 ```
 
