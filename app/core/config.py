@@ -41,7 +41,7 @@ class Settings(BaseSettings):
     tg_ai_resolver_enabled: bool = False
     openai_api_key: str | None = None
     tg_ai_resolver_model: str = "gpt-5-mini"
-    tg_ai_resolver_timeout_seconds: float = 20.0
+    tg_ai_resolver_timeout_seconds: float = 60.0
 
     model_config = SettingsConfigDict(env_file=".env", case_sensitive=False)
 
