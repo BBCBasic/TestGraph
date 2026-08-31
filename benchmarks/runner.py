@@ -42,6 +42,31 @@ def _audit_reply(reply: ModelReply, parsed: ClassificationReply | None = None) -
     return data
 
 
+def _frozen_reply(collected: dict, slot: str) -> tuple[ClassificationReply, dict]:
+    subject_type = str(collected.get(f"{slot}_type") or "").strip()
+    reason = str(collected.get(f"{slot}_reason") or "").strip()
+    model = str(collected.get(f"{slot}_model") or "").strip()
+    if not subject_type or not reason or not model:
+        raise ValueError(f"collected row is missing complete {slot} decision")
+    parsed = ClassificationReply(type=subject_type, reason=reason)
+    return parsed, {
+        "model": model,
+        "text": json.dumps({"type": subject_type, "reason": reason}, ensure_ascii=False),
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "cost_usd": 0.0,
+        "raw": {"source": "frozen_collection"},
+        "parsed": asdict(parsed),
+    }
+
+
+def _validate_collected(case: BenchmarkCase, collected: dict) -> None:
+    if collected.get("case_id") != case.id:
+        raise ValueError(f"collected row case_id {collected.get('case_id')!r} does not match {case.id!r}")
+    if collected.get("pending_replay") is not True:
+        raise ValueError(f"collected row for {case.id} is not replayable")
+
+
 def _failure_record(case: BenchmarkCase, regime: str, model_calls: int, resolver_calls: int = 0) -> dict:
     return {
         "case_id": case.id,
@@ -72,6 +97,28 @@ def run_single_case(case: BenchmarkCase, provider: ModelProvider) -> tuple[dict,
             "model_calls": 1,
             "resolver_calls": 0,
             "cost_usd": raw.cost_usd,
+        }, audit)
+    except Exception as exc:
+        audit["error"] = f"{type(exc).__name__}: {exc}"
+        return _failure_record(case, "single", 1), audit
+
+
+def run_single_from_collected(case: BenchmarkCase, collected: dict) -> tuple[dict, dict]:
+    audit = {"case_id": case.id, "regime": "single", "source": "frozen_collection"}
+    try:
+        _validate_collected(case, collected)
+        first, first_audit = _frozen_reply(collected, "first")
+        audit["first"] = first_audit
+        return ({
+            "case_id": case.id,
+            "regime": "single",
+            "type": first.type,
+            "canonical": True,
+            "consensus": False,
+            "operational_failure": False,
+            "model_calls": 1,
+            "resolver_calls": 0,
+            "cost_usd": 0.0,
         }, audit)
     except Exception as exc:
         audit["error"] = f"{type(exc).__name__}: {exc}"
@@ -130,6 +177,51 @@ def run_simple_case(
     except Exception as exc:
         audit["error"] = f"{type(exc).__name__}: {exc}"
         return _failure_record(case, "simple", max(1, len(replies) + (0 if replies else 1))), audit
+
+
+def run_simple_from_collected(
+    case: BenchmarkCase,
+    collected: dict,
+    resolver_provider: ModelProvider,
+) -> tuple[dict, dict]:
+    audit = {"case_id": case.id, "regime": "simple", "source": "frozen_collection"}
+    try:
+        _validate_collected(case, collected)
+        first, first_audit = _frozen_reply(collected, "first")
+        second, second_audit = _frozen_reply(collected, "second")
+        audit["first"] = first_audit
+        audit["second"] = second_audit
+
+        if _norm(first.type) == _norm(second.type):
+            return ({
+                "case_id": case.id,
+                "regime": "simple",
+                "type": first.type,
+                "canonical": True,
+                "consensus": True,
+                "operational_failure": False,
+                "model_calls": 2,
+                "resolver_calls": 0,
+                "cost_usd": 0.0,
+            }, audit)
+
+        resolver_raw = resolver_provider.classify(resolver_prompt(case, first, second))
+        resolved = parse_classification_reply(resolver_raw.text)
+        audit["resolver"] = _audit_reply(resolver_raw, resolved)
+        return ({
+            "case_id": case.id,
+            "regime": "simple",
+            "type": resolved.type,
+            "canonical": True,
+            "consensus": False,
+            "operational_failure": False,
+            "model_calls": 3,
+            "resolver_calls": 1,
+            "cost_usd": resolver_raw.cost_usd,
+        }, audit)
+    except Exception as exc:
+        audit["error"] = f"{type(exc).__name__}: {exc}"
+        return _failure_record(case, "simple", 2), audit
 
 
 def collect_testgraph_case(
@@ -201,6 +293,57 @@ def run_cases(
         records.append(record)
         audits.append(audit)
     return records, audits
+
+
+def run_cases_from_collected(
+    cases: Iterable[BenchmarkCase],
+    regime: str,
+    collected_rows: Iterable[dict],
+    *,
+    resolver: ModelProvider | None = None,
+    shakedown: int | None = None,
+) -> tuple[list[dict], list[dict]]:
+    if regime not in {"single", "simple"}:
+        raise ValueError("frozen collection can only drive single or simple regimes")
+    by_case: dict[str, dict] = {}
+    for row in collected_rows:
+        case_id = str(row.get("case_id") or "")
+        if not case_id:
+            raise ValueError("collected row is missing case_id")
+        if case_id in by_case:
+            raise ValueError(f"duplicate collected case_id: {case_id}")
+        by_case[case_id] = row
+
+    selected = list(cases)
+    if shakedown is not None:
+        selected = selected[:shakedown]
+    records: list[dict] = []
+    audits: list[dict] = []
+    for case in selected:
+        if case.id not in by_case:
+            raise ValueError(f"missing collected decision for case {case.id}")
+        if regime == "single":
+            record, audit = run_single_from_collected(case, by_case[case.id])
+        else:
+            if resolver is None:
+                raise ValueError("simple frozen regime requires resolver provider")
+            record, audit = run_simple_from_collected(case, by_case[case.id], resolver)
+        records.append(record)
+        audits.append(audit)
+    return records, audits
+
+
+def read_jsonl(path: str) -> list[dict]:
+    rows: list[dict] = []
+    with open(path, "r", encoding="utf-8") as handle:
+        for line_number, line in enumerate(handle, start=1):
+            if not line.strip():
+                continue
+            payload = json.loads(line)
+            if not isinstance(payload, dict):
+                raise ValueError(f"JSONL line {line_number} is not an object")
+            rows.append(payload)
+    return rows
 
 
 def write_jsonl(path: str, rows: Iterable[dict]) -> None:
