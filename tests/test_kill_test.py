@@ -69,6 +69,15 @@ def test_load_cases_rejects_duplicate_ids(tmp_path: Path):
         raise AssertionError("expected duplicate-id validation failure")
 
 
+def test_load_cases_accepts_compact_corpus(tmp_path: Path):
+    path = tmp_path / "cases.json"
+    path.write_text(json.dumps({"version": 1, "cases": [
+        ["x", "red car", "easy", "car", ["automobile"], "modifier_as_type"]
+    ]}), encoding="utf-8")
+    cases = load_cases(path)
+    assert cases == [BenchmarkCase("x", "red car", "easy", "car", ("automobile",), "modifier_as_type")]
+
+
 def test_evaluate_results_groups_by_regime_and_accumulates_calls():
     cases = [BenchmarkCase("c1", "red car", "easy", "car"), BenchmarkCase("c2", "book", "easy", "book")]
     records = [
