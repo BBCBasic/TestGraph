@@ -35,6 +35,49 @@ Store one JSON object per line. Required fields are `case_id`, `regime`, and `ty
 
 For the TestGraph regime, record the actual final server status/type; do not substitute what the calling model says happened.
 
+## Model execution stage
+
+The model runner uses `httpx` directly and requires no provider SDK. Provider secrets are read only from environment variables.
+
+```bash
+export OPENAI_API_KEY=...
+export ANTHROPIC_API_KEY=...
+```
+
+Default model IDs are `gpt-5.6-terra` and `claude-sonnet-5`. Pin different IDs without changing code by setting `KILL_TEST_OPENAI_MODEL` / `KILL_TEST_ANTHROPIC_MODEL`, or pin an individual slot with `KILL_TEST_FIRST_MODEL`, `KILL_TEST_SECOND_MODEL`, and `KILL_TEST_RESOLVER_MODEL`.
+
+Run the 10-case machinery shakedown first:
+
+```bash
+python scripts/run_kill_test.py \
+  --regime simple \
+  --shakedown \
+  --output /tmp/kill-simple-shakedown.jsonl \
+  --audit-output /tmp/kill-simple-shakedown-audit.jsonl
+```
+
+Then collect the full single-model and simple-ensemble baselines:
+
+```bash
+python scripts/run_kill_test.py --regime single \
+  --output kill-single.jsonl --audit-output kill-single-audit.jsonl
+
+python scripts/run_kill_test.py --regime simple \
+  --output kill-simple.jsonl --audit-output kill-simple-audit.jsonl
+```
+
+The first two blind decisions for the TestGraph regime are collected separately so benchmark subjects are not written into the normal graph:
+
+```bash
+python scripts/run_kill_test.py --regime testgraph-collect \
+  --output kill-testgraph-decisions.jsonl \
+  --audit-output kill-testgraph-decisions-audit.jsonl
+```
+
+`testgraph-collect` is deliberately **not a scored TestGraph result**. It freezes the two independent first decisions with `pending_replay=true`. A subsequent isolated replay stage must submit those decisions through the real TestGraph V2 classification/convergence workflow and record the actual final server state. This separation prevents the benchmark runner from polluting the production ontology while preserving blind first judgments.
+
+Use `--case-id h001` (repeatable) for targeted diagnosis or `--limit N` for a bounded runner check. Do not use a subset result to decide the project verdict.
+
 ## Run discipline
 
 1. Freeze the corpus before seeing outputs.
