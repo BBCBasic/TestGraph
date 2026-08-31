@@ -1,6 +1,7 @@
 import json
 import uuid
 
+import httpx
 import pytest
 
 from app.core.config import get_settings
@@ -77,6 +78,56 @@ def test_resolver_accepts_valid_candidate(monkeypatch):
         assert isinstance(result, ResolverDecision)
         assert result.target_subject_type == a.canonical_name
         assert result.action == "select_candidate"
+
+
+def test_resolver_retries_one_transient_timeout(monkeypatch):
+    settings = get_settings()
+    monkeypatch.setattr(settings, "tg_ai_resolver_enabled", True)
+    monkeypatch.setattr(settings, "openai_api_key", "test-key")
+    monkeypatch.setattr(settings, "tg_ai_resolver_timeout_seconds", 60.0)
+    calls = []
+
+    with SessionLocal() as db:
+        subject, a, _ = _subject_with_candidates(db)
+
+        class FakeResponse:
+            def raise_for_status(self):
+                return None
+            def json(self):
+                return {"output": [{"content": [{"type": "output_text", "text": json.dumps({"target_subject_type": a.canonical_name, "confidence": 0.91, "reason": "A is better supported", "action": "select_candidate"})}]}]}
+
+        def fake_post(*args, **kwargs):
+            calls.append(kwargs)
+            if len(calls) == 1:
+                raise httpx.ReadTimeout("transient timeout")
+            return FakeResponse()
+
+        monkeypatch.setattr("httpx.post", fake_post)
+        result = resolve_classification_dispute(db, subject)
+
+        assert result.target_subject_type == a.canonical_name
+        assert len(calls) == 2
+        assert calls[0]["timeout"] == 60.0
+        assert calls[1]["timeout"] == 60.0
+
+
+def test_resolver_raises_after_second_timeout(monkeypatch):
+    settings = get_settings()
+    monkeypatch.setattr(settings, "tg_ai_resolver_enabled", True)
+    monkeypatch.setattr(settings, "openai_api_key", "test-key")
+    calls = []
+
+    def fake_post(*args, **kwargs):
+        calls.append(kwargs)
+        raise httpx.ReadTimeout("still timing out")
+
+    monkeypatch.setattr("httpx.post", fake_post)
+    with SessionLocal() as db:
+        subject, _, _ = _subject_with_candidates(db)
+        with pytest.raises(httpx.ReadTimeout):
+            resolve_classification_dispute(db, subject)
+
+    assert len(calls) == 2
 
 
 def test_resolver_arbitration_confirms_winner_and_preserves_audit():
