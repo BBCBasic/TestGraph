@@ -7,19 +7,29 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.models.v2 import SubjectType, TypeRelationship
+from app.services.classification_mode import (
+    classification_mode,
+    taxonomy_relationship,
+    validate_classification_relationship,
+)
 from app.services.semantic_head import validate_semantic_type_name
 from app.services.v2 import ensure_subject_type, normalise_term, resolve_subject_type
 
 
-def _has_belongs_to_path(db: Session, source_type_id: uuid.UUID, target_type_id: uuid.UUID) -> bool:
-    """Return True when following belongs_to edges upward can reach target_type_id."""
+def _has_relationship_path(
+    db: Session,
+    source_type_id: uuid.UUID,
+    target_type_id: uuid.UUID,
+    relationship: str,
+) -> bool:
+    """Return True when following one edge meaning can reach target_type_id."""
     if source_type_id == target_type_id:
         return True
     seen = {source_type_id}
     frontier = {source_type_id}
     while frontier:
         rows = list(db.scalars(select(TypeRelationship).where(
-            TypeRelationship.relationship == "belongs_to",
+            TypeRelationship.relationship == relationship,
             TypeRelationship.status == "active",
             TypeRelationship.source_type_id.in_(frontier),
         )).all())
@@ -43,11 +53,8 @@ def add_semantic_relationship(
 ) -> TypeRelationship:
     """Add a relationship while preventing semantic-head mistakes, cycles and stale classifications.
 
-    ``belongs_to`` is the canonical classification edge in TestGraph. A subject type may
-    have one active parent classification at a time. When an AI later supplies a different
-    parent through the existing ``set_type_relationship`` tool, the old active edge is
-    retired automatically and retained as provenance instead of forcing a human to perform
-    a separate retire-then-add sequence.
+    Legacy ``belongs_to`` has one active parent and retires a replaced parent. Typed mode
+    accepts independent ``is_a`` and ``part_of`` edges and permits multiple valid parents.
 
     Previously retired exact edges remain tombstoned and cannot be silently recreated.
     """
@@ -60,12 +67,17 @@ def add_semantic_relationship(
         distinct_class_justification=semantic_justification,
     )
 
-    rel = normalise_term(relationship).replace(" ", "_")
+    rel = validate_classification_relationship(normalise_term(relationship).replace(" ", "_"))
     if source_type.id == target_type.id:
         raise ValueError("A subject type cannot relate to itself")
-    if rel == "belongs_to" and _has_belongs_to_path(db, target_type.id, source_type.id):
+    cycle_checked_relationships = (
+        {"is_a", "part_of"} if classification_mode() == "typed" else {"belongs_to"}
+    )
+    if rel in cycle_checked_relationships and _has_relationship_path(
+        db, target_type.id, source_type.id, rel,
+    ):
         raise ValueError(
-            f"Relationship would create a cycle: '{source_type.canonical_name}' belongs_to "
+            f"Relationship would create a cycle: '{source_type.canonical_name}' {rel} "
             f"'{target_type.canonical_name}'"
         )
     existing = db.scalar(select(TypeRelationship).where(
@@ -85,7 +97,7 @@ def add_semantic_relationship(
     # previous active parent automatically while keeping a full audit trail. A database
     # containing multiple active parents is treated as ambiguous legacy state rather than
     # guessed at automatically.
-    if rel == "belongs_to":
+    if classification_mode() == "legacy" and rel == "belongs_to":
         active_parents = list(db.scalars(select(TypeRelationship).where(
             TypeRelationship.source_type_id == source_type.id,
             TypeRelationship.relationship == "belongs_to",
@@ -168,7 +180,7 @@ def resolve_subject_hierarchy(
     The semantic-head guard is server-owned: obvious material, arrangement, state,
     colour, size, quantity, location and purpose modifiers are rejected as type nodes
     unless a distinct-class justification is supplied. The rest of the function supplies
-    deterministic dictionary reuse, provisional creation, belongs_to links and cycle safety.
+    deterministic dictionary reuse, provisional creation, active taxonomy links and cycle safety.
     """
     cleaned = [str(term).strip() for term in terms if str(term).strip()]
     if not cleaned:
@@ -208,13 +220,14 @@ def resolve_subject_hierarchy(
                 commit=False,
             ))
 
+        hierarchy_relationship = taxonomy_relationship()
         for parent_result, child_result in zip(resolved, resolved[1:]):
             parent = parent_result[0]
             child = child_result[0]
             add_semantic_relationship(
                 db,
                 child,
-                "belongs_to",
+                hierarchy_relationship,
                 parent,
                 source=created_by,
                 commit=False,
@@ -227,6 +240,7 @@ def resolve_subject_hierarchy(
 
         return {
             "leaf": resolved[-1][0],
+            "taxonomy_relationship": hierarchy_relationship,
             "path": [
                 {
                     "id": str(subject_type.id),
@@ -245,7 +259,7 @@ def resolve_subject_hierarchy(
             "relationships": [
                 {
                     "source": child_result[0].canonical_name,
-                    "relationship": "belongs_to",
+                    "relationship": hierarchy_relationship,
                     "target": parent_result[0].canonical_name,
                 }
                 for parent_result, child_result in zip(resolved, resolved[1:])

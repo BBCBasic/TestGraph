@@ -4,6 +4,7 @@ import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
+from app.core.config import get_settings
 from app.db.base import Base
 from app.models.v2 import SubjectType, SubjectTypeAlias, TypeRelationship
 from app.services.vocabulary_navigation import (
@@ -32,10 +33,10 @@ def _type(db, name, *, status="confirmed", description=None):
     return item
 
 
-def _edge(db, child, parent, *, status="active"):
+def _edge(db, child, parent, *, status="active", relationship="belongs_to"):
     item = TypeRelationship(
         source_type_id=child.id,
-        relationship="belongs_to",
+        relationship=relationship,
         target_type_id=parent.id,
         source="pytest",
         status=status,
@@ -43,6 +44,14 @@ def _edge(db, child, parent, *, status="active"):
     db.add(item)
     db.flush()
     return item
+
+
+@pytest.fixture()
+def typed_mode(monkeypatch):
+    monkeypatch.setenv("CLASSIFICATION_MODE", "typed")
+    get_settings.cache_clear()
+    yield
+    get_settings.cache_clear()
 
 
 def test_roots_exclude_types_with_active_parents_but_not_retired_parents():
@@ -175,3 +184,74 @@ def test_path_returns_all_legacy_multiple_parent_paths_without_guessing():
             "first root",
             "second root",
         ]
+
+
+def test_typed_navigation_keeps_taxonomy_and_membership_separate(typed_mode):
+    with _session() as db:
+        category = _type(db, "typed navigation category")
+        system = _type(db, "typed navigation system")
+        leaf = _type(db, "typed navigation leaf")
+        _edge(db, leaf, category, relationship="is_a")
+        _edge(db, leaf, system, relationship="part_of")
+
+        taxonomy_children = list_child_subject_types(db, category)
+        system_taxonomy_children = list_child_subject_types(db, system)
+        membership_children = list_child_subject_types(db, system, relationship="part_of")
+
+        assert [item["canonical_name"] for item in taxonomy_children["items"]] == [leaf.canonical_name]
+        assert system_taxonomy_children["items"] == []
+        assert [item["canonical_name"] for item in membership_children["items"]] == [leaf.canonical_name]
+        assert taxonomy_children["relationship"] == "is_a"
+        assert membership_children["relationship"] == "part_of"
+        assert taxonomy_children["classification_mode"] == "typed"
+
+
+def test_typed_cursor_cannot_be_reused_for_another_relationship(typed_mode):
+    with _session() as db:
+        parent = _type(db, "typed cursor parent")
+        _edge(db, _type(db, "typed cursor child a"), parent, relationship="is_a")
+        _edge(db, _type(db, "typed cursor child b"), parent, relationship="is_a")
+        _edge(db, _type(db, "typed cursor member"), parent, relationship="part_of")
+        page = list_child_subject_types(db, parent, relationship="is_a", limit=1)
+
+        with pytest.raises(ValueError, match="cursor does not match"):
+            list_child_subject_types(
+                db,
+                parent,
+                relationship="part_of",
+                limit=1,
+                cursor=page["next_cursor"],
+            )
+
+
+def test_typed_paths_follow_only_requested_relationship(typed_mode):
+    with _session() as db:
+        category = _type(db, "typed path category")
+        system = _type(db, "typed path system")
+        leaf = _type(db, "typed path leaf")
+        _edge(db, leaf, category, relationship="is_a")
+        _edge(db, leaf, system, relationship="part_of")
+
+        taxonomy = get_subject_type_paths(db, leaf)
+        membership = get_subject_type_paths(db, leaf, relationship="part_of")
+
+        assert [[node["canonical_name"] for node in path] for path in taxonomy["paths"]] == [
+            [category.canonical_name, leaf.canonical_name]
+        ]
+        assert [[node["canonical_name"] for node in path] for path in membership["paths"]] == [
+            [system.canonical_name, leaf.canonical_name]
+        ]
+
+
+def test_typed_multiple_paths_remain_bounded(typed_mode):
+    with _session() as db:
+        leaf = _type(db, "typed bounded leaf")
+        first_parent = _type(db, "typed bounded parent a")
+        second_parent = _type(db, "typed bounded parent b")
+        _edge(db, leaf, first_parent, relationship="is_a")
+        _edge(db, leaf, second_parent, relationship="is_a")
+
+        result = get_subject_type_paths(db, leaf, max_paths=1)
+
+        assert result["path_count"] == 1
+        assert result["truncated"] is True

@@ -30,6 +30,18 @@ def test_live_page_is_v2_only_and_linked(client):
     assert "subject-summary" in page.text
 
 
+def test_live_page_distinguishes_typed_taxonomy_and_membership(client):
+    page = client.get("/live")
+
+    assert page.status_code == 200
+    assert 'id="classification-context"' in page.text
+    assert "taxonomy_relationship" in page.text
+    assert "part_of" in page.text
+    assert "Part of" in page.text
+    assert "dataset.typeId" in page.text
+    assert "same type" in page.text
+
+
 def test_public_v2_feed_excludes_private_data_and_internal_metadata(client):
     with SessionLocal() as db:
         user = User(display_name="Live page test", profile_data={})

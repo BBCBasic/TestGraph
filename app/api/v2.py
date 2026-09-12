@@ -12,10 +12,11 @@ from app.db.session import get_db
 from app.models.v2 import Assessment, SubjectClassificationDecision, SubjectType, V2Experience, V2Subject
 from app.schemas.v2 import AssessmentCreate, ExperienceCreate, FieldEnsure, RelationshipEnsure, SubjectEnsure, SubjectRead
 from app.services.v2 import (
-    add_subject_type_alias, add_type_relationship, create_assessment, create_experience,
+    add_subject_type_alias, create_assessment, create_experience,
     ensure_field, ensure_subject, ensure_subject_type, fields_for_type, resolve_subject_type,
     vocabulary_index,
 )
+from app.services.semantic import add_semantic_relationship
 from app.services.vocabulary_navigation import (
     get_subject_type_paths, list_child_subject_types, list_root_subject_types,
 )
@@ -129,10 +130,15 @@ def resolve_type(term: str, db: Session = Depends(get_db)):
 
 @router.get("/subject-types/roots")
 def subject_type_roots(
-    limit: PageLimit = 50, cursor: str | None = None, db: Session = Depends(get_db),
+    relationship: str | None = None,
+    limit: PageLimit = 50,
+    cursor: str | None = None,
+    db: Session = Depends(get_db),
 ):
     try:
-        return list_root_subject_types(db, limit=limit, cursor=cursor)
+        return list_root_subject_types(
+            db, relationship=relationship, limit=limit, cursor=cursor,
+        )
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc
 
@@ -140,6 +146,7 @@ def subject_type_roots(
 @router.get("/subject-types/{subject_type_id}/children")
 def subject_type_children(
     subject_type_id: uuid.UUID,
+    relationship: str | None = None,
     limit: PageLimit = 50,
     cursor: str | None = None,
     db: Session = Depends(get_db),
@@ -148,17 +155,30 @@ def subject_type_children(
     if parent is None:
         raise HTTPException(404, "Subject type not found")
     try:
-        return list_child_subject_types(db, parent, limit=limit, cursor=cursor)
+        return list_child_subject_types(
+            db,
+            parent,
+            relationship=relationship,
+            limit=limit,
+            cursor=cursor,
+        )
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc
 
 
 @router.get("/subject-types/{subject_type_id}/path")
-def subject_type_path(subject_type_id: uuid.UUID, db: Session = Depends(get_db)):
+def subject_type_path(
+    subject_type_id: uuid.UUID,
+    relationship: str | None = None,
+    db: Session = Depends(get_db),
+):
     subject_type = db.get(SubjectType, subject_type_id)
     if subject_type is None:
         raise HTTPException(404, "Subject type not found")
-    return get_subject_type_paths(db, subject_type)
+    try:
+        return get_subject_type_paths(db, subject_type, relationship=relationship)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
 
 
 @router.post("/subject-types", status_code=201)
@@ -186,7 +206,9 @@ def create_relationship(payload: RelationshipEnsure, db: Session = Depends(get_d
     source = resolve_subject_type(db, payload.source_type); target = resolve_subject_type(db, payload.target_type)
     if not source or not target: raise HTTPException(404, "Both subject types must exist")
     try:
-        obj = add_type_relationship(db, source, payload.relationship, target, source=principal.client_id)
+        obj = add_semantic_relationship(
+            db, source, payload.relationship, target, source=principal.client_id,
+        )
         return {"id": str(obj.id), "source": source.canonical_name, "relationship": obj.relationship, "target": target.canonical_name}
     except ValueError as exc:
         db.rollback(); raise HTTPException(422, str(exc))

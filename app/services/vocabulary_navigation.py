@@ -9,6 +9,11 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.models.v2 import SubjectType, SubjectTypeAlias, TypeRelationship
+from app.services.classification_mode import (
+    classification_mode,
+    taxonomy_relationship,
+    validate_classification_relationship,
+)
 from app.services.v2 import resolve_subject_type
 
 
@@ -20,17 +25,26 @@ def _bounded_limit(value: int) -> int:
     return max(1, min(int(value), MAX_PAGE_LIMIT))
 
 
-def _encode_cursor(*, operation: str, parent_id: uuid.UUID | None, offset: int) -> str:
+def _selected_relationship(relationship: str | None) -> str:
+    if relationship is None:
+        return taxonomy_relationship()
+    return validate_classification_relationship(relationship)
+
+
+def _encode_cursor(
+    *, operation: str, parent_id: uuid.UUID | None, relationship: str, offset: int,
+) -> str:
     payload = json.dumps({
         "operation": operation,
         "parent_id": str(parent_id) if parent_id else None,
+        "relationship": relationship,
         "offset": offset,
     }, sort_keys=True, separators=(",", ":")).encode()
     return base64.urlsafe_b64encode(payload).decode().rstrip("=")
 
 
 def _decode_cursor(
-    cursor: str | None, *, operation: str, parent_id: uuid.UUID | None,
+    cursor: str | None, *, operation: str, parent_id: uuid.UUID | None, relationship: str,
 ) -> int:
     if not cursor:
         return 0
@@ -43,7 +57,11 @@ def _decode_cursor(
     if not isinstance(payload, dict):
         raise ValueError("Invalid vocabulary cursor")
     expected_parent = str(parent_id) if parent_id else None
-    if payload.get("operation") != operation or payload.get("parent_id") != expected_parent:
+    if (
+        payload.get("operation") != operation
+        or payload.get("parent_id") != expected_parent
+        or payload.get("relationship") != relationship
+    ):
         raise ValueError("Vocabulary cursor does not match this navigation branch")
     try:
         offset = int(payload.get("offset", 0))
@@ -54,7 +72,9 @@ def _decode_cursor(
     return offset
 
 
-def _type_summaries(db: Session, subject_types: list[SubjectType]) -> list[dict]:
+def _type_summaries(
+    db: Session, subject_types: list[SubjectType], *, relationship: str,
+) -> list[dict]:
     if not subject_types:
         return []
     type_ids = [item.id for item in subject_types]
@@ -71,7 +91,7 @@ def _type_summaries(db: Session, subject_types: list[SubjectType]) -> list[dict]
         select(TypeRelationship.target_type_id, func.count(TypeRelationship.source_type_id))
         .where(
             TypeRelationship.target_type_id.in_(type_ids),
-            TypeRelationship.relationship == "belongs_to",
+            TypeRelationship.relationship == relationship,
             TypeRelationship.status == "active",
         )
         .group_by(TypeRelationship.target_type_id)
@@ -96,32 +116,46 @@ def _page(
     *,
     operation: str,
     parent_id: uuid.UUID | None,
+    relationship: str,
     limit: int,
     cursor: str | None,
 ) -> dict:
     page_limit = _bounded_limit(limit)
-    offset = _decode_cursor(cursor, operation=operation, parent_id=parent_id)
+    offset = _decode_cursor(
+        cursor,
+        operation=operation,
+        parent_id=parent_id,
+        relationship=relationship,
+    )
     rows = list(db.scalars(statement.offset(offset).limit(page_limit + 1)).all())
     has_more = len(rows) > page_limit
     items = rows[:page_limit]
     return {
-        "items": _type_summaries(db, items),
+        "classification_mode": classification_mode(),
+        "relationship": relationship,
+        "items": _type_summaries(db, items, relationship=relationship),
         "count": len(items),
         "has_more": has_more,
         "next_cursor": _encode_cursor(
             operation=operation,
             parent_id=parent_id,
+            relationship=relationship,
             offset=offset + len(items),
         ) if has_more else None,
     }
 
 
 def list_root_subject_types(
-    db: Session, *, limit: int = DEFAULT_PAGE_LIMIT, cursor: str | None = None,
+    db: Session,
+    *,
+    relationship: str | None = None,
+    limit: int = DEFAULT_PAGE_LIMIT,
+    cursor: str | None = None,
 ) -> dict:
+    selected_relationship = _selected_relationship(relationship)
     active_parent = select(TypeRelationship.id).where(
         TypeRelationship.source_type_id == SubjectType.id,
-        TypeRelationship.relationship == "belongs_to",
+        TypeRelationship.relationship == selected_relationship,
         TypeRelationship.status == "active",
     ).exists()
     statement = (
@@ -134,6 +168,7 @@ def list_root_subject_types(
         statement,
         operation="roots",
         parent_id=None,
+        relationship=selected_relationship,
         limit=limit,
         cursor=cursor,
     )
@@ -143,18 +178,20 @@ def list_child_subject_types(
     db: Session,
     parent: SubjectType | str,
     *,
+    relationship: str | None = None,
     limit: int = DEFAULT_PAGE_LIMIT,
     cursor: str | None = None,
 ) -> dict:
     parent_type = parent if isinstance(parent, SubjectType) else resolve_subject_type(db, parent)
     if parent_type is None:
         raise ValueError(f"Unknown parent subject type '{parent}'")
+    selected_relationship = _selected_relationship(relationship)
     statement = (
         select(SubjectType)
         .join(TypeRelationship, TypeRelationship.source_type_id == SubjectType.id)
         .where(
             TypeRelationship.target_type_id == parent_type.id,
-            TypeRelationship.relationship == "belongs_to",
+            TypeRelationship.relationship == selected_relationship,
             TypeRelationship.status == "active",
         )
         .order_by(func.lower(SubjectType.canonical_name), SubjectType.id)
@@ -164,20 +201,25 @@ def list_child_subject_types(
         statement,
         operation="children",
         parent_id=parent_type.id,
+        relationship=selected_relationship,
         limit=limit,
         cursor=cursor,
     )
-    result["parent"] = _type_summaries(db, [parent_type])[0]
+    result["parent"] = _type_summaries(
+        db, [parent_type], relationship=selected_relationship,
+    )[0]
     return result
 
 
-def _active_parents(db: Session, subject_type_id: uuid.UUID) -> list[SubjectType]:
+def _active_parents(
+    db: Session, subject_type_id: uuid.UUID, *, relationship: str,
+) -> list[SubjectType]:
     return list(db.scalars(
         select(SubjectType)
         .join(TypeRelationship, TypeRelationship.target_type_id == SubjectType.id)
         .where(
             TypeRelationship.source_type_id == subject_type_id,
-            TypeRelationship.relationship == "belongs_to",
+            TypeRelationship.relationship == relationship,
             TypeRelationship.status == "active",
         )
         .order_by(func.lower(SubjectType.canonical_name), SubjectType.id)
@@ -188,15 +230,19 @@ def get_subject_type_paths(
     db: Session,
     subject_type: SubjectType | str,
     *,
+    relationship: str | None = None,
     max_depth: int = 32,
     max_paths: int = 20,
 ) -> dict:
     resolved = subject_type if isinstance(subject_type, SubjectType) else resolve_subject_type(db, subject_type)
     if resolved is None:
         raise ValueError(f"Unknown subject type '{subject_type}'")
+    selected_relationship = _selected_relationship(relationship)
     depth_limit = max(1, min(int(max_depth), 64))
     path_limit = max(1, min(int(max_paths), 100))
-    immediate_parents = _active_parents(db, resolved.id)
+    immediate_parents = _active_parents(
+        db, resolved.id, relationship=selected_relationship,
+    )
     completed: list[list[SubjectType]] = []
     stack: list[tuple[SubjectType, list[SubjectType], set[uuid.UUID]]] = [
         (resolved, [resolved], {resolved.id})
@@ -209,7 +255,9 @@ def get_subject_type_paths(
             completed.append(list(reversed(leaf_to_current)))
             truncated = True
             continue
-        parents = _active_parents(db, current.id)
+        parents = _active_parents(
+            db, current.id, relationship=selected_relationship,
+        )
         if not parents:
             completed.append(list(reversed(leaf_to_current)))
             continue
@@ -228,9 +276,13 @@ def get_subject_type_paths(
         if item.id not in summaries:
             all_types.append(item)
             summaries[item.id] = {}
-    serialized = _type_summaries(db, all_types)
+    serialized = _type_summaries(
+        db, all_types, relationship=selected_relationship,
+    )
     summaries = {item.id: body for item, body in zip(all_types, serialized)}
     return {
+        "classification_mode": classification_mode(),
+        "relationship": selected_relationship,
         "subject_type": summaries[resolved.id],
         "immediate_parents": [summaries[parent.id] for parent in immediate_parents],
         "paths": [[summaries[node.id] for node in path] for path in completed],

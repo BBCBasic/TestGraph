@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import uuid
 from collections import OrderedDict
+from copy import deepcopy
 from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.models.deliberation import Deliberation
+from app.services.classification_mode import classification_mode, TYPED_REASONING_GUIDANCE
 
 
 GUIDANCE_KIND = "induction_guidance"
@@ -101,6 +103,20 @@ BASELINE_GUIDANCE: list[dict[str, Any]] = [
 ]
 
 
+def active_baseline_guidance() -> list[dict[str, Any]]:
+    guidance = deepcopy(BASELINE_GUIDANCE)
+    if classification_mode() == "typed":
+        for item in guidance:
+            if item["key"] == "classification":
+                text = item["text"].replace(
+                    "a belongs_to or other semantic relationship",
+                    "an is_a or part_of semantic relationship",
+                )
+                item["text"] = f"{text} {TYPED_REASONING_GUIDANCE}"
+                break
+    return guidance
+
+
 def canonical_model(value: str | None) -> str | None:
     if value is None:
         return None
@@ -150,6 +166,7 @@ def _approved_revision(deliberation: Deliberation, source_model: str | None) -> 
 
 
 def get_induction(db: Session, *, owner_id: uuid.UUID, source_model: str | None = None) -> dict[str, Any]:
+    baseline_guidance = active_baseline_guidance()
     rows = list(db.scalars(
         select(Deliberation).where(
             Deliberation.owner_id == owner_id,
@@ -167,7 +184,7 @@ def get_induction(db: Session, *, owner_id: uuid.UUID, source_model: str | None 
         target = model_revisions if revision["scope"] == "model" else global_revisions
         target[revision["guidance_key"]] = revision
 
-    effective = OrderedDict((item["key"], dict(item)) for item in BASELINE_GUIDANCE)
+    effective = OrderedDict((item["key"], dict(item)) for item in baseline_guidance)
     for revision in list(global_revisions.values()) + list(model_revisions.values()):
         key = revision["guidance_key"]
         base = effective.get(key, {"key": key, "title": key.replace("_", " ").title()})
@@ -187,7 +204,7 @@ def get_induction(db: Session, *, owner_id: uuid.UUID, source_model: str | None 
             "user-approved global guidance",
             "server baseline guidance",
         ],
-        "baseline_guidance": BASELINE_GUIDANCE,
+        "baseline_guidance": baseline_guidance,
         "approved_global_guidance": list(global_revisions.values()),
         "approved_model_guidance": list(model_revisions.values()),
         "effective_guidance": list(effective.values()),

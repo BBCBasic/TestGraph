@@ -1,4 +1,5 @@
-from app.services.guidance import BASELINE_GUIDANCE
+from app.core.config import get_settings
+from app.services.guidance import BASELINE_GUIDANCE, active_baseline_guidance
 from app.services.mcp_v2_semantic_policy import apply_semantic_naming_policy
 
 
@@ -45,3 +46,17 @@ def test_mcp_policy_does_not_add_a_consensus_gate_for_aliases():
         assert "Material, arrangement/grouping, state/condition" in description
         assert "not a simplistic head-noun rule" in description
         assert "server independently validates structural writes" in description
+
+
+def test_typed_induction_guidance_separates_two_semantic_questions(monkeypatch):
+    monkeypatch.setenv("CLASSIFICATION_MODE", "typed")
+    get_settings.cache_clear()
+    try:
+        guidance = {item["key"]: item["text"] for item in active_baseline_guidance()}
+        classification = guidance["classification"].casefold()
+
+        assert "what fundamentally is this thing" in classification
+        assert "what larger thing or system" in classification
+        assert "do not force" in classification
+    finally:
+        get_settings.cache_clear()

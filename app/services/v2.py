@@ -20,6 +20,11 @@ from app.schemas.v2 import (
     SubjectEnsure,
 )
 from app.services.deliberation import DeliberationError
+from app.services.classification_mode import (
+    classification_mode,
+    supported_classification_relationships,
+    taxonomy_relationship,
+)
 
 
 def normalise_term(value: str) -> str:
@@ -43,7 +48,15 @@ def normalise_term(value: str) -> str:
 
 
 def canonical_label(value: str) -> str:
-    return normalise_term(value)
+    if classification_mode() == "legacy":
+        return normalise_term(value)
+    value = unicodedata.normalize("NFKC", value).strip().lower()
+    value = value.replace("’", "'")
+    value = re.sub(r"['`]s\b", "", value)
+    label = re.sub(r"[^a-z0-9]+", " ", value).strip()
+    if not label:
+        raise ValueError("Vocabulary term is empty")
+    return label
 
 
 def resolve_subject_type(db: Session, term: str) -> SubjectType | None:
@@ -258,7 +271,7 @@ def _types_are_related(db: Session, left_id: uuid.UUID, right_id: uuid.UUID) -> 
     frontier = {left_id}
     while frontier:
         rows = list(db.scalars(select(TypeRelationship).where(
-            TypeRelationship.relationship == "belongs_to",
+            TypeRelationship.relationship == taxonomy_relationship(),
             TypeRelationship.status == "active",
             TypeRelationship.target_type_id.in_(frontier),
         )).all())
@@ -271,7 +284,7 @@ def _types_are_related(db: Session, left_id: uuid.UUID, right_id: uuid.UUID) -> 
     frontier = {right_id}
     while frontier:
         rows = list(db.scalars(select(TypeRelationship).where(
-            TypeRelationship.relationship == "belongs_to",
+            TypeRelationship.relationship == taxonomy_relationship(),
             TypeRelationship.status == "active",
             TypeRelationship.target_type_id.in_(frontier),
         )).all())
@@ -665,6 +678,9 @@ def vocabulary_index(db: Session) -> dict:
     fields = list(db.scalars(select(FieldDefinition).order_by(FieldDefinition.canonical_name)).all())
     by_id = {x.id: x for x in types}
     return {
+        "classification_mode": classification_mode(),
+        "taxonomy_relationship": taxonomy_relationship(),
+        "supported_classification_relationships": list(supported_classification_relationships()),
         "subject_types": [{"id": str(x.id), "canonical_name": x.canonical_name, "status": x.status,
                            "public_location_eligible": x.public_location_eligible,
                            "aliases": [a.alias for a in aliases if a.subject_type_id == x.id]} for x in types],
@@ -680,7 +696,7 @@ def descendant_type_ids(db: Session, root: SubjectType) -> set[uuid.UUID]:
     found, frontier = {root.id}, {root.id}
     while frontier:
         rows = list(db.scalars(select(TypeRelationship).where(
-            TypeRelationship.relationship == "belongs_to", TypeRelationship.status == "active",
+            TypeRelationship.relationship == taxonomy_relationship(), TypeRelationship.status == "active",
             TypeRelationship.target_type_id.in_(frontier)
         )).all())
         new = {row.source_type_id for row in rows} - found

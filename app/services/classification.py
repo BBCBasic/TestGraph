@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 from app.models.v2 import (
     SubjectClassificationDecision, SubjectType, TypeRelationship, V2Subject, now_utc,
 )
+from app.services.classification_mode import taxonomy_relationship
 from app.services.semantic_head import validate_semantic_type_name
 from app.services.v2 import resolve_subject_type
 
@@ -19,7 +20,7 @@ REOPEN_TRIGGERS = {"user_correction", "contradictory_evidence", "type_retired", 
 
 
 def _is_descendant(db: Session, child_id: uuid.UUID, ancestor_id: uuid.UUID) -> bool:
-    """Return true only for a strict descendant through active belongs_to edges."""
+    """Return true only for a strict descendant through active taxonomy edges."""
     frontier = {child_id}
     seen: set[uuid.UUID] = set()
     while frontier:
@@ -29,7 +30,7 @@ def _is_descendant(db: Session, child_id: uuid.UUID, ancestor_id: uuid.UUID) -> 
         seen.add(node)
         parents = set(db.scalars(select(TypeRelationship.target_type_id).where(
             TypeRelationship.source_type_id == node,
-            TypeRelationship.relationship == "belongs_to",
+            TypeRelationship.relationship == taxonomy_relationship(),
             TypeRelationship.status == "active",
         )).all())
         if ancestor_id in parents:
@@ -41,7 +42,7 @@ def _is_descendant(db: Session, child_id: uuid.UUID, ancestor_id: uuid.UUID) -> 
 def _direct_child_types(db: Session, parent_id: uuid.UUID) -> list[SubjectType]:
     child_ids = list(db.scalars(select(TypeRelationship.source_type_id).where(
         TypeRelationship.target_type_id == parent_id,
-        TypeRelationship.relationship == "belongs_to",
+        TypeRelationship.relationship == taxonomy_relationship(),
         TypeRelationship.status == "active",
     )).all())
     children = [db.get(SubjectType, child_id) for child_id in child_ids]

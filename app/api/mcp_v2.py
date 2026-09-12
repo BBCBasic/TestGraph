@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import deepcopy
 import base64
 from copy import deepcopy
 from datetime import datetime, timezone
@@ -33,6 +34,7 @@ from app.services.deliberation import (
 from app.services.classification import (
     affirm_classification, classification_state, propose_reclassification, reopen_classification,
 )
+from app.services.classification_mode import classification_mode, TYPED_REASONING_GUIDANCE
 from app.services.location import (
     LocationError, assertion_body, assertions_for_subject, create_location_assertion,
     location_matches, resolve_location_assertion,
@@ -55,7 +57,7 @@ from app.services.write_safety import (
 
 router = APIRouter()
 PROTOCOL_VERSION = "2025-06-18"
-SERVER_VERSION = "3.21.0-alpha"
+SERVER_VERSION = "3.22.0-alpha"
 READ_SECURITY = [{"type": "oauth2", "scopes": ["reviews:read"]}]
 WRITE_SECURITY = [{"type": "oauth2", "scopes": ["reviews:write"]}]
 
@@ -903,6 +905,31 @@ apply_guidance_tool_policy(TOOLS)
 apply_semantic_naming_policy(TOOLS)
 
 
+def _tools_for_mode() -> list[dict]:
+    tools = deepcopy(TOOLS)
+    by_name = {tool["name"]: tool for tool in tools}
+    relationship_property = {
+        "type": "string",
+        "enum": ["is_a", "part_of"] if classification_mode() == "typed" else ["belongs_to"],
+    }
+    for name in ("list_root_subject_types", "list_child_subject_types", "get_subject_type_path"):
+        by_name[name]["inputSchema"]["properties"]["relationship"] = dict(relationship_property)
+    if classification_mode() == "typed":
+        for name in ("set_type_relationship", "retire_type_relationship"):
+            schema = by_name[name]["inputSchema"]
+            schema["properties"]["relationship"] = dict(relationship_property)
+            if "relationship" not in schema["required"]:
+                schema["required"].append("relationship")
+        by_name["set_type_relationship"]["description"] += (
+            " In typed mode, is_a states what the source fundamentally is; part_of states an optional "
+            "larger system or domain. Assess them independently and do not force both."
+        )
+        by_name["resolve_subject_hierarchy"]["description"] = by_name[
+            "resolve_subject_hierarchy"
+        ]["description"].replace("adds belongs_to relationships", "adds is_a relationships")
+    return tools
+
+
 def _resolve(db, args):
     obj = resolve_subject_type(db, str(args.get("term", "")))
     if not obj:
@@ -914,7 +941,10 @@ def _resolve(db, args):
 def _list_root_subject_types(db, args):
     try:
         return _result(list_root_subject_types(
-            db, limit=args.get("limit", 50), cursor=args.get("cursor"),
+            db,
+            relationship=args.get("relationship"),
+            limit=args.get("limit", 50),
+            cursor=args.get("cursor"),
         ))
     except ValueError as exc:
         return _error(str(exc), {"code": "VOCABULARY_CURSOR_INVALID"})
@@ -925,6 +955,7 @@ def _list_child_subject_types(db, args):
         return _result(list_child_subject_types(
             db,
             str(args.get("parent", "")),
+            relationship=args.get("relationship"),
             limit=args.get("limit", 50),
             cursor=args.get("cursor"),
         ))
@@ -934,7 +965,11 @@ def _list_child_subject_types(db, args):
 
 def _get_subject_type_path(db, args):
     try:
-        return _result(get_subject_type_paths(db, str(args.get("subject_type", ""))))
+        return _result(get_subject_type_paths(
+            db,
+            str(args.get("subject_type", "")),
+            relationship=args.get("relationship"),
+        ))
     except ValueError as exc:
         return _error(str(exc), {"code": "SUBJECT_TYPE_NOT_FOUND"})
 
@@ -3107,10 +3142,16 @@ async def mcp_v2(request: Request, db: Session = Depends(get_db)):
         return Response(status_code=202)
     if method == "initialize":
         result = {"protocolVersion": PROTOCOL_VERSION, "capabilities": {"tools": {"listChanged": False}}, "serverInfo": {"name": "TasteGraph v2", "version": SERVER_VERSION}, "instructions": "TestGraph is AI-native: use your full available reasoning, web retrieval and tool capabilities as its open-ended semantic and discovery engine. For unfamiliar subjects, derive useful types, fields, identities, relationships and likely future searches from meaning and evidence; do not wait for TestGraph to prescribe a domain-specific form. TestGraph supplies stable graph primitives, persistence and server-side verification, while you supply the open-ended intelligence. For cross-model work, call list_open_deliberations to discover tasks, claim_deliberation before executing one, and submit_contribution with evidence; only record_resolution with explicit user approval may close it. For search, continue through every next_cursor until has_more is false before claiming completeness, and never merge reviews by subject_name: group them by subject_id and subject_type. When a type scope is useful for classification or retrieval, first call resolve_subject_type for an obvious canonical name or alias. If that is insufficient, call list_root_subject_types, rank a small candidate list, follow the strongest branch with list_child_subject_types while retaining fallback branches, and backtrack if the first branch gives an inadequate result. Do not enumerate or download the complete vocabulary. Stop at the most specific adequate existing type, or after bounded traversal gives enough evidence that a genuinely new type is required; then call resolve_subject_hierarchy with the verified existing path plus only the missing nodes. A miss in one retrieval branch is not proof of global absence. Before saving an experience, identify exactly what was experienced and reuse an existing canonical type or alias whenever possible; never create a type merely because it arrived first. Before saving, perform the generic subject enrichment check and include its result in subject_enrichment_check. Use authoritative or primary sources where available, but do not require a website, location or any domain-specific field. Reconcile every consulted source with the request paths it populated, or explain why it yielded no stored discovery. For every applied path, declare its generic retrieval_uses purpose and likely query examples: identity, likely query, location, classification, relationship, comparison or verification. Do not store facts merely because a source publishes them; omit facts with no plausible future TestGraph retrieval or graph use. When the subject has its own canonical URL, store it as an identifier. Perform routine checking and retry automatically; do not ask the user unless identity is genuinely ambiguous. If enrichment cannot be found, use unavailable with a reason and the searches attempted. Register information you may realistically search for later against what you save in TestGraph; do not collect facts merely because they are available. Treat enrichment as shared graph work: accept substantial discovery work now because captured knowledge is reusable in later searches, and users benefit reciprocally from useful enrichment contributed for other subjects. Save discoveries as unreviewed subject_context with generic relationships and source provenance, while attaching the review only to the exact subject experienced. Always submit collection_assessment. Collection unavailable is only for a genuine failure to identify the collection or find/access authoritative evidence; it is invalid when collection signals are known and never valid because the collection is large, inconvenient, slow, effortful, part of a quick review or deferred until later. When the subject belongs to a wider collection, first resolve the collection and reuse its stored collection_id and manifest_revision when a verified manifest already exists. Do not rediscover or resubmit settled members for an ordinary later review. Only when no verified manifest exists, or when refresh_manifest is explicitly requested, discover every authoritative collection surface, including pagination, sitemaps, official APIs, regional directories and member pages. For that initial discovery or explicit refresh, return a complete source_manifest that maps every member to its consulted source pages, records discovery queries and exhaustion evidence, follows pagination to a terminal page and leaves no unresolved source URL. Save the collection as an unreviewed subject and preserve its authoritative directory URL and discovered count. Submit reviewed_subject plus every derived member as unreviewed subject_context, connect every member to the collection, and list those refs in submitted_member_refs. The server rejects incomplete source coverage and requires submitted_count to equal discovered_count for initial manifests and explicit refreshes. On a location-based recommendation, never conclude there is no relevant result from the target-town search alone: also search the relevant subject type without a text query, follow reviewed subjects to parent organisations, inspect their official branch directories for the requested location, and add any discovered branch as an unreviewed related subject. Treat verification_status and coverage_status separately: only coverage_status=complete permits a conclusion that a location or member is absent; partial or unknown coverage is evidence of uncertainty and must be reported with its warning. Do this routine chain lookup without asking the user. If authoritative information was missed during the original save, use enrich_subject to add it without creating another review. Location is optional. When relevant, use assert_location for the five governed predicates and evidence provenance; create stable Places only from durable identifiers, return ambiguity candidates without guessing, and never silently geocode coordinates. Use contained_in with an explicit scheme; v1 search traverses administrative containment by default. If the official source is unavailable, preserve that limitation and never invent facts or silently geocode coordinates. The experience date defaults to creation time unless explicitly provided. When structured data matches an existing globally registered canonical field, include it in the save: TestGraph attaches that field to the subject type automatically after validation. Do not ask for routine confirmation, omit the structured value, or demote it to raw_text merely because the field has not previously been used for that subject type. Only genuinely new reusable fields require register_field. Reviews store stable subject-type IDs, while belongs_to relationships provide the evolving semantic structure. Preserve exact user wording in raw_text and AI analysis in save_assessment."}
+        if classification_mode() == "typed":
+            result["instructions"] = result["instructions"].replace(
+                "belongs_to relationships provide the evolving semantic structure",
+                "is_a relationships provide the evolving taxonomic structure while part_of remains independent",
+            )
+            result["instructions"] += f" {TYPED_REASONING_GUIDANCE}"
     elif method == "ping":
         result = {}
     elif method == "tools/list":
-        result = {"tools": TOOLS}
+        result = {"tools": _tools_for_mode()}
     elif method == "tools/call":
         params = body.get("params") or {}; name = params.get("name"); args = params.get("arguments") or {}
         write_names = {"resolve_subject_hierarchy", "register_subject_type_alias", "set_type_relationship", "retire_type_relationship", "register_field", "enrich_subject", "correct_subject_fact", "save_experience", "delete_experience", "save_assessment", "create_deliberation", "claim_deliberation", "submit_contribution", "record_resolution", "assert_location", "resolve_location_assertion", "affirm_subject_classification", "propose_subject_reclassification", "reopen_subject_classification"}

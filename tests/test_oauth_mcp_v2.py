@@ -37,7 +37,7 @@ def test_oauth_mcp_v2_resource_flow(client,auth,monkeypatch):
     code=re.search(r"[?&]code=([^&]+)",approved.headers["location"]).group(1)
     access=client.post("/oauth/token",data={"grant_type":"authorization_code","client_id":client_id,"code":code,"redirect_uri":redirect_uri,"code_verifier":verifier,"resource":resource}).json()["access_token"]
     initialized=_rpc(client,"/mcp-v2","initialize",token=access)
-    assert initialized.json()["result"]["serverInfo"]["version"]=="3.21.0-alpha"
+    assert initialized.json()["result"]["serverInfo"]["version"]=="3.22.0-alpha"
     instructions=initialized.json()["result"]["instructions"]
     assert "full available reasoning, web retrieval and tool capabilities" in instructions
     assert "open-ended semantic and discovery engine" in instructions
@@ -76,3 +76,26 @@ def test_oauth_mcp_v2_resource_flow(client,auth,monkeypatch):
     audit_body=audit.json()["result"]["structuredContent"]
     assert audit_body["privacy"]=="structured_redacted_no_raw_conversation"
     assert any(item["tool_name"]=="get_server_info" for item in audit_body["items"])
+
+
+def test_typed_mcp_contract_separates_identity_from_membership(client, monkeypatch):
+    monkeypatch.setenv("CLASSIFICATION_MODE", "typed")
+    get_settings.cache_clear()
+    try:
+        initialized = _rpc(client, "/mcp-v2", "initialize")
+        instructions = initialized.json()["result"]["instructions"].casefold()
+        tools = _rpc(client, "/mcp-v2", "tools/list", call_id=2).json()["result"]["tools"]
+        by_name = {tool["name"]: tool for tool in tools}
+        relationship_schema = by_name["set_type_relationship"]["inputSchema"]
+
+        assert "what fundamentally is this thing" in instructions
+        assert "what larger thing or system" in instructions
+        assert "do not force" in instructions
+        assert "belongs_to relationships provide" not in instructions
+        assert relationship_schema["properties"]["relationship"]["enum"] == ["is_a", "part_of"]
+        assert "relationship" in relationship_schema["required"]
+        assert "relationship" in by_name["list_child_subject_types"]["inputSchema"]["properties"]
+        assert "adds belongs_to relationships" not in by_name["resolve_subject_hierarchy"]["description"]
+        assert "adds is_a relationships" in by_name["resolve_subject_hierarchy"]["description"]
+    finally:
+        get_settings.cache_clear()

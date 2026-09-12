@@ -1,6 +1,6 @@
 import os
 from functools import lru_cache
-from typing import List
+from typing import List, Literal
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -42,6 +42,7 @@ class Settings(BaseSettings):
     openai_api_key: str | None = None
     tg_ai_resolver_model: str = "gpt-5-mini"
     tg_ai_resolver_timeout_seconds: float = 60.0
+    classification_mode: Literal["legacy", "typed"] = "legacy"
 
     model_config = SettingsConfigDict(env_file=".env", case_sensitive=False)
 

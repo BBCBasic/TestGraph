@@ -39,6 +39,21 @@ The v2 alpha is exposed separately:
 - v2 ChatGPT Action schema: `/actions-v2/openapi.json`
 - direct v2 REST API: `/api/v2`
 
+## Classification modes
+
+V2 can run either classification model without copying subject types or changing their stable IDs:
+
+- `CLASSIFICATION_MODE=legacy` is the default. Active `belongs_to` edges form the current single-parent classification tree, and a replacement parent retires the previous edge.
+- `CLASSIFICATION_MODE=typed` enables a directed graph with explicit `is_a` and `part_of` edges. A type may have multiple valid `is_a` parents and zero or more `part_of` targets.
+
+In typed mode, `is_a` answers what a type fundamentally is. `part_of` independently records a justified larger system, domain, structure or concept. Neither implies the other, and callers must not add `part_of` merely to complete a pattern.
+
+`resolve_subject_hierarchy` remains a broad-to-specific taxonomy operation: it creates `belongs_to` in legacy mode and `is_a` in typed mode. `set_type_relationship` requires an explicit `is_a` or `part_of` in typed mode; ambiguous `belongs_to` writes are rejected.
+
+Bounded root, child and path navigation defaults to the active taxonomic relationship and accepts an explicit relationship selector. Typed subtype search and classification specificity follow `is_a` only; `part_of` remains separately inspectable and does not silently broaden search.
+
+Switching the environment variable changes which edge semantics the running service uses. It does not convert stored edges, rebuild historical classifications or create a second vocabulary.
+
 ## Storage model
 
 Core v2 tables:
