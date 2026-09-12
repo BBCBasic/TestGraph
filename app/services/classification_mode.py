@@ -13,7 +13,9 @@ TYPED_REASONING_GUIDANCE = (
     "Typed classification separates two questions: what fundamentally is this thing, and what larger "
     "thing or system is it part of, if any? Use is_a for the first and part_of only when the second is "
     "semantically justified. Do not force either answer to imply the other, and do not force every type "
-    "to have a part_of edge. Keep brand, quantity, colour, material, condition, size, location and purpose "
+    "to have a part_of edge. The reserved '.' node is the non-semantic universal is_a root: begin progressive "
+    "traversal there, but never classify a subject as '.', create an alias for it, or deliberate about whether "
+    "something is a '.'. Keep brand, quantity, colour, material, condition, size, location and purpose "
     "as attributes or relationships unless they genuinely define the semantic-head type."
 )
 

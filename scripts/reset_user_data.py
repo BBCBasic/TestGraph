@@ -15,6 +15,8 @@ def reset_user_data():
         try:
             for model in CONTENT_MODELS:
                 result=db.execute(delete(model));counts[model.__tablename__]=result.rowcount or 0
+            from app.services.synthetic_root import ensure_synthetic_root
+            ensure_synthetic_root(db, commit=False)
             db.add(AuditEvent(actor_id="system",client_id="maintenance",action="user_data_reset",object_type="database",object_id=reset_id,request_id=reset_id,details={"preserved":["users","schema_definitions","oauth_clients","oauth_authorization_codes","oauth_refresh_tokens","capability_credentials"],"deleted_rows":counts}))
             db.commit();return counts
         except Exception: db.rollback();raise

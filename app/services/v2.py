@@ -60,6 +60,9 @@ def canonical_label(value: str) -> str:
 
 
 def resolve_subject_type(db: Session, term: str) -> SubjectType | None:
+    if str(term).strip() == ".":
+        from app.services.synthetic_root import SYNTHETIC_ROOT_ID
+        return db.get(SubjectType, SYNTHETIC_ROOT_ID)
     key = normalise_term(term)
     direct = db.scalar(select(SubjectType).where(SubjectType.normalized_name == key))
     if direct:
@@ -75,8 +78,13 @@ def ensure_subject_type(
     db: Session, term: str, *, created_by: str, description: str | None = None,
     create_if_missing: bool = True, commit: bool = True,
 ) -> tuple[SubjectType, bool, str]:
+    if str(term).strip() == ".":
+        raise ValueError("The synthetic root is infrastructure, not ordinary vocabulary")
     obj = resolve_subject_type(db, term)
     if obj:
+        if classification_mode() == "typed":
+            from app.services.synthetic_root import attach_root_if_needed
+            attach_root_if_needed(db, obj, commit=False)
         return obj, False, "canonical" if obj.normalized_name == normalise_term(term) else "alias"
     if not create_if_missing:
         raise ValueError(f"Unknown subject type '{term}'")
@@ -86,14 +94,18 @@ def ensure_subject_type(
         status="provisional", created_by=created_by,
     )
     db.add(obj)
+    db.flush()
+    if classification_mode() == "typed":
+        from app.services.synthetic_root import attach_root_if_needed
+        attach_root_if_needed(db, obj, commit=False)
     if commit:
         db.commit(); db.refresh(obj)
-    else:
-        db.flush()
     return obj, True, "created_provisional"
 
 
 def add_subject_type_alias(db: Session, subject_type: SubjectType, alias: str, *, source: str) -> SubjectTypeAlias:
+    from app.services.synthetic_root import assert_semantic_type
+    assert_semantic_type(subject_type)
     key = normalise_term(alias)
     existing_type = resolve_subject_type(db, alias)
     if existing_type and existing_type.id != subject_type.id:
@@ -164,6 +176,8 @@ def ensure_field(db: Session, payload: FieldEnsure, *, source: str) -> FieldDefi
         subject_type = resolve_subject_type(db, type_term)
         if not subject_type:
             raise ValueError(f"Unknown subject type '{type_term}'")
+        from app.services.synthetic_root import assert_semantic_type
+        assert_semantic_type(subject_type)
         if not db.scalar(select(SubjectTypeField).where(SubjectTypeField.subject_type_id == subject_type.id, SubjectTypeField.field_id == field.id)):
             db.add(SubjectTypeField(subject_type_id=subject_type.id, field_id=field.id, source=source))
     db.commit(); db.refresh(field)
@@ -368,6 +382,8 @@ def ensure_subject(
     subject_type = resolve_subject_type(db, payload.subject_type)
     if not subject_type:
         raise ValueError(f"Unknown subject type '{payload.subject_type}'")
+    from app.services.synthetic_root import assert_semantic_type
+    assert_semantic_type(subject_type)
     obj = db.scalar(select(V2Subject).where(
         V2Subject.subject_type_id == subject_type.id,
         V2Subject.canonical_key == payload.canonical_key,
@@ -677,11 +693,12 @@ def vocabulary_index(db: Session) -> dict:
     relationships = list(db.scalars(select(TypeRelationship).where(TypeRelationship.status == "active").order_by(TypeRelationship.relationship)).all())
     fields = list(db.scalars(select(FieldDefinition).order_by(FieldDefinition.canonical_name)).all())
     by_id = {x.id: x for x in types}
-    return {
+    result = {
         "classification_mode": classification_mode(),
         "taxonomy_relationship": taxonomy_relationship(),
         "supported_classification_relationships": list(supported_classification_relationships()),
         "subject_types": [{"id": str(x.id), "canonical_name": x.canonical_name, "status": x.status,
+                           **({"is_synthetic": True} if x.is_synthetic else {}),
                            "public_location_eligible": x.public_location_eligible,
                            "aliases": [a.alias for a in aliases if a.subject_type_id == x.id]} for x in types],
         "relationships": [{"source": by_id[x.source_type_id].canonical_name, "relationship": x.relationship,
@@ -690,6 +707,10 @@ def vocabulary_index(db: Session) -> dict:
         "fields": [{"id": str(x.id), "canonical_name": x.canonical_name, "json_schema": x.json_schema} for x in fields],
         "location_predicates": ["located_in", "contained_in", "published_address", "postcode", "position"],
     }
+    if classification_mode() == "typed":
+        from app.services.synthetic_root import check_synthetic_root_integrity
+        result["synthetic_root_integrity"] = check_synthetic_root_integrity(db)
+    return result
 
 
 def descendant_type_ids(db: Session, root: SubjectType) -> set[uuid.UUID]:

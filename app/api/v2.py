@@ -124,8 +124,16 @@ def resolve_type(term: str, db: Session = Depends(get_db)):
     obj = resolve_subject_type(db, term)
     if not obj:
         raise HTTPException(404, "Subject type not found")
-    return {"id": str(obj.id), "canonical_name": obj.canonical_name, "status": obj.status,
-            "fields": [x.canonical_name for x in fields_for_type(db, obj)]}
+    return {
+        "id": str(obj.id),
+        "canonical_name": obj.canonical_name,
+        "status": obj.status,
+        **({
+            "is_synthetic": True,
+            "instruction": "Infrastructure traversal root only; never classify an ordinary subject as '.'.",
+        } if obj.is_synthetic else {}),
+        "fields": [x.canonical_name for x in fields_for_type(db, obj)],
+    }
 
 
 @router.get("/subject-types/roots")

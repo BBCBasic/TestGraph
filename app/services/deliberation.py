@@ -26,6 +26,28 @@ class DeliberationError(Exception):
         self.details = details or {}
 
 
+_TYPE_REFERENCE_KEYS = {
+    "subject_type", "target_subject_type", "source_type", "parent_type",
+    "from_type", "to_type", "subject_type_id", "type_id",
+}
+
+
+def _references_synthetic_root(value: Any) -> bool:
+    """Detect explicit structured type references without scanning ordinary prose."""
+    if isinstance(value, dict):
+        for key, item in value.items():
+            normalized_key = str(key).strip().casefold().replace("-", "_")
+            if normalized_key in _TYPE_REFERENCE_KEYS and str(item).strip() in {
+                ".", "00000000-0000-0000-0000-000000000001",
+            }:
+                return True
+            if _references_synthetic_root(item):
+                return True
+    elif isinstance(value, list):
+        return any(_references_synthetic_root(item) for item in value)
+    return False
+
+
 def _canonical_target_model(value: str | None) -> str | None:
     if value is None:
         return None
@@ -133,6 +155,15 @@ def create_deliberation(
     owner_id: uuid.UUID,
     client_id: str,
 ) -> Deliberation:
+    if _references_synthetic_root({
+        "context": payload.context,
+        "constraints": payload.constraints,
+        "acceptance_criteria": payload.acceptance_criteria,
+    }):
+        raise DeliberationError(
+            "SYNTHETIC_ROOT_RESERVED",
+            "The synthetic root is infrastructure and cannot be a deliberation target",
+        )
     existing = db.scalar(select(Deliberation).where(
         Deliberation.owner_id == owner_id,
         Deliberation.canonical_key == payload.canonical_key,

@@ -13,6 +13,7 @@ from app.models.v2 import (
 from app.services.classification_mode import taxonomy_relationship
 from app.services.semantic_head import validate_semantic_type_name
 from app.services.v2 import resolve_subject_type
+from app.services.synthetic_root import assert_semantic_type
 
 
 logger = logging.getLogger(__name__)
@@ -153,6 +154,7 @@ def apply_resolver_arbitration(db: Session, subject: V2Subject, *, resolver_deci
     )
     if target is None:
         raise ValueError("Resolver selected a type outside the current candidate set")
+    assert_semantic_type(target)
 
     collision = db.scalar(select(V2Subject).where(
         V2Subject.id != subject.id,
@@ -227,6 +229,7 @@ def propose_reclassification(
     target = resolve_subject_type(db, target_subject_type)
     if not target:
         raise ValueError(f"Unknown target subject type '{target_subject_type}'")
+    assert_semantic_type(target)
     validate_semantic_type_name(
         target.canonical_name,
         distinct_class_justification=semantic_justification,

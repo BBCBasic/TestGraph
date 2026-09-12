@@ -915,6 +915,11 @@ def _tools_for_mode() -> list[dict]:
     for name in ("list_root_subject_types", "list_child_subject_types", "get_subject_type_path"):
         by_name[name]["inputSchema"]["properties"]["relationship"] = dict(relationship_property)
     if classification_mode() == "typed":
+        by_name["list_root_subject_types"]["description"] = (
+            "Start bounded typed vocabulary traversal here. This returns the single synthetic infrastructure "
+            "root '.', then list_child_subject_types with parent='.' returns its paginated immediate semantic "
+            "branches. Never select '.' as an ordinary subject classification."
+        )
         for name in ("set_type_relationship", "retire_type_relationship"):
             schema = by_name[name]["inputSchema"]
             schema["properties"]["relationship"] = dict(relationship_property)
@@ -935,7 +940,18 @@ def _resolve(db, args):
     if not obj:
         return _result({"found": False, "term": args.get("term"), "instruction": "Use list_root_subject_types and list_child_subject_types with ranked fallback branches. If no adequate existing type is found after bounded traversal, call resolve_subject_hierarchy before saving."})
     aliases = list(db.scalars(select(SubjectTypeAlias).where(SubjectTypeAlias.subject_type_id == obj.id)).all())
-    return _result({"found": True, "id": str(obj.id), "canonical_name": obj.canonical_name, "status": obj.status, "aliases": [x.alias for x in aliases], "fields": [x.canonical_name for x in fields_for_type(db, obj)]})
+    return _result({
+        "found": True,
+        "id": str(obj.id),
+        "canonical_name": obj.canonical_name,
+        "status": obj.status,
+        **({
+            "is_synthetic": True,
+            "instruction": "Infrastructure traversal root only; never classify an ordinary subject as '.'.",
+        } if obj.is_synthetic else {}),
+        "aliases": [x.alias for x in aliases],
+        "fields": [x.canonical_name for x in fields_for_type(db, obj)],
+    })
 
 
 def _list_root_subject_types(db, args):

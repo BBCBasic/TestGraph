@@ -3,7 +3,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, String, Text, UniqueConstraint
+from sqlalchemy import Boolean, DateTime, ForeignKey, Index, String, Text, UniqueConstraint, event, inspect, text
 from sqlalchemy.dialects.postgresql import JSONB, UUID as PGUUID
 from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy.types import JSON, Uuid
@@ -24,15 +24,44 @@ def new_uuid():
 
 class SubjectType(Base):
     __tablename__ = "subject_types"
+    __table_args__ = (
+        Index(
+            "uq_subject_types_single_synthetic",
+            "is_synthetic",
+            unique=True,
+            postgresql_where=text("is_synthetic"),
+            sqlite_where=text("is_synthetic = 1"),
+        ),
+    )
     id: Mapped[uuid.UUID] = mapped_column(UuidType, primary_key=True, default=new_uuid)
     canonical_name: Mapped[str] = mapped_column(String(120), nullable=False)
     normalized_name: Mapped[str] = mapped_column(String(120), unique=True, index=True)
     description: Mapped[str | None] = mapped_column(Text)
     status: Mapped[str] = mapped_column(String(20), default="provisional", index=True)
+    is_synthetic: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False, index=True)
     public_location_eligible: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
     created_by: Mapped[str] = mapped_column(String(200), default="system")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc, onupdate=now_utc)
+
+
+@event.listens_for(SubjectType, "before_update")
+def _protect_synthetic_type_update(_mapper, _connection, target: SubjectType) -> None:
+    state = inspect(target)
+    was_synthetic = target.is_synthetic or True in state.attrs.is_synthetic.history.deleted
+    if not was_synthetic:
+        return
+    protected = tuple(attribute.key for attribute in state.mapper.column_attrs)
+    if any(state.attrs[name].history.has_changes() for name in protected):
+        raise ValueError("The synthetic root cannot be renamed or modified")
+
+
+@event.listens_for(SubjectType, "before_delete")
+def _protect_synthetic_type_delete(_mapper, _connection, target: SubjectType) -> None:
+    state = inspect(target)
+    was_synthetic = target.is_synthetic or True in state.attrs.is_synthetic.history.deleted
+    if was_synthetic:
+        raise ValueError("The synthetic root cannot be deleted")
 
 
 class SubjectTypeAlias(Base):

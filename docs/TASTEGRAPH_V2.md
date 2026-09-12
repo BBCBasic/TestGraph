@@ -48,11 +48,15 @@ V2 can run either classification model without copying subject types or changing
 
 In typed mode, `is_a` answers what a type fundamentally is. `part_of` independently records a justified larger system, domain, structure or concept. Neither implies the other, and callers must not add `part_of` merely to complete a pattern.
 
+The typed `is_a` topology has one synthetic universal root, `.`. It is analogous to the DNS root: infrastructure rather than a semantic category. Every semantic `is_a` type is reachable from it, and a type with no meaningful semantic parent receives an infrastructure `is_a -> .` edge. Adding a meaningful parent removes only that infrastructure edge; multiple valid semantic `is_a` parents remain supported.
+
+The root has a reserved stable ID and cannot be renamed, deleted, aliased, classified, promoted or disputed. It does not privilege `entity` or any other named semantic type. Progressive discovery begins by listing `.`, then pages through its immediate children without loading the complete vocabulary. `part_of` and other relationship meanings remain independent of this topology.
+
 `resolve_subject_hierarchy` remains a broad-to-specific taxonomy operation: it creates `belongs_to` in legacy mode and `is_a` in typed mode. `set_type_relationship` requires an explicit `is_a` or `part_of` in typed mode; ambiguous `belongs_to` writes are rejected.
 
 Bounded root, child and path navigation defaults to the active taxonomic relationship and accepts an explicit relationship selector. Typed subtype search and classification specificity follow `is_a` only; `part_of` remains separately inspectable and does not silently broaden search.
 
-Switching the environment variable changes which edge semantics the running service uses. It does not convert stored edges, rebuild historical classifications or create a second vocabulary.
+Switching the environment variable changes which edge semantics the running service uses. It does not convert stored edges or rebuild historical classifications.
 
 ## Storage model
 

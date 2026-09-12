@@ -6,6 +6,8 @@ All notable changes to TestGraph will be documented in this file.
 
 ### Added
 
+- A stable synthetic universal root, `.`, for typed `is_a` classification. Every semantic type is reachable from it, progressive traversal begins there, and the live hierarchy can visually promote its children while preserving the real graph internally.
+- Synthetic-root integrity validation covering orphan semantic types, illegal root classifications, root identity and illegal parent edges.
 - Bounded, paginated MCP and REST vocabulary navigation for root discovery, immediate-child discovery and active root-to-type paths.
 - Progressive write-classification and retrieval guidance using ranked candidate branches, retained fallbacks and backtracking rather than a complete vocabulary download.
 - A configurable 10,000–50,000-node benchmark comparing full-index and progressive traversal payload, context, call, latency and backtracking measurements.

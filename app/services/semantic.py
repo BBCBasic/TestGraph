@@ -14,6 +14,7 @@ from app.services.classification_mode import (
 )
 from app.services.semantic_head import validate_semantic_type_name
 from app.services.v2 import ensure_subject_type, normalise_term, resolve_subject_type
+from app.services.synthetic_root import assert_semantic_type, attach_root_if_needed
 
 
 def _has_relationship_path(
@@ -58,6 +59,8 @@ def add_semantic_relationship(
 
     Previously retired exact edges remain tombstoned and cannot be silently recreated.
     """
+    assert_semantic_type(source_type)
+    assert_semantic_type(target_type)
     validate_semantic_type_name(
         source_type.canonical_name,
         distinct_class_justification=semantic_justification,
@@ -125,6 +128,9 @@ def add_semantic_relationship(
         source=source,
     )
     db.add(obj)
+    if classification_mode() == "typed" and rel == "is_a":
+        db.flush()
+        attach_root_if_needed(db, source_type, commit=False)
     if commit:
         db.commit()
         db.refresh(obj)
@@ -143,6 +149,8 @@ def retire_semantic_relationship(
     retired_by: str,
 ) -> TypeRelationship:
     """Retire an exact edge while preserving a tombstone against AI flip-flopping."""
+    assert_semantic_type(source_type)
+    assert_semantic_type(target_type)
     rel = normalise_term(relationship).replace(" ", "_")
     obj = db.scalar(select(TypeRelationship).where(
         TypeRelationship.source_type_id == source_type.id,
@@ -163,6 +171,9 @@ def retire_semantic_relationship(
     obj.retired_reason = clean_reason
     obj.retired_by = retired_by
     obj.retired_at = datetime.now(timezone.utc)
+    if classification_mode() == "typed" and rel == "is_a":
+        db.flush()
+        attach_root_if_needed(db, source_type, commit=False)
     db.commit()
     db.refresh(obj)
     return obj
@@ -201,7 +212,7 @@ def resolve_subject_hierarchy(
     # Perform all dictionary lookups before creating anything. This makes vocabulary
     # discovery independent of the order in which reviews happen to arrive.
     resolved_before = [resolve_subject_type(db, term) for term in cleaned]
-    if len(cleaned) == 1 and resolved_before[0] is None:
+    if classification_mode() == "legacy" and len(cleaned) == 1 and resolved_before[0] is None:
         raise ValueError(
             f"Unknown subject type '{cleaned[0]}' cannot be created as an isolated root. "
             "Use list_root_subject_types and list_child_subject_types to find the best existing parent, "

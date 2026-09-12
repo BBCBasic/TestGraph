@@ -40,6 +40,8 @@ TestGraph does not require those models to use identical words before their work
 
 The server stores and verifies the process; the calling AI supplies the open-ended semantic reasoning.
 
+In the experimental typed-classification mode, the `is_a` graph has one reserved synthetic root, `.`. It gives every semantic branch a common structural origin without making `entity` or another model-chosen term globally privileged. Classifiers traverse outward from `.` progressively; they never use it as an ordinary subject type.
+
 ## What TestGraph is investigating
 
 1. **Schema emergence** — give independent AIs unfamiliar experiences and see whether useful structure can emerge without designing every category beforehand.

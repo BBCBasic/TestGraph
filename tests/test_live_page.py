@@ -42,6 +42,16 @@ def test_live_page_distinguishes_typed_taxonomy_and_membership(client):
     assert "same type" in page.text
 
 
+def test_live_hierarchy_visually_promotes_children_of_the_synthetic_root(client):
+    page = client.get("/live")
+
+    assert page.status_code == 200
+    assert "syntheticRoot" in page.text
+    assert "is_synthetic" in page.text
+    assert "synthetic universal root" in page.text
+    assert "childList.hidden=!expanded" in page.text
+
+
 def test_public_v2_feed_excludes_private_data_and_internal_metadata(client):
     with SessionLocal() as db:
         user = User(display_name="Live page test", profile_data={})

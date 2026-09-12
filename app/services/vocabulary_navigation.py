@@ -15,6 +15,7 @@ from app.services.classification_mode import (
     validate_classification_relationship,
 )
 from app.services.v2 import resolve_subject_type
+from app.services.synthetic_root import SYNTHETIC_ROOT_ID, ensure_synthetic_root
 
 
 DEFAULT_PAGE_LIMIT = 50
@@ -105,6 +106,7 @@ def _type_summaries(
             "description": item.description,
             "aliases": aliases[item.id],
             "child_count": int(child_counts.get(item.id, 0)),
+            **({"is_synthetic": True} if item.is_synthetic else {}),
         }
         for item in subject_types
     ]
@@ -153,6 +155,13 @@ def list_root_subject_types(
     cursor: str | None = None,
 ) -> dict:
     selected_relationship = _selected_relationship(relationship)
+    if classification_mode() == "typed" and selected_relationship == "is_a":
+        root = ensure_synthetic_root(db, commit=False)
+        statement = select(SubjectType).where(SubjectType.id == root.id)
+        return _page(
+            db, statement, operation="roots", parent_id=None,
+            relationship=selected_relationship, limit=limit, cursor=cursor,
+        )
     active_parent = select(TypeRelationship.id).where(
         TypeRelationship.source_type_id == SubjectType.id,
         TypeRelationship.relationship == selected_relationship,
@@ -160,7 +169,7 @@ def list_root_subject_types(
     ).exists()
     statement = (
         select(SubjectType)
-        .where(~active_parent)
+        .where(~active_parent, SubjectType.is_synthetic.is_(False))
         .order_by(func.lower(SubjectType.canonical_name), SubjectType.id)
     )
     return _page(
