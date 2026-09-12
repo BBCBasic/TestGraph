@@ -23,6 +23,10 @@ def test_live_page_is_v2_only_and_linked(client):
     assert "Classification hierarchy" in page.text
     assert "renderClassificationTree" in page.text
     assert "tree-node" in page.text
+    assert "tree-toggle" in page.text
+    assert "aria-expanded" in page.text
+    assert "Expand " in page.text
+    assert "Collapse " in page.text
     assert "subject-summary" in page.text
 
 
