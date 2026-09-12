@@ -6,6 +6,9 @@ All notable changes to TestGraph will be documented in this file.
 
 ### Added
 
+- Bounded, paginated MCP and REST vocabulary navigation for root discovery, immediate-child discovery and active root-to-type paths.
+- Progressive write-classification and retrieval guidance using ranked candidate branches, retained fallbacks and backtracking rather than a complete vocabulary download.
+- A configurable 10,000–50,000-node benchmark comparing full-index and progressive traversal payload, context, call, latency and backtracking measurements.
 - `affirm_subject_classification` lets independent AIs agree with an already-correct provisional type; two distinct model identities now confirm and lock it without forcing a fake reclassification.
 - Subject-level classification convergence: one AI creates a candidate and two distinct model identities agreeing on the same strict-descendant type automatically move, confirm, and lock the subject.
 - Persistent classification decision audit records, including model identity, evidence, reason, prior type, target type, and outcome.

@@ -16,6 +16,9 @@ from app.services.v2 import (
     ensure_field, ensure_subject, ensure_subject_type, fields_for_type, resolve_subject_type,
     vocabulary_index,
 )
+from app.services.vocabulary_navigation import (
+    get_subject_type_paths, list_child_subject_types, list_root_subject_types,
+)
 
 router = APIRouter(prefix="/api/v2", tags=["TasteGraph v2"])
 PageLimit = Annotated[int, Query(ge=1, le=100)]
@@ -122,6 +125,40 @@ def resolve_type(term: str, db: Session = Depends(get_db)):
         raise HTTPException(404, "Subject type not found")
     return {"id": str(obj.id), "canonical_name": obj.canonical_name, "status": obj.status,
             "fields": [x.canonical_name for x in fields_for_type(db, obj)]}
+
+
+@router.get("/subject-types/roots")
+def subject_type_roots(
+    limit: PageLimit = 50, cursor: str | None = None, db: Session = Depends(get_db),
+):
+    try:
+        return list_root_subject_types(db, limit=limit, cursor=cursor)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+
+@router.get("/subject-types/{subject_type_id}/children")
+def subject_type_children(
+    subject_type_id: uuid.UUID,
+    limit: PageLimit = 50,
+    cursor: str | None = None,
+    db: Session = Depends(get_db),
+):
+    parent = db.get(SubjectType, subject_type_id)
+    if parent is None:
+        raise HTTPException(404, "Subject type not found")
+    try:
+        return list_child_subject_types(db, parent, limit=limit, cursor=cursor)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+
+@router.get("/subject-types/{subject_type_id}/path")
+def subject_type_path(subject_type_id: uuid.UUID, db: Session = Depends(get_db)):
+    subject_type = db.get(SubjectType, subject_type_id)
+    if subject_type is None:
+        raise HTTPException(404, "Subject type not found")
+    return get_subject_type_paths(db, subject_type)
 
 
 @router.post("/subject-types", status_code=201)

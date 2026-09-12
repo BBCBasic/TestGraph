@@ -37,7 +37,7 @@ def test_oauth_mcp_v2_resource_flow(client,auth,monkeypatch):
     code=re.search(r"[?&]code=([^&]+)",approved.headers["location"]).group(1)
     access=client.post("/oauth/token",data={"grant_type":"authorization_code","client_id":client_id,"code":code,"redirect_uri":redirect_uri,"code_verifier":verifier,"resource":resource}).json()["access_token"]
     initialized=_rpc(client,"/mcp-v2","initialize",token=access)
-    assert initialized.json()["result"]["serverInfo"]["version"]=="3.20.2-alpha"
+    assert initialized.json()["result"]["serverInfo"]["version"]=="3.21.0-alpha"
     instructions=initialized.json()["result"]["instructions"]
     assert "full available reasoning, web retrieval and tool capabilities" in instructions
     assert "open-ended semantic and discovery engine" in instructions
@@ -45,8 +45,13 @@ def test_oauth_mcp_v2_resource_flow(client,auth,monkeypatch):
     assert "only record_resolution with explicit user approval may close it" in instructions
     assert "list_open_deliberations" in instructions
     assert "next_cursor" in instructions
+    assert "list_root_subject_types" in instructions
+    assert "rank" in instructions.casefold()
+    assert "fallback" in instructions.casefold()
+    assert "backtrack" in instructions.casefold()
+    assert "inspect vocabulary_index" not in instructions.casefold()
     tools=_rpc(client,"/mcp-v2","tools/list",token=access,call_id=2).json()["result"]["tools"]
-    assert {tool["name"] for tool in tools}=={"get_server_info","get_induction","list_my_workflows","list_my_mcp_interactions","list_reviews_by_visibility","set_review_visibility","search","fetch","vocabulary_index","resolve_subject_type","resolve_subject","get_subject_classification","affirm_subject_classification","propose_subject_reclassification","reopen_subject_classification","resolve_subject_hierarchy","register_subject_type_alias","set_type_relationship","retire_type_relationship","register_field","enrich_subject","correct_subject_fact","save_experience","delete_experience","save_assessment","create_deliberation","get_deliberation","list_open_deliberations","claim_deliberation","submit_contribution","record_resolution","assert_location","get_location_assertions","resolve_location_assertion"}
+    assert {tool["name"] for tool in tools}=={"get_server_info","get_induction","list_my_workflows","list_my_mcp_interactions","list_reviews_by_visibility","set_review_visibility","search","fetch","vocabulary_index","list_root_subject_types","list_child_subject_types","get_subject_type_path","resolve_subject_type","resolve_subject","get_subject_classification","affirm_subject_classification","propose_subject_reclassification","reopen_subject_classification","resolve_subject_hierarchy","register_subject_type_alias","set_type_relationship","retire_type_relationship","register_field","enrich_subject","correct_subject_fact","save_experience","delete_experience","save_assessment","create_deliberation","get_deliberation","list_open_deliberations","claim_deliberation","submit_contribution","record_resolution","assert_location","get_location_assertions","resolve_location_assertion"}
     save_tool=next(tool for tool in tools if tool["name"]=="save_experience")
     properties=save_tool["inputSchema"]["properties"]
     assert "experienced_at" in properties
@@ -56,6 +61,11 @@ def test_oauth_mcp_v2_resource_flow(client,auth,monkeypatch):
 
     info=_rpc(client,"/mcp-v2","tools/call",params={"name":"get_server_info","arguments":{}},token=access,call_id=3)
     assert info.json()["result"]["structuredContent"]["service"]=="TestGraph"
+    roots=_rpc(client,"/mcp-v2","tools/call",params={"name":"list_root_subject_types","arguments":{"limit":10}},token=access,call_id=31)
+    root_body=roots.json()["result"]["structuredContent"]
+    assert root_body["count"] > 0
+    assert root_body["count"] <= 10
+    assert all("child_count" in item for item in root_body["items"])
     with SessionLocal() as db:
         interaction=db.scalar(select(McpInteraction).where(McpInteraction.tool_name=="get_server_info").order_by(McpInteraction.created_at.desc()))
         assert interaction is not None

@@ -30,7 +30,10 @@ BASELINE_GUIDANCE: list[dict[str, Any]] = [
         "text": (
             "Search lexically, but treat retrieval as softer than canonical naming. Start with the user's wording; "
             "when needed also try known aliases, canonical type names and useful broader or related types. A miss for "
-            "one label is not evidence that the underlying subject or concept is absent. Continue every next_cursor "
+            "one label is not evidence that the underlying subject or concept is absent. When a classification scope "
+            "is useful, resolve an obvious type directly or use list_root_subject_types and "
+            "list_child_subject_types to rank a small candidate set. Retain fallback branches and backtrack when the "
+            "first scoped search is inadequate; never treat its miss as global absence. Continue every next_cursor "
             "until has_more is false before claiming exhaustive retrieval, fetch the complete reviews you rely on, "
             "and group records by subject_id plus subject_type rather than display name. Stable IDs, not preferred "
             "labels, determine identity. Use related subjects and verified collection knowledge to expand useful "
@@ -41,7 +44,11 @@ BASELINE_GUIDANCE: list[dict[str, Any]] = [
         "key": "classification",
         "title": "Classification",
         "text": (
-            "Inspect vocabulary before classifying unfamiliar subjects. Naming disagreement is non-blocking: if "
+            "Resolve an obvious type directly before classifying an unfamiliar subject. If that is insufficient, "
+            "use list_root_subject_types and list_child_subject_types to inspect only the current level, rank a small "
+            "candidate set, retain fallback branches and backtrack when necessary. Stop at the most specific adequate "
+            "existing type or when bounded traversal justifies a genuinely new type; do not download or enumerate the "
+            "complete vocabulary. Naming disagreement is non-blocking: if "
             "different labels are genuinely equivalent, reuse the same stable subject-type identity through aliases "
             "even when different AIs prefer different names. Do not require cross-model agreement on wording before "
             "using an existing type. Semantic disagreement is different: disagreement about whether two concepts "

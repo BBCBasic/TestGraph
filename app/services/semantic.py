@@ -192,7 +192,8 @@ def resolve_subject_hierarchy(
     if len(cleaned) == 1 and resolved_before[0] is None:
         raise ValueError(
             f"Unknown subject type '{cleaned[0]}' cannot be created as an isolated root. "
-            "Inspect vocabulary_index and provide a broad-to-specific hierarchy, "
+            "Use list_root_subject_types and list_child_subject_types to find the best existing parent, "
+            "then provide a broad-to-specific hierarchy, "
             "for example ['food', 'recipe']."
         )
 

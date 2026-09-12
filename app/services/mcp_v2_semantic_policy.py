@@ -27,6 +27,13 @@ SEMANTIC_HEAD_POLICY = (
     "validates structural writes, so client guidance cannot bypass this rule."
 )
 
+PROGRESSIVE_TRAVERSAL_POLICY = (
+    "Use bounded best-first traversal: inspect only the current level, rank a small set of plausible branches, "
+    "follow the strongest while retaining fallback candidates, and backtrack if that branch gives an inadequate "
+    "classification or retrieval result. Stop at the most specific adequate existing type or when bounded evidence "
+    "justifies a new type; do not enumerate the complete taxonomy."
+)
+
 
 def _append_description(tool: dict, text: str) -> None:
     current = str(tool.get("description") or "").strip()
@@ -41,11 +48,34 @@ def apply_semantic_naming_policy(tools: list[dict]) -> None:
     search = by_name.get("search")
     if search:
         _append_description(search, RETRIEVAL_POLICY)
+        _append_description(search, PROGRESSIVE_TRAVERSAL_POLICY)
 
     vocabulary = by_name.get("vocabulary_index")
     if vocabulary:
+        _append_description(
+            vocabulary,
+            "This complete export is retained for administration and debugging only. Normal classification and "
+            "retrieval must use progressive root/child/path navigation instead.",
+        )
         _append_description(vocabulary, NAMING_POLICY)
         _append_description(vocabulary, SEMANTIC_HEAD_POLICY)
+
+    roots = by_name.get("list_root_subject_types")
+    if roots:
+        _append_description(roots, PROGRESSIVE_TRAVERSAL_POLICY)
+        _append_description(roots, NAMING_POLICY)
+        _append_description(roots, SEMANTIC_HEAD_POLICY)
+
+    children = by_name.get("list_child_subject_types")
+    if children:
+        _append_description(children, PROGRESSIVE_TRAVERSAL_POLICY)
+        _append_description(children, NAMING_POLICY)
+        _append_description(children, SEMANTIC_HEAD_POLICY)
+
+    path = by_name.get("get_subject_type_path")
+    if path:
+        _append_description(path, PROGRESSIVE_TRAVERSAL_POLICY)
+        _append_description(path, NAMING_POLICY)
 
     resolve_type = by_name.get("resolve_subject_type")
     if resolve_type:

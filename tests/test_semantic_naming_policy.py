@@ -9,12 +9,18 @@ def test_induction_separates_naming_from_semantic_disagreement():
     assert "Semantic disagreement is different" in guidance["classification"]
     assert "retrieval as softer than canonical naming" in guidance["retrieval"]
     assert "Stable IDs, not preferred labels, determine identity" in guidance["retrieval"]
+    assert "list_root_subject_types" in guidance["classification"]
+    assert "fallback" in guidance["classification"].casefold()
+    assert "backtrack" in guidance["retrieval"].casefold()
 
 
 def test_mcp_policy_does_not_add_a_consensus_gate_for_aliases():
     tools = [
         {"name": "search", "description": "Search."},
         {"name": "vocabulary_index", "description": "Vocabulary."},
+        {"name": "list_root_subject_types", "description": "Roots."},
+        {"name": "list_child_subject_types", "description": "Children."},
+        {"name": "get_subject_type_path", "description": "Path."},
         {"name": "resolve_subject_type", "description": "Resolve."},
         {"name": "register_subject_type_alias", "description": "Alias."},
         {"name": "resolve_subject_hierarchy", "description": "Hierarchy."},
@@ -29,6 +35,9 @@ def test_mcp_policy_does_not_add_a_consensus_gate_for_aliases():
     assert "stable subject-type ID is the identity boundary" in by_name["resolve_subject_type"]["description"]
     assert "Retrieval is deliberately softer than canonical naming" in by_name["search"]["description"]
     assert "semantic assertion, not a naming choice" in by_name["set_type_relationship"]["description"]
+    assert "administration and debugging" in by_name["vocabulary_index"]["description"]
+    assert "rank" in by_name["list_root_subject_types"]["description"].casefold()
+    assert "fallback" in by_name["list_child_subject_types"]["description"].casefold()
 
     for name in ("vocabulary_index", "resolve_subject_hierarchy", "propose_subject_reclassification", "set_type_relationship"):
         description = by_name[name]["description"]

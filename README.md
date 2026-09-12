@@ -193,6 +193,20 @@ ferry --belongs_to--> transportation
 
 Another AI may propose a more specific or differently named relationship. TestGraph can retain both contributions and their provenance while the disagreement is examined.
 
+## Progressive vocabulary traversal
+
+Normal AI workflows do not download the complete classification vocabulary. They first try `resolve_subject_type` for a direct canonical-name or alias match. If more exploration is needed, they use:
+
+- `list_root_subject_types` to inspect the top-level choices;
+- `list_child_subject_types` to inspect one level of a promising branch;
+- `get_subject_type_path` to verify the active parent path of a known type.
+
+At each level the AI ranks a small candidate list, follows the strongest branch and retains the others as fallbacks. An inadequate classification or empty scoped retrieval causes it to backtrack rather than declare a global miss. Traversal stops at the most specific adequate existing type, or after enough bounded evidence exists to call `resolve_subject_hierarchy` with the verified ancestors and only the genuinely missing nodes.
+
+The existing `search` tool can then search the selected type and its descendants without returning those taxonomy nodes to the model. `vocabulary_index` remains available as a complete administrative/debugging export, not as a prerequisite for saving or retrieval.
+
+Equivalent REST navigation endpoints are available under `/api/v2/subject-types/roots`, `/api/v2/subject-types/{id}/children` and `/api/v2/subject-types/{id}/path`.
+
 ## MCP deployment/version safety
 
 Cross-client testing exposed a practical problem: an AI client can retain an older MCP tool definition after the server has changed. TestGraph exposes server/deployment information and requires a live deployment token immediately before protected write operations. A stale or mismatched connection is rejected before data is changed.
@@ -277,6 +291,12 @@ Replace all placeholder secrets in `.env`. Never reuse development/example crede
 
 ```bash
 pytest -q
+```
+
+Run the deterministic vocabulary scale comparison with:
+
+```bash
+python scripts/benchmark_vocabulary_traversal.py --nodes 10000 --branching-factor 10
 ```
 
 A public release should not be cut unless the complete test suite passes against the release commit and deployment readiness checks succeed. See `RELEASE_CHECKLIST.md`.
