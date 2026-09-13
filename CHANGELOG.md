@@ -10,14 +10,15 @@ All notable changes to TestGraph will be documented in this file.
 
 ### Added
 
+- A creator–reviewer classification lifecycle: each subject's creation proposal is retained, one review from a different authenticated client confirms agreement or opens a dispute, and saving enrichment hands off immediately into the durable classification workflow.
 - Cross-model vocabulary convergence at typed hierarchy write time: a model proposing a new peer beside another client's existing types must explicitly reuse an equivalent stable type as an alias or justify creating a distinct type.
 - A stable synthetic universal root, `.`, for typed `is_a` classification. Every semantic type is reachable from it, progressive traversal begins there, and the live hierarchy can visually promote its children while preserving the real graph internally.
 - Synthetic-root integrity validation covering orphan semantic types, illegal root classifications, root identity and illegal parent edges.
 - Bounded, paginated MCP and REST vocabulary navigation for root discovery, immediate-child discovery and active root-to-type paths.
 - Progressive write-classification and retrieval guidance using ranked candidate branches, retained fallbacks and backtracking rather than a complete vocabulary download.
 - A configurable 10,000–50,000-node benchmark comparing full-index and progressive traversal payload, context, call, latency and backtracking measurements.
-- `affirm_subject_classification` lets independent AIs agree with an already-correct provisional type; two distinct model identities now confirm and lock it without forcing a fake reclassification.
-- Subject-level classification convergence: one AI creates a candidate and two distinct model identities agreeing on the same strict-descendant type automatically move, confirm, and lock the subject.
+- `affirm_subject_classification` lets a different authenticated client confirm and lock an already-correct creation proposal without forcing a fake reclassification.
+- Subject-level classification review records agreement as confirmed and disagreement as disputed; protocol suffixes and caller-reported model labels cannot manufacture an independent client identity.
 - Persistent classification decision audit records, including model identity, evidence, reason, prior type, target type, and outcome.
 - Explicit, governed reopening for user correction, contradictory evidence, retired types, or vocabulary invalidation; ordinary later disagreement is recorded without reopening a confirmed classification.
 - MCP tools to inspect classification state, propose a refinement, and deliberately reopen a settled classification.

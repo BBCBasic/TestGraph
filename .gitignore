@@ -8,6 +8,7 @@ __pycache__/
 venv/
 env/
 ENV/
+.worktrees/
 
 # Test and coverage output
 .pytest_cache/

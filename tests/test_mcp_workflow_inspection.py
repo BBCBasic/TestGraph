@@ -41,7 +41,9 @@ def test_inspection_queries_are_owner_scoped():
         assert len(workflows) == 1
         assert workflows[0]["state"] == "awaiting_second_model"
         assert workflows[0]["next_action"] == "get_subject_classification"
-        assert "source_model must differ" in workflows[0]["next_action_instruction"]
+        instruction = workflows[0]["next_action_instruction"].lower()
+        assert "different authenticated client" in instruction
+        assert "changing source_model does not establish independence" in instruction
         assert len(interactions) == 1
         assert interactions[0]["client_id"] == "chatgpt"
         assert interactions[0]["tool_name"] == "enrich_subject"

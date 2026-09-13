@@ -73,7 +73,7 @@ def save(payload:dict,authorization:str|None=Header(None,alias="Authorization"),
             str(payload["subject_type"]),
             created_by=client_id,
         )
-        subject=ensure_subject(db,SubjectEnsure(subject_type=st.canonical_name,name=payload["subject_name"],canonical_key=payload["canonical_key"],identifiers=payload.get("identifiers",{}),attributes=payload.get("subject_attributes",{})),client_id)
+        subject=ensure_subject(db,SubjectEnsure(subject_type=st.canonical_name,name=payload["subject_name"],canonical_key=payload["canonical_key"],identifiers=payload.get("identifiers",{}),attributes=payload.get("subject_attributes",{})),client_id,classification_source_client=f"capability:{cred.id}")
         exp=create_experience(db,ExperienceCreate(owner_id=cred.user_id,subject_id=subject.id,headline=payload["headline"],summary=payload["summary"],raw_text=payload["raw_text"],structured_data=payload.get("structured_data",{}),visibility=payload.get("visibility","private"),user_approved=True,source_client=client_id),client_id)
         body={"saved":True,"experience_id":str(exp.id),"subject_type_id":str(st.id),"subject_type":st.canonical_name,"type_created":created,"type_resolution":resolution}
         finish_idempotent_write(db,client_id=client_id,key=f"experience:{key}",payload_hash=payload_hash,response_body=body)

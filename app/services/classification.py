@@ -11,6 +11,7 @@ from app.models.v2 import (
     SubjectClassificationDecision, SubjectType, TypeRelationship, V2Subject, now_utc,
 )
 from app.services.classification_mode import taxonomy_relationship
+from app.services.client_identity import canonical_client_identity
 from app.services.semantic_head import validate_semantic_type_name
 from app.services.v2 import resolve_subject_type
 from app.services.synthetic_root import assert_semantic_type
@@ -99,6 +100,7 @@ def _decision_body(db: Session, decision: SubjectClassificationDecision) -> dict
         "classification_version": decision.classification_version,
         "target_subject_type": target.canonical_name if target else None,
         "source_model": decision.source_model,
+        "source_client": canonical_client_identity(decision.source_client),
         "reason": decision.reason,
         "evidence": decision.evidence_json,
         "evidence_fingerprint": decision.evidence_fingerprint,
@@ -108,6 +110,8 @@ def _decision_body(db: Session, decision: SubjectClassificationDecision) -> dict
 
 
 def classification_state(db: Session, subject: V2Subject) -> dict:
+    from app.services.classification_proposals import classification_proposal
+
     current_type = db.get(SubjectType, subject.subject_type_id)
     decisions = list(db.scalars(select(SubjectClassificationDecision).where(
         SubjectClassificationDecision.subject_id == subject.id,
@@ -122,9 +126,64 @@ def classification_state(db: Session, subject: V2Subject) -> dict:
         "locked_at": subject.classification_locked_at.isoformat() if subject.classification_locked_at else None,
         "direct_child_types": [child.canonical_name for child in direct_children],
         "specificity_review_required": bool(direct_children) and subject.classification_status != "confirmed",
+        "creation_proposal": classification_proposal(subject),
         "active_decisions": [_decision_body(db, d) for d in active],
         "audit_history": [_decision_body(db, d) for d in decisions],
     }
+
+
+def _settle_against_creation_proposal(
+    db: Session,
+    subject: V2Subject,
+    *,
+    decision: SubjectClassificationDecision,
+    target: SubjectType,
+) -> tuple[bool, bool]:
+    """Apply a qualifying formal decision against the attributed creation proposal."""
+    from app.services.classification_proposals import classification_proposal
+
+    proposal = classification_proposal(subject)
+    proposed_type_id = proposal.get("proposed_type_id")
+    if not proposed_type_id:
+        return False, False
+
+    if subject.classification_status == "disputed":
+        if target.status == "provisional":
+            target.status = "candidate"
+        return True, False
+
+    proposing_client = proposal.get("source_client")
+    if (
+        proposing_client
+        and canonical_client_identity(decision.source_client)
+        == canonical_client_identity(proposing_client)
+    ):
+        subject.classification_status = "candidate"
+        if target.status == "provisional":
+            target.status = "candidate"
+        return True, False
+
+    if str(target.id) == str(proposed_type_id):
+        collision = db.scalar(select(V2Subject).where(
+            V2Subject.id != subject.id,
+            V2Subject.subject_type_id == target.id,
+            V2Subject.canonical_key == subject.canonical_key,
+            V2Subject.deleted_at.is_(None),
+        ))
+        if collision:
+            raise ValueError("Reclassification would collide with an existing subject")
+        subject.subject_type_id = target.id
+        subject.classification_status = "confirmed"
+        subject.classification_locked_at = now_utc()
+        target.status = "confirmed"
+        decision.outcome = "confirmed"
+        return True, False
+
+    created_dispute = subject.classification_status != "disputed"
+    subject.classification_status = "disputed"
+    if target.status == "provisional":
+        target.status = "candidate"
+    return True, created_dispute
 
 
 def apply_resolver_arbitration(db: Session, subject: V2Subject, *, resolver_decision) -> dict:
@@ -140,8 +199,17 @@ def apply_resolver_arbitration(db: Session, subject: V2Subject, *, resolver_deci
         SubjectClassificationDecision.outcome == "candidate",
     ).order_by(SubjectClassificationDecision.created_at)).all())
     active_target_ids = {item.target_type_id for item in active}
+    from app.services.classification_proposals import classification_proposal
+
+    proposal = classification_proposal(subject)
+    try:
+        proposal_type_id = uuid.UUID(str(proposal.get("proposed_type_id")))
+    except (TypeError, ValueError):
+        proposal_type_id = None
+    if proposal_type_id is not None and db.get(SubjectType, proposal_type_id) is not None:
+        active_target_ids.add(proposal_type_id)
     if len(active_target_ids) < 2:
-        raise ValueError("Resolver arbitration requires at least two distinct active candidates")
+        raise ValueError("Resolver arbitration requires at least two distinct active positions")
 
     candidate_types = [db.get(SubjectType, target_id) for target_id in active_target_ids]
     target = next(
@@ -222,6 +290,9 @@ def propose_reclassification(
     allow_current_type: bool = False, semantic_justification: str | None = None,
 ) -> dict:
     model = source_model.strip()
+    source_client = canonical_client_identity(source_client)
+    if not source_client:
+        raise ValueError("source_client is required to prove independent authenticated-client review")
     if not model:
         raise ValueError("source_model is required to prove independent AI agreement")
     if not reason.strip():
@@ -238,17 +309,22 @@ def propose_reclassification(
     if not current:
         raise ValueError("Current subject type not found")
 
-    existing = db.scalar(select(SubjectClassificationDecision).where(
+    client_decisions = list(db.scalars(select(SubjectClassificationDecision).where(
         SubjectClassificationDecision.subject_id == subject.id,
         SubjectClassificationDecision.classification_version == subject.classification_version,
-        SubjectClassificationDecision.source_model == model,
-    ))
+    )).all())
+    existing = next(
+        (
+            item for item in client_decisions
+            if canonical_client_identity(item.source_client) == source_client
+        ),
+        None,
+    )
     if existing:
         if existing.target_type_id != target.id:
-            raise ValueError("This AI model already made a different decision in the current classification round")
-        return classification_state(db, subject)
+            raise ValueError("This OAuth client already made a different decision in the current classification round")
 
-    if subject.classification_status != "confirmed":
+    if existing is None and subject.classification_status != "confirmed":
         affirms_current = target.id == current.id
         if affirms_current and not allow_current_type:
             raise ValueError(
@@ -261,53 +337,63 @@ def propose_reclassification(
                 f"'{target.canonical_name}' is not a strict descendant of current type '{current.canonical_name}'"
             )
 
-    decision = SubjectClassificationDecision(
-        subject_id=subject.id,
-        classification_version=subject.classification_version,
-        from_type_id=current.id,
-        target_type_id=target.id,
-        source_model=model,
-        source_client=source_client,
-        reason=reason.strip(),
-        evidence_json=evidence,
-        evidence_fingerprint=evidence_fingerprint,
-        outcome="ignored_locked" if subject.classification_status == "confirmed" else "candidate",
-    )
-    db.add(decision)
-    db.flush()
+    if existing is None:
+        decision = SubjectClassificationDecision(
+            subject_id=subject.id,
+            classification_version=subject.classification_version,
+            from_type_id=current.id,
+            target_type_id=target.id,
+            source_model=model,
+            source_client=source_client,
+            reason=reason.strip(),
+            evidence_json=evidence,
+            evidence_fingerprint=evidence_fingerprint,
+            outcome="ignored_locked" if subject.classification_status == "confirmed" else "candidate",
+        )
+        db.add(decision)
+        db.flush()
+    else:
+        decision = existing
 
     created_dispute = False
     if subject.classification_status != "confirmed":
-        active = list(db.scalars(select(SubjectClassificationDecision).where(
-            SubjectClassificationDecision.subject_id == subject.id,
-            SubjectClassificationDecision.classification_version == subject.classification_version,
-            SubjectClassificationDecision.outcome == "candidate",
-        )).all())
-        counts = Counter(d.target_type_id for d in active)
-        if len(counts) == 1 and counts[target.id] >= 2:
-            collision = db.scalar(select(V2Subject).where(
-                V2Subject.id != subject.id,
-                V2Subject.subject_type_id == target.id,
-                V2Subject.canonical_key == subject.canonical_key,
-                V2Subject.deleted_at.is_(None),
-            ))
-            if collision:
-                raise ValueError("Reclassification would collide with an existing subject")
-            subject.subject_type_id = target.id
-            subject.classification_status = "confirmed"
-            subject.classification_locked_at = now_utc()
-            target.status = "confirmed"
-            for item in active:
-                item.outcome = "confirmed"
-        elif len(counts) > 1:
-            created_dispute = subject.classification_status != "disputed"
-            subject.classification_status = "disputed"
-            if target.status == "provisional":
-                target.status = "candidate"
-        else:
-            subject.classification_status = "candidate"
-            if target.status == "provisional":
-                target.status = "candidate"
+        proposal_applies, created_dispute = _settle_against_creation_proposal(
+            db,
+            subject,
+            decision=decision,
+            target=target,
+        )
+        if not proposal_applies and existing is None:
+            active = list(db.scalars(select(SubjectClassificationDecision).where(
+                SubjectClassificationDecision.subject_id == subject.id,
+                SubjectClassificationDecision.classification_version == subject.classification_version,
+                SubjectClassificationDecision.outcome == "candidate",
+            )).all())
+            counts = Counter(d.target_type_id for d in active)
+            if len(counts) == 1 and counts[target.id] >= 2:
+                collision = db.scalar(select(V2Subject).where(
+                    V2Subject.id != subject.id,
+                    V2Subject.subject_type_id == target.id,
+                    V2Subject.canonical_key == subject.canonical_key,
+                    V2Subject.deleted_at.is_(None),
+                ))
+                if collision:
+                    raise ValueError("Reclassification would collide with an existing subject")
+                subject.subject_type_id = target.id
+                subject.classification_status = "confirmed"
+                subject.classification_locked_at = now_utc()
+                target.status = "confirmed"
+                for item in active:
+                    item.outcome = "confirmed"
+            elif len(counts) > 1:
+                created_dispute = subject.classification_status != "disputed"
+                subject.classification_status = "disputed"
+                if target.status == "provisional":
+                    target.status = "candidate"
+            else:
+                subject.classification_status = "candidate"
+                if target.status == "provisional":
+                    target.status = "candidate"
 
     db.commit()
     db.refresh(subject)
@@ -358,6 +444,9 @@ def reopen_classification(
     db: Session, subject: V2Subject, *, trigger: str, reason: str,
     evidence: dict, requested_by: str, user_approved: bool = False,
 ) -> dict:
+    requested_by = canonical_client_identity(requested_by)
+    if not requested_by:
+        raise ValueError("requested_by authenticated client is required")
     if trigger not in REOPEN_TRIGGERS:
         raise ValueError(f"Unsupported reopening trigger '{trigger}'")
     if subject.classification_status != "confirmed":
@@ -369,7 +458,7 @@ def reopen_classification(
     confirmed = db.scalar(select(SubjectClassificationDecision).where(
         SubjectClassificationDecision.subject_id == subject.id,
         SubjectClassificationDecision.classification_version == subject.classification_version,
-        SubjectClassificationDecision.outcome == "confirmed",
+        SubjectClassificationDecision.outcome.in_({"confirmed", "resolver_selected"}),
     ).order_by(SubjectClassificationDecision.created_at))
     if not confirmed:
         raise ValueError("Confirmed classification audit is missing")
@@ -392,6 +481,14 @@ def reopen_classification(
     })
     provenance["classification_reopenings"] = history
     subject.provenance_json = provenance
+    from app.services.classification_proposals import record_classification_proposal
+
+    record_classification_proposal(
+        subject,
+        source_client=requested_by,
+        source_model=None,
+        identity_basis="reopening_action",
+    )
     db.commit()
     db.refresh(subject)
     return classification_state(db, subject)

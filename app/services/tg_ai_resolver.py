@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import uuid
 
 import httpx
 from pydantic import BaseModel, Field
@@ -10,6 +11,7 @@ from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
 from app.models.v2 import SubjectClassificationDecision, SubjectType, V2Subject
+from app.services.classification_proposals import classification_proposal
 
 
 logger = logging.getLogger(__name__)
@@ -124,10 +126,6 @@ def resolve_classification_dispute(db: Session, subject: V2Subject) -> ResolverD
         SubjectClassificationDecision.outcome == "candidate",
     ).order_by(SubjectClassificationDecision.created_at)).all())
     logger.info("TG-AI resolver candidates loaded subject=%s count=%s", subject.id, len(decisions))
-    if len(decisions) < 2:
-        logger.warning("TG-AI resolver skipped subject=%s reason=insufficient_candidate_decisions", subject.id)
-        return None
-
     candidate_types = {}
     case_decisions = []
     for decision in decisions:
@@ -142,9 +140,27 @@ def resolve_classification_dispute(db: Session, subject: V2Subject) -> ResolverD
         case_decisions.append({
             "target_subject_type": target.canonical_name,
             "source_model": decision.source_model,
+            "source_client": decision.source_client,
             "reason": decision.reason,
             "evidence": decision.evidence_json,
         })
+
+    proposal = classification_proposal(subject)
+    proposal_target = None
+    try:
+        proposal_target = db.get(SubjectType, uuid.UUID(str(proposal.get("proposed_type_id"))))
+    except (TypeError, ValueError):
+        pass
+    if proposal_target is not None:
+        candidate_types[proposal_target.canonical_name] = proposal_target
+    proposal_position = {
+        "target_subject_type": proposal_target.canonical_name,
+        "source_model": proposal.get("source_model"),
+        "source_client": proposal.get("source_client"),
+        "identity_basis": proposal.get("identity_basis"),
+        "proposed_at": proposal.get("proposed_at"),
+    } if proposal_target is not None else None
+
     if len(candidate_types) < 2:
         logger.warning("TG-AI resolver skipped subject=%s reason=insufficient_distinct_candidates", subject.id)
         return None
@@ -154,6 +170,7 @@ def resolve_classification_dispute(db: Session, subject: V2Subject) -> ResolverD
         "subject": {"id": str(subject.id), "name": subject.name},
         "current_subject_type": current.canonical_name if current else None,
         "candidate_subject_types": list(candidate_types),
+        "creation_proposal": proposal_position,
         "decisions": case_decisions,
     }
     prompt = (

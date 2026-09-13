@@ -15,6 +15,7 @@ from app.services.location import (
     create_location_assertion,
     resolve_location_assertion,
 )
+from app.services.classification_proposals import classification_proposal
 from app.services.v2 import resolve_subject_type
 
 
@@ -86,8 +87,10 @@ def test_place_hierarchy_drives_location_search_without_guessing():
             ),
             owner_id=owner.id,
             client_id="claude:v3",
+            classification_source_client="claude",
         )
         paintworks = db.get(V2Subject, located.object_subject_id)
+        assert classification_proposal(paintworks)["source_client"] == "claude"
         create_location_assertion(
             db,
             LocationAssertionCreate(

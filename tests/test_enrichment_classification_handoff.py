@@ -17,6 +17,18 @@ def test_enrichment_uses_server_owned_workflow_guidance():
     assert "reconstructing the procedure yourself" in description
 
 
+def test_post_save_write_tools_require_following_the_workflow_next_action():
+    tools = deepcopy(TOOLS)
+    apply_guidance_tool_policy(tools)
+    by_name = {tool["name"]: tool for tool in tools}
+
+    for name in ("save_experience", "enrich_subject"):
+        description = by_name[name]["description"].lower()
+
+        assert "workflow.workflow_action_required" in description
+        assert "must follow workflow.next_action" in description
+
+
 def test_classification_writes_keep_write_scope_without_per_call_version_probe():
     assert "affirm_subject_classification" in WRITE_TOOL_NAMES
     assert "propose_subject_reclassification" in WRITE_TOOL_NAMES

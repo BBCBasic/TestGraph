@@ -274,6 +274,11 @@ def apply_guidance_tool_policy(tools: list[dict]) -> None:
             if "_meta" in template:
                 tool["_meta"] = template["_meta"]
             tools.insert(0, tool)
+    post_save_workflow_guidance = (
+        " WORKFLOW: after every successful write, inspect workflow.workflow_action_required. When it is true, "
+        "you must follow workflow.next_action with workflow.next_action_arguments and "
+        "workflow.next_action_instruction before continuing."
+    )
     enrichment = by_name.get("enrich_subject")
     if enrichment:
         enrichment["description"] += (
@@ -281,7 +286,11 @@ def apply_guidance_tool_policy(tools: list[dict]) -> None:
             "workflow state and the next required classification action. workflow.next_action names an exposed MCP tool; "
             "call it with workflow.next_action_arguments and follow workflow.next_action_instruction rather than "
             "reconstructing the procedure yourself."
+            f"{post_save_workflow_guidance}"
         )
+    save_experience = by_name.get("save_experience")
+    if save_experience:
+        save_experience["description"] += post_save_workflow_guidance
     contribution = by_name.get("submit_contribution")
     if contribution:
         enum = contribution.get("inputSchema", {}).get("properties", {}).get("contribution_type", {}).setdefault("enum", [])

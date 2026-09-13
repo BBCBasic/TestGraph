@@ -10,6 +10,7 @@ from app.models.entities import IdempotencyRecord
 from app.models.v2 import SubjectClassificationDecision, SubjectType, V2Subject
 from app.models.workflow import WorkflowEvent, WorkflowRun
 from app.services.workflows import start_or_resume_enrichment_workflow, sync_enrichment_classification_workflow, workflow_body
+from app.services.classification_proposals import record_classification_proposal
 from app.services.mcp_v2_guidance_policy import apply_guidance_tool_policy
 from app.services.write_safety import finish_idempotent_write
 
@@ -67,6 +68,7 @@ def test_enrichment_workflow_requires_classification_review_for_unconfirmed_subj
         run = start_or_resume_enrichment_workflow(db, subject, owner_id=None, actor_client="pytest")
         body = workflow_body(run)
         assert body["state"] == "classification_review_required"
+        assert body["workflow_action_required"] is True
         assert body["next_action"] == "get_subject_classification"
         assert body["next_action_arguments"] == {"subject_id": str(subject.id)}
         assert body["decision_tools"] == {
@@ -77,20 +79,60 @@ def test_enrichment_workflow_requires_classification_review_for_unconfirmed_subj
         assert db.scalar(select(WorkflowEvent).where(WorkflowEvent.workflow_run_id == run.id)) is not None
 
 
-def test_enrichment_workflow_waits_durably_for_second_model():
+def test_creation_proposal_workflow_hands_off_directly_to_different_client():
+    with _session() as db:
+        subject, _ = _subject(db)
+        record_classification_proposal(
+            subject,
+            source_client="creator-oauth-client:v3",
+            source_model="creator-model",
+        )
+        db.commit()
+
+        run = start_or_resume_enrichment_workflow(
+            db,
+            subject,
+            owner_id=None,
+            actor_client="creator-oauth-client:v3",
+        )
+        body = workflow_body(run)
+
+        assert run.required_actor == "independent_model"
+        assert "different authenticated client" in body["next_action_instruction"].lower()
+
+
+def test_enrichment_workflow_keeps_creator_self_review_at_classification_review_required():
     with _session() as db:
         subject, target = _subject(db)
+        record_classification_proposal(
+            subject,
+            source_client="creator-oauth-client",
+            source_model="creator-model-a",
+        )
+        db.commit()
         run = start_or_resume_enrichment_workflow(db, subject, owner_id=None, actor_client="pytest")
-        _decision(db, subject, target, "model-a")
-        run = sync_enrichment_classification_workflow(db, subject, actor_client="pytest", actor_model="model-a")
+        decision = _decision(db, subject, target, "creator-model-b")
+        decision.source_client = "creator-oauth-client"
+        subject.classification_status = "candidate"
+        db.commit()
+        run = sync_enrichment_classification_workflow(
+            db,
+            subject,
+            actor_client="creator-oauth-client",
+            actor_model="creator-model-b",
+        )
         assert run.id is not None
-        assert run.state == "awaiting_second_model"
+        assert run.state == "classification_review_required"
+        assert run.required_actor == "independent_model"
         body = workflow_body(run)
         assert body["next_action"] == "get_subject_classification"
         assert body["next_action_arguments"] == {"subject_id": str(subject.id)}
         assert body["version_tool"] is None
-        assert "source_model must differ from every active_decisions[].source_model" in body["next_action_instruction"]
-        assert "stop and hand this workflow to another model" in body["next_action_instruction"]
+        instruction = body["next_action_instruction"].lower()
+        assert "different authenticated client" in instruction
+        assert "stop" in instruction
+        assert "durable" in instruction
+        assert "current model must inspect" not in instruction
 
 
 def test_enrichment_workflow_completes_when_classification_confirmed():
@@ -100,6 +142,7 @@ def test_enrichment_workflow_completes_when_classification_confirmed():
         body = workflow_body(run)
         assert run.state == "completed"
         assert run.completed_at is not None
+        assert body["workflow_action_required"] is False
         assert body["next_action"] is None
         assert body["next_action_instruction"] is None
         assert body["decision_tools"] == {}

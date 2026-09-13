@@ -20,6 +20,7 @@ from app.schemas.v2 import (
     SubjectEnsure,
 )
 from app.services.deliberation import DeliberationError
+from app.services.classification_proposals import without_classification_proposal
 from app.services.classification_mode import (
     classification_mode,
     supported_classification_relationships,
@@ -409,7 +410,8 @@ def _identity_preflight(
 
 def ensure_subject(
     db: Session, payload: SubjectEnsure, client_id: str = "ai-client",
-    *, owner_id: uuid.UUID | None = None, commit: bool = True,
+    *, owner_id: uuid.UUID | None = None, source_model: str | None = None,
+    classification_source_client: str | None = None, commit: bool = True,
 ) -> V2Subject:
     subject_type = resolve_subject_type(db, payload.subject_type)
     if not subject_type:
@@ -424,7 +426,9 @@ def ensure_subject(
     if obj:
         identifiers, identifiers_changed = _fill_missing(obj.identifiers_json, payload.identifiers)
         attributes, attributes_changed = _fill_missing(obj.attributes_json, payload.attributes)
-        provenance, provenance_changed = _fill_missing(obj.provenance_json, payload.provenance)
+        provenance, provenance_changed = _fill_missing(
+            obj.provenance_json, without_classification_proposal(payload.provenance),
+        )
         if identifiers_changed or attributes_changed or provenance_changed:
             obj.identifiers_json = identifiers
             obj.attributes_json = attributes
@@ -439,7 +443,13 @@ def ensure_subject(
         subject_type_id=subject_type.id, owner_id=owner_id,
         name=payload.name, canonical_key=payload.canonical_key,
         identifiers_json=payload.identifiers, attributes_json=payload.attributes,
-        provenance_json=payload.provenance,
+        provenance_json=without_classification_proposal(payload.provenance),
+    )
+    from app.services.classification_proposals import record_classification_proposal
+    record_classification_proposal(
+        obj,
+        source_client=classification_source_client or client_id,
+        source_model=source_model,
     )
     if write_warnings:
         obj._testgraph_write_warnings = write_warnings
@@ -487,7 +497,9 @@ def add_subject_relationship(
 
 def ensure_subject_context(
     db: Session, reviewed_subject: V2Subject, payload: SubjectContextEnsure,
-    *, client_id: str, owner_id: uuid.UUID | None = None, commit: bool = True,
+    *, client_id: str, owner_id: uuid.UUID | None = None, source_model: str | None = None,
+    classification_source_client: str | None = None,
+    commit: bool = True,
 ) -> dict:
     refs = {"reviewed_subject": reviewed_subject, "subject": reviewed_subject}
     subject_results = []
@@ -519,7 +531,8 @@ def ensure_subject_context(
                 canonical_key=item.canonical_key, identifiers=item.identifiers,
                 attributes=item.attributes, provenance=item.provenance,
             ),
-            client_id, owner_id=owner_id, commit=False,
+            client_id, owner_id=owner_id, source_model=source_model,
+            classification_source_client=classification_source_client, commit=False,
         )
         refs[item.ref] = subject
         subject_results.append({

@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from collections import Counter
-
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -61,10 +59,11 @@ def _derive_state(db: Session, subject: V2Subject) -> tuple[str, str, str | None
     )).all())
     candidate = [item for item in active if item.outcome == "candidate"]
     if candidate:
-        counts = Counter(item.target_type_id for item in candidate)
-        if len(counts) > 1:
-            return "disputed", "classification_disagreement", "resolver"
-        return "awaiting_second_model", "second_model_classification", "independent_model"
+        return "classification_review_required", "classification_review", "independent_model"
+    from app.services.classification_proposals import classification_proposal
+
+    if classification_proposal(subject).get("source_client"):
+        return "classification_review_required", "classification_review", "independent_model"
     return "classification_review_required", "classification_review", "current_model"
 
 
@@ -181,15 +180,16 @@ def workflow_body(run: WorkflowRun) -> dict:
             "agree": "affirm_subject_classification",
             "different_type": "propose_subject_reclassification",
         }
+        requires_handoff = run.required_actor == "independent_model" or run.state == "awaiting_second_model"
         actor_instruction = (
-            "An independent model must inspect the current classification"
-            if run.state == "awaiting_second_model"
-            else "The current model must inspect the current classification"
+            "A different authenticated client must inspect the current classification"
+            if requires_handoff
+            else "The current client must inspect the current classification"
         )
         independence_instruction = (
-            " source_model must differ from every active_decisions[].source_model returned by the inspection. "
-            "If you are not a distinct model, stop and hand this workflow to another model."
-            if run.state == "awaiting_second_model"
+            " The creating or already-deciding client must stop and leave this durable workflow for a different "
+            "authenticated client; changing source_model does not establish independence."
+            if requires_handoff
             else ""
         )
         next_action_instruction = (
@@ -220,6 +220,7 @@ def workflow_body(run: WorkflowRun) -> dict:
         "state": run.state,
         "current_step": run.current_step,
         "required_actor": run.required_actor,
+        "workflow_action_required": run.state != "completed",
         "next_action": next_action,
         "next_action_arguments": next_action_arguments,
         "next_action_instruction": next_action_instruction,

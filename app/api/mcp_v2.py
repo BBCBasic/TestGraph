@@ -235,7 +235,7 @@ TOOLS = [
     {
         "name": "affirm_subject_classification",
         "title": "Affirm the current subject type",
-        "description": "Submit one independent AI model's evidence-backed agreement with the subject's existing provisional type. Two distinct model identities agreeing on that type automatically confirm and lock it without moving the subject. Use this when the current type is already correct and no stricter descendant is justified.",
+        "description": "Review the subject's creation proposal and submit evidence-backed agreement with its existing provisional type. Agreement from a different authenticated client confirms and locks it; the creating client cannot self-confirm by changing source_model. Use this when the current type is already correct and no stricter descendant is justified.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -254,7 +254,7 @@ TOOLS = [
     {
         "name": "propose_subject_reclassification",
         "title": "Propose a more precise subject type",
-        "description": "Submit one independent AI model's evidence-backed refinement to a strict descendant type. One model creates a candidate; agreement by two distinct models automatically moves the subject, confirms and locks it. A locked subject is not reopened by later opinions.",
+        "description": "Review the subject's creation proposal and submit an evidence-backed refinement to a strict descendant type. A different authenticated client's disagreement opens a durable classification dispute; the creating client cannot manufacture independence by changing source_model. A locked subject is not reopened by later opinions.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -312,6 +312,7 @@ TOOLS = [
             "properties": {
                 "subject_type": {"type": "string"},
                 "canonical_key": {"type": "string"},
+                "source_model": {"type": "string", "maxLength": 160},
                 "identifiers": {"type": "object", "additionalProperties": True, "default": {}},
                 "attributes": {"type": "object", "additionalProperties": True, "default": {}},
                 "provenance": {"type": "object", "additionalProperties": True, "default": {}},
@@ -409,6 +410,7 @@ TOOLS = [
                 "subject_type": {"type": "string"},
                 "subject_name": {"type": "string"},
                 "canonical_key": {"type": "string"},
+                "source_model": {"type": "string", "maxLength": 160},
                 "identifiers": {"type": "object", "additionalProperties": True, "default": {}},
                 "subject_attributes": {"type": "object", "additionalProperties": True, "default": {}},
                 "subject_provenance": {"type": "object", "additionalProperties": True, "default": {}},
@@ -1584,11 +1586,14 @@ def _enrich_subject(db, principal, args):
             canonical_key=subject.canonical_key, identifiers=args.get("identifiers", {}),
             attributes=args.get("attributes", {}), provenance=provenance,
         ),
-        client_id, owner_id=principal.user_id, commit=False,
+        client_id, owner_id=principal.user_id, source_model=args.get("source_model"),
+        classification_source_client=principal.client_id, commit=False,
     )
     context = ensure_subject_context(
         db, subject, context_payload,
-        client_id=client_id, owner_id=principal.user_id, commit=False,
+        client_id=client_id, owner_id=principal.user_id,
+        classification_source_client=principal.client_id,
+        source_model=args.get("source_model"), commit=False,
     )
     collection_assessment, collection_reference = _persist_collection_manifest(
         db, collection_assessment, subject, context_payload, context,
@@ -2842,11 +2847,14 @@ def _save_experience(db, principal, args):
             attributes=args.get("subject_attributes", {}),
             provenance=subject_provenance,
         ),
-        client_id, commit=False,
+        client_id, source_model=args.get("source_model"),
+        classification_source_client=principal.client_id, commit=False,
     )
     context = ensure_subject_context(
         db, subject, context_payload,
-        client_id=client_id, owner_id=principal.user_id, commit=False,
+        client_id=client_id, owner_id=principal.user_id,
+        classification_source_client=principal.client_id,
+        source_model=args.get("source_model"), commit=False,
     )
     collection_assessment, collection_reference = _persist_collection_manifest(
         db, collection_assessment, subject, context_payload, context
@@ -3068,6 +3076,7 @@ def _assert_location(db, principal, args):
     item = create_location_assertion(
         db, LocationAssertionCreate.model_validate(relevant),
         owner_id=principal.user_id, client_id=client_id,
+        classification_source_client=principal.client_id,
     )
     body = {"saved": True, "assertion": assertion_body(db, item)}
     finish_idempotent_write(
@@ -3154,7 +3163,7 @@ def _propose_subject_reclassification(db, principal, args):
         db, subject,
         target_subject_type=args["target_subject_type"],
         source_model=args["source_model"],
-        source_client=f"{principal.client_id}:v3",
+        source_client=principal.client_id,
         reason=args["reason"],
         evidence=args.get("evidence", {}),
         evidence_fingerprint=args.get("evidence_fingerprint"),
@@ -3168,7 +3177,7 @@ def _affirm_subject_classification(db, principal, args):
     return _result(affirm_classification(
         db, subject,
         source_model=args["source_model"],
-        source_client=f"{principal.client_id}:v3",
+        source_client=principal.client_id,
         reason=args["reason"],
         evidence=args.get("evidence", {}),
         evidence_fingerprint=args.get("evidence_fingerprint"),
@@ -3184,7 +3193,7 @@ def _reopen_subject_classification(db, principal, args):
         trigger=args["trigger"],
         reason=args["reason"],
         evidence=args.get("evidence", {}),
-        requested_by=f"{principal.client_id}:v3",
+        requested_by=principal.client_id,
         user_approved=bool(args.get("user_approved", False)),
     ))
 

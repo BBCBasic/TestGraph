@@ -144,8 +144,8 @@ class SubjectClassificationDecision(Base):
     __tablename__ = "subject_classification_decisions"
     __table_args__ = (
         UniqueConstraint(
-            "subject_id", "classification_version", "source_model",
-            name="uq_subject_classification_model_version",
+            "subject_id", "classification_version", "source_client",
+            name="uq_subject_classification_client_version",
         ),
     )
     id: Mapped[uuid.UUID] = mapped_column(UuidType, primary_key=True, default=new_uuid)

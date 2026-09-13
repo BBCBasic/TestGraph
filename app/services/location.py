@@ -157,6 +157,7 @@ def _resolve_or_create_place(
     place: Any,
     *,
     client_id: str,
+    classification_source_client: str | None = None,
     source: dict[str, Any],
 ) -> V2Subject:
     place_type = _place_type(db)
@@ -237,6 +238,7 @@ def _resolve_or_create_place(
             provenance={"source": source, "created_as": "global_place"},
         ),
         client_id=client_id,
+        classification_source_client=classification_source_client,
         owner_id=None,
         commit=False,
     )
@@ -316,6 +318,7 @@ def create_location_assertion(
     *,
     owner_id: uuid.UUID,
     client_id: str,
+    classification_source_client: str | None = None,
 ) -> LocationAssertion:
     subject = db.get(V2Subject, payload.subject_id)
     if not subject or subject.deleted_at:
@@ -354,7 +357,9 @@ def create_location_assertion(
     qualifiers = deepcopy(payload.qualifiers or {})
     if predicate in {"located_in", "contained_in"}:
         object_subject = _resolve_or_create_place(
-            db, payload.object_place, client_id=client_id, source=payload.source
+            db, payload.object_place, client_id=client_id,
+            classification_source_client=classification_source_client,
+            source=payload.source,
         )
         if payload.value not in (None, {}):
             raise LocationError(
