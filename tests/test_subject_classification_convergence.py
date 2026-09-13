@@ -83,11 +83,15 @@ def _luggage(db):
     return subject, subject_type
 
 
-def _record_creation_proposal(subject, *, source_client="creator-oauth-client", source_model="creator-model"):
+def _record_creation_proposal(
+    subject, *, source_client="creator-oauth-client", source_model="creator-model",
+    identity_basis="subject_creation",
+):
     return record_classification_proposal(
         subject,
         source_client=source_client,
         source_model=source_model,
+        identity_basis=identity_basis,
     )
 
 
@@ -310,6 +314,26 @@ def test_authenticated_creation_proposal_suffix_is_preserved_exactly():
 
         assert state["status"] == "confirmed"
         assert state["locked_at"] is not None
+
+
+def test_unrepaired_legacy_tagged_proposal_cannot_self_confirm():
+    with _new_session() as db:
+        subject, _ = _luggage(db)
+        _record_creation_proposal(
+            subject,
+            source_client="creator-oauth-client:v3",
+            identity_basis="workflow_backfill",
+        )
+
+        state = _affirm(
+            db,
+            subject,
+            "creator-review-label",
+            source_client="creator-oauth-client",
+        )
+
+        assert state["status"] == "candidate"
+        assert state["locked_at"] is None
 
 
 def test_different_clients_can_use_same_reported_model_label():

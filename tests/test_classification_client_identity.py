@@ -139,6 +139,14 @@ def test_migration_preserves_raw_proposal_and_strips_one_known_legacy_decision_t
         sa.Column("source_client", sa.String(), nullable=False),
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
     )
+    interactions = sa.Table(
+        "mcp_interactions", metadata,
+        sa.Column("id", sa.Uuid(), primary_key=True),
+        sa.Column("workflow_run_id", sa.Uuid()),
+        sa.Column("client_id", sa.String()),
+        sa.Column("tool_name", sa.String()),
+        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
+    )
     metadata.create_all(engine)
     subject_id = uuid.uuid4()
     type_id = uuid.uuid4()
@@ -157,7 +165,11 @@ def test_migration_preserves_raw_proposal_and_strips_one_known_legacy_decision_t
         ))
         connection.execute(decisions.insert().values(
             id=uuid.uuid4(), subject_id=subject_id, classification_version=1,
-            source_model="review-model", source_client="oauth-client:v3:v3", created_at=now,
+            source_model="review-model", source_client="oauth-client:v3", created_at=now,
+        ))
+        connection.execute(interactions.insert().values(
+            id=uuid.uuid4(), workflow_run_id=run_id, client_id="oauth-client",
+            tool_name="save_experience", created_at=now,
         ))
         original_op = module.op
         module.op = SimpleNamespace(get_bind=lambda: connection)
@@ -172,6 +184,68 @@ def test_migration_preserves_raw_proposal_and_strips_one_known_legacy_decision_t
         ]
         decision_client = connection.execute(sa.select(decisions.c.source_client)).scalar_one()
 
-    assert proposal["source_client"] == "oauth-client:v3"
-    assert proposal["identity_basis"] == "workflow_backfill"
-    assert decision_client == "oauth-client:v3"
+    assert proposal["source_client"] == "oauth-client"
+    assert proposal["identity_basis"] == "workflow_audit_backfill"
+    assert decision_client == "oauth-client"
+
+
+def test_followup_migration_repairs_tagged_proposal_from_raw_mcp_audit():
+    migration = Path("alembic/versions/0026_repair_creator_identity.py")
+    spec = importlib.util.spec_from_file_location("creator_identity_repair", migration)
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    assert len(module.revision) <= 32
+    assert module.down_revision == "0025_creator_reviewer"
+
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    metadata = sa.MetaData()
+    subjects = sa.Table(
+        "v2_subjects", metadata,
+        sa.Column("id", sa.Uuid(), primary_key=True),
+        sa.Column("provenance_json", sa.JSON()),
+    )
+    runs = sa.Table(
+        "workflow_runs", metadata,
+        sa.Column("id", sa.Uuid(), primary_key=True),
+        sa.Column("subject_id", sa.Uuid(), nullable=False),
+    )
+    interactions = sa.Table(
+        "mcp_interactions", metadata,
+        sa.Column("id", sa.Uuid(), primary_key=True),
+        sa.Column("workflow_run_id", sa.Uuid()),
+        sa.Column("client_id", sa.String()),
+        sa.Column("tool_name", sa.String()),
+        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
+    )
+    metadata.create_all(engine)
+    subject_id, run_id = uuid.uuid4(), uuid.uuid4()
+    now = datetime.now(timezone.utc)
+    with engine.begin() as connection:
+        connection.execute(subjects.insert().values(
+            id=subject_id,
+            provenance_json={"classification_proposal": {
+                "proposed_type_id": str(uuid.uuid4()),
+                "source_client": "oauth-client:v3",
+                "source_model": None,
+                "identity_basis": "workflow_backfill",
+                "proposed_at": now.isoformat(),
+            }},
+        ))
+        connection.execute(runs.insert().values(id=run_id, subject_id=subject_id))
+        connection.execute(interactions.insert().values(
+            id=uuid.uuid4(), workflow_run_id=run_id, client_id="oauth-client",
+            tool_name="save_experience", created_at=now,
+        ))
+        original_op = module.op
+        module.op = SimpleNamespace(get_bind=lambda: connection)
+        try:
+            module._repair_creator_identities()
+        finally:
+            module.op = original_op
+        proposal = connection.execute(sa.select(subjects.c.provenance_json)).scalar_one()[
+            "classification_proposal"
+        ]
+
+    assert proposal["source_client"] == "oauth-client"
+    assert proposal["identity_basis"] == "workflow_audit_backfill"

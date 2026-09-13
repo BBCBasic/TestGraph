@@ -152,12 +152,18 @@ def _settle_against_creation_proposal(
             target.status = "candidate"
         return True, False
 
-    proposing_client = proposal.get("source_client")
-    if (
-        proposing_client
-        and canonical_client_identity(decision.source_client)
-        == canonical_client_identity(proposing_client)
-    ):
+    proposing_client = canonical_client_identity(proposal.get("source_client"))
+    deciding_client = canonical_client_identity(decision.source_client)
+    same_creator = bool(proposing_client and deciding_client == proposing_client)
+    if proposing_client and proposal.get("identity_basis") == "workflow_backfill":
+        legacy_base, separator, legacy_suffix = proposing_client.rpartition(":")
+        same_creator = same_creator or bool(
+            separator
+            and legacy_base
+            and legacy_suffix.casefold() in {"v1", "v2", "v3"}
+            and deciding_client == legacy_base
+        )
+    if same_creator:
         subject.classification_status = "candidate"
         if target.status == "provisional":
             target.status = "candidate"

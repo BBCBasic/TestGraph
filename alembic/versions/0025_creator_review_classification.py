@@ -34,6 +34,13 @@ workflow_events = sa.table(
     sa.column("actor_model", sa.String()),
     sa.column("created_at", sa.DateTime(timezone=True)),
 )
+mcp_interactions = sa.table(
+    "mcp_interactions",
+    sa.column("workflow_run_id", sa.Uuid()),
+    sa.column("client_id", sa.String()),
+    sa.column("tool_name", sa.String()),
+    sa.column("created_at", sa.DateTime(timezone=True)),
+)
 classification_decisions = sa.table(
     "subject_classification_decisions",
     sa.column("id", sa.Uuid()),
@@ -97,6 +104,20 @@ def _backfill_creation_proposals() -> None:
         if isinstance(provenance.get("classification_proposal"), dict):
             continue
 
+        audited_creator = bind.execute(
+            sa.select(mcp_interactions.c.client_id)
+            .select_from(mcp_interactions.join(
+                workflow_runs,
+                mcp_interactions.c.workflow_run_id == workflow_runs.c.id,
+            ))
+            .where(
+                workflow_runs.c.subject_id == subject["id"],
+                mcp_interactions.c.client_id.is_not(None),
+                mcp_interactions.c.tool_name.in_(("save_experience", "enrich_subject")),
+            )
+            .order_by(mcp_interactions.c.created_at, mcp_interactions.c.workflow_run_id)
+            .limit(1)
+        ).scalar_one_or_none()
         earliest_event = bind.execute(
             sa.select(workflow_events.c.actor_client, workflow_events.c.actor_model)
             .join(workflow_runs, workflow_runs.c.id == workflow_events.c.workflow_run_id)
@@ -107,12 +128,16 @@ def _backfill_creation_proposals() -> None:
             .order_by(workflow_events.c.created_at, workflow_events.c.workflow_run_id)
             .limit(1)
         ).mappings().first()
-        source_client = earliest_event["actor_client"] if earliest_event else None
+        source_client = audited_creator or (earliest_event["actor_client"] if earliest_event else None)
         provenance["classification_proposal"] = {
             "proposed_type_id": str(subject["subject_type_id"]),
             "source_client": source_client,
             "source_model": earliest_event["actor_model"] if earliest_event else None,
-            "identity_basis": "workflow_backfill" if source_client else "legacy_unknown",
+            "identity_basis": (
+                "workflow_audit_backfill" if audited_creator
+                else "workflow_backfill" if source_client
+                else "legacy_unknown"
+            ),
             "proposed_at": subject["created_at"].isoformat(),
         }
         bind.execute(
