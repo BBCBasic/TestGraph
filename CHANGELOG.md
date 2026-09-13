@@ -6,6 +6,7 @@ All notable changes to TestGraph will be documented in this file.
 
 ### Added
 
+- Cross-model vocabulary convergence at typed hierarchy write time: a model proposing a new peer beside another client's existing types must explicitly reuse an equivalent stable type as an alias or justify creating a distinct type.
 - A stable synthetic universal root, `.`, for typed `is_a` classification. Every semantic type is reachable from it, progressive traversal begins there, and the live hierarchy can visually promote its children while preserving the real graph internally.
 - Synthetic-root integrity validation covering orphan semantic types, illegal root classifications, root identity and illegal parent edges.
 - Bounded, paginated MCP and REST vocabulary navigation for root discovery, immediate-child discovery and active root-to-type paths.

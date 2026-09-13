@@ -160,6 +160,7 @@ class RelationshipEnsure(StrictModel):
     source_type: str
     relationship: str = "belongs_to"
     target_type: str
+    peer_decision: dict[str, Any] | None = None
 
 
 class SubjectRead(StrictModel):

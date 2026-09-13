@@ -11,7 +11,13 @@ from app.api.capability import _credential, _headers
 from app.db.session import get_db
 from app.models.v2 import Assessment, SubjectType, V2Experience, V2Subject
 from app.schemas.v2 import ExperienceCreate, SubjectEnsure
-from app.services.v2 import create_experience, ensure_subject, ensure_subject_type, resolve_subject_type, vocabulary_index
+from app.services.v2 import (
+    create_experience,
+    ensure_subject,
+    ensure_subject_type_for_direct_write,
+    resolve_subject_type,
+    vocabulary_index,
+)
 from app.services.write_safety import begin_idempotent_write, finish_idempotent_write
 
 router = APIRouter(prefix="/actions-v2", tags=["ChatGPT Actions v2"])
@@ -62,7 +68,11 @@ def save(payload:dict,authorization:str|None=Header(None,alias="Authorization"),
     payload_hash,prior=begin_idempotent_write(db,client_id=client_id,key=f"experience:{key}",payload=relevant)
     if prior is not None:return JSONResponse(prior,headers=_headers())
     try:
-        st,created,resolution=ensure_subject_type(db,str(payload["subject_type"]),created_by=client_id)
+        st,created,resolution=ensure_subject_type_for_direct_write(
+            db,
+            str(payload["subject_type"]),
+            created_by=client_id,
+        )
         subject=ensure_subject(db,SubjectEnsure(subject_type=st.canonical_name,name=payload["subject_name"],canonical_key=payload["canonical_key"],identifiers=payload.get("identifiers",{}),attributes=payload.get("subject_attributes",{})),client_id)
         exp=create_experience(db,ExperienceCreate(owner_id=cred.user_id,subject_id=subject.id,headline=payload["headline"],summary=payload["summary"],raw_text=payload["raw_text"],structured_data=payload.get("structured_data",{}),visibility=payload.get("visibility","private"),user_approved=True,source_client=client_id),client_id)
         body={"saved":True,"experience_id":str(exp.id),"subject_type_id":str(st.id),"subject_type":st.canonical_name,"type_created":created,"type_resolution":resolution}

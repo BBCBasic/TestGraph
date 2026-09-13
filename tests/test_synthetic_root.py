@@ -197,6 +197,213 @@ def test_one_term_hierarchy_can_create_a_new_semantic_root_beneath_dot():
         ] == ["equipment"]
 
 
+def test_new_peer_requires_an_explicit_convergence_decision():
+    with _session() as db:
+        resolve_subject_hierarchy(db, ["entity", "object", "mug"], created_by="gpt")
+
+        with pytest.raises(ValueError, match="convergence decision") as exc_info:
+            resolve_subject_hierarchy(
+                db,
+                ["entity", "item", "book"],
+                created_by="claude",
+            )
+
+        assert getattr(exc_info.value, "term", None) == "item"
+        assert getattr(exc_info.value, "parent", None) == "entity"
+        assert getattr(exc_info.value, "candidates", None) == ["object"]
+        assert resolve_subject_type(db, "item") is None
+        assert resolve_subject_type(db, "book") is None
+
+
+def test_equivalent_peer_is_reused_as_one_stable_type_and_alias():
+    with _session() as db:
+        resolve_subject_hierarchy(db, ["entity", "object", "mug"], created_by="gpt")
+        object_type = resolve_subject_type(db, "object")
+
+        result = resolve_subject_hierarchy(
+            db,
+            ["entity", "item", "book"],
+            created_by="claude",
+            peer_decisions=[
+                {
+                    "term": "item",
+                    "decision": "reuse",
+                    "existing_type": "object",
+                    "reason": "Item and object denote the same fundamental kind here.",
+                },
+                {
+                    "term": "book",
+                    "decision": "create",
+                    "reason": "A book is a distinct kind of object, not another label for a mug.",
+                },
+            ],
+        )
+
+        assert [item["canonical_name"] for item in result["path"]] == [
+            "entity", "object", "book",
+        ]
+        assert result["created_terms"] == ["book"]
+        assert result["convergence"] == [
+            {
+                "term": "item",
+                "decision": "reuse",
+                "canonical_name": "object",
+                "resolution": "registered_alias",
+            },
+            {
+                "term": "book",
+                "decision": "create",
+                "canonical_name": "book",
+                "resolution": "created_distinct",
+            },
+        ]
+        assert resolve_subject_type(db, "item").id == object_type.id
+        assert db.scalar(select(func.count()).select_from(SubjectType).where(
+            SubjectType.canonical_name == "item"
+        )) == 0
+
+
+def test_one_model_can_add_distinct_siblings_without_peer_decisions():
+    with _session() as db:
+        resolve_subject_hierarchy(db, ["entity", "object", "mug"], created_by="gpt")
+
+        result = resolve_subject_hierarchy(
+            db,
+            ["entity", "object", "book"],
+            created_by="gpt",
+        )
+
+        assert result["leaf"].canonical_name == "book"
+        assert result["created_terms"] == ["book"]
+
+
+def test_existing_type_cannot_bypass_convergence_when_attached_as_a_new_peer():
+    with _session() as db:
+        resolve_subject_hierarchy(db, ["entity", "object"], created_by="gpt")
+        entity = resolve_subject_type(db, "entity")
+        item = SubjectType(
+            canonical_name="item",
+            normalized_name="item",
+            status="provisional",
+            created_by="claude",
+        )
+        db.add(item)
+        db.flush()
+
+        with pytest.raises(ValueError, match="convergence decision") as exc_info:
+            add_semantic_relationship(
+                db,
+                item,
+                "is_a",
+                entity,
+                source="claude",
+            )
+
+        assert getattr(exc_info.value, "candidates", None) == ["object"]
+
+
+def test_edge_writer_cannot_hide_that_the_proposed_peer_has_another_creator():
+    with _session() as db:
+        resolve_subject_hierarchy(db, ["entity", "object"], created_by="gpt")
+        entity = resolve_subject_type(db, "entity")
+        item = SubjectType(
+            canonical_name="item",
+            normalized_name="item",
+            status="provisional",
+            created_by="claude",
+        )
+        db.add(item)
+        db.flush()
+
+        with pytest.raises(ValueError, match="convergence decision"):
+            add_semantic_relationship(
+                db,
+                item,
+                "is_a",
+                entity,
+                source="gpt",
+            )
+
+
+def test_exact_edge_is_rechecked_after_waiting_for_parent_lock(monkeypatch):
+    with _session() as db:
+        entity = ensure_subject_type(db, "entity", created_by="gpt")[0]
+        item = SubjectType(
+            canonical_name="item",
+            normalized_name="item",
+            status="provisional",
+            created_by="claude",
+        )
+        db.add(item)
+        db.flush()
+        inserted = None
+
+        def concurrent_commit(_db, _parent):
+            nonlocal inserted
+            inserted = TypeRelationship(
+                source_type_id=item.id,
+                relationship="is_a",
+                target_type_id=entity.id,
+                source="concurrent-claude",
+            )
+            db.add(inserted)
+            db.flush()
+
+        monkeypatch.setattr("app.services.semantic._lock_taxonomy_parent", concurrent_commit)
+
+        result = add_semantic_relationship(
+            db,
+            item,
+            "is_a",
+            entity,
+            source="claude",
+        )
+
+        assert result.id == inserted.id
+
+
+def test_missing_term_is_re_resolved_after_waiting_for_parent_lock(monkeypatch):
+    with _session() as db:
+        resolve_subject_hierarchy(db, ["entity", "object"], created_by="gpt")
+        entity = resolve_subject_type(db, "entity")
+        original_lock = __import__(
+            "app.services.semantic", fromlist=["_lock_taxonomy_parent"]
+        )._lock_taxonomy_parent
+        inserted = None
+
+        def concurrent_term(_db, parent):
+            nonlocal inserted
+            original_lock(_db, parent)
+            if parent.id == entity.id and inserted is None:
+                inserted = SubjectType(
+                    canonical_name="item",
+                    normalized_name="item",
+                    status="provisional",
+                    created_by="claude-other-session",
+                )
+                db.add(inserted)
+                db.flush()
+                db.add(TypeRelationship(
+                    source_type_id=inserted.id,
+                    relationship="is_a",
+                    target_type_id=entity.id,
+                    source="claude-other-session",
+                ))
+                db.flush()
+
+        monkeypatch.setattr("app.services.semantic._lock_taxonomy_parent", concurrent_term)
+
+        result = resolve_subject_hierarchy(
+            db,
+            ["entity", "item"],
+            created_by="claude",
+        )
+
+        assert result["leaf"].id == inserted.id
+        assert result["created_terms"] == []
+        assert result["convergence"] == []
+
+
 def test_semantic_parent_replaces_only_infrastructure_edge_and_preserves_descendants():
     with _session() as db:
         result = resolve_subject_hierarchy(

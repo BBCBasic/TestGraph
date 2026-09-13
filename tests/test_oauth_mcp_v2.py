@@ -9,6 +9,8 @@ from sqlalchemy import select
 from app.core.config import get_settings
 from app.db.session import SessionLocal
 from app.models.workflow import McpInteraction
+from app.api.mcp_v2 import _vocabulary_convergence_error
+from app.services.semantic import VocabularyConvergenceRequired
 
 
 def _pkce(verifier):
@@ -37,7 +39,7 @@ def test_oauth_mcp_v2_resource_flow(client,auth,monkeypatch):
     code=re.search(r"[?&]code=([^&]+)",approved.headers["location"]).group(1)
     access=client.post("/oauth/token",data={"grant_type":"authorization_code","client_id":client_id,"code":code,"redirect_uri":redirect_uri,"code_verifier":verifier,"resource":resource}).json()["access_token"]
     initialized=_rpc(client,"/mcp-v2","initialize",token=access)
-    assert initialized.json()["result"]["serverInfo"]["version"]=="3.22.0-alpha"
+    assert initialized.json()["result"]["serverInfo"]["version"]=="3.23.0-alpha"
     instructions=initialized.json()["result"]["instructions"]
     assert "full available reasoning, web retrieval and tool capabilities" in instructions
     assert "open-ended semantic and discovery engine" in instructions
@@ -97,5 +99,28 @@ def test_typed_mcp_contract_separates_identity_from_membership(client, monkeypat
         assert "relationship" in by_name["list_child_subject_types"]["inputSchema"]["properties"]
         assert "adds belongs_to relationships" not in by_name["resolve_subject_hierarchy"]["description"]
         assert "adds is_a relationships" in by_name["resolve_subject_hierarchy"]["description"]
+        convergence_schema = by_name["resolve_subject_hierarchy"]["inputSchema"]["properties"]["peer_decisions"]
+        decision_variants = convergence_schema["items"]["oneOf"]
+        assert {variant["properties"]["decision"]["const"] for variant in decision_variants} == {
+            "reuse", "create",
+        }
+        assert "existing_type" in decision_variants[0]["properties"]
+        assert "convergence" in by_name["resolve_subject_hierarchy"]["description"].casefold()
     finally:
         get_settings.cache_clear()
+
+
+def test_convergence_error_gives_operation_specific_retry_contract():
+    exc = VocabularyConvergenceRequired(
+        term="item",
+        parent="entity",
+        candidates=["object"],
+    )
+
+    hierarchy = _vocabulary_convergence_error(exc, operation="resolve_subject_hierarchy")
+    relationship = _vocabulary_convergence_error(exc, operation="set_type_relationship")
+
+    assert "peer_decisions" in hierarchy["structuredContent"]["details"]["instruction"]
+    assert "peer_decision" in relationship["structuredContent"]["details"]["instruction"]
+    assert "peer_decisions" not in relationship["structuredContent"]["details"]["instruction"]
+    assert "resolve_subject_hierarchy" in relationship["structuredContent"]["details"]["instruction"]

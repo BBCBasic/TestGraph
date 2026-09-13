@@ -42,7 +42,12 @@ from app.services.location import (
 from app.services.mcp_v2_guidance_policy import apply_guidance_tool_policy
 from app.services.mcp_v2_policy import apply_chain_ingest_policy
 from app.services.mcp_v2_semantic_policy import apply_semantic_naming_policy
-from app.services.semantic import add_semantic_relationship, resolve_subject_hierarchy, retire_semantic_relationship
+from app.services.semantic import (
+    VocabularyConvergenceRequired,
+    add_semantic_relationship,
+    resolve_subject_hierarchy,
+    retire_semantic_relationship,
+)
 from app.services.v2 import (
     add_subject_type_alias, create_assessment, create_experience, delete_owned_experience,
     descendant_type_ids, ensure_field, ensure_subject, ensure_subject_context,
@@ -57,7 +62,7 @@ from app.services.write_safety import (
 
 router = APIRouter()
 PROTOCOL_VERSION = "2025-06-18"
-SERVER_VERSION = "3.22.0-alpha"
+SERVER_VERSION = "3.23.0-alpha"
 READ_SECURITY = [{"type": "oauth2", "scopes": ["reviews:read"]}]
 WRITE_SECURITY = [{"type": "oauth2", "scopes": ["reviews:write"]}]
 
@@ -78,6 +83,39 @@ def _error(message, details=None):
     payload = {"error": message}
     if details is not None:
         payload["details"] = details
+    return {**_result(payload), "isError": True}
+
+
+def _vocabulary_convergence_error(
+    exc: VocabularyConvergenceRequired,
+    *,
+    operation: str = "resolve_subject_hierarchy",
+):
+    if operation == "set_type_relationship":
+        instruction = (
+            "For a genuinely distinct is_a peer, retry set_type_relationship with singular "
+            "peer_decision={decision:'create',reason:'...'}. If the terms are equivalent, do not "
+            "create this relationship; use resolve_subject_hierarchy to reuse the existing type "
+            "and register the alternate wording as an alias."
+        )
+    else:
+        instruction = (
+            "Compare the proposed term with these existing peer types, then retry "
+            "resolve_subject_hierarchy with a peer_decisions entry: decision='reuse' plus "
+            "existing_type for equivalent wording, or decision='create' plus a semantic reason "
+            "when it is genuinely distinct."
+        )
+    payload = {
+        "error": "Vocabulary convergence decision required",
+        "error_code": "VOCABULARY_CONVERGENCE_REQUIRED",
+        "details": {
+            "term": exc.term,
+            "parent": exc.parent,
+            "candidates": exc.candidates,
+            "candidates_truncated": exc.candidates_truncated,
+            "instruction": instruction,
+        },
+    }
     return {**_result(payload), "isError": True}
 
 
@@ -252,9 +290,9 @@ TOOLS = [
         **_security(WRITE_SECURITY),
         "annotations": {"readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": False},
     },
-    {"name": "resolve_subject_hierarchy", "title": "Resolve a semantic subject hierarchy", "description": "Use only after bounded root/child traversal provides enough evidence that the specific subject type does not yet exist. Submit the verified existing path plus genuinely missing terms broad-to-specific, for example ['food','recipe']. The server reuses existing dictionary entries, creates only missing provisional nodes in context, adds belongs_to relationships and rejects cycles. Do not include 'review': review is the record type, not a subject category. Semantic placement must be based on meaning, never on which review arrived first.", "inputSchema": {"type": "object", "properties": {"terms": {"type": "array", "minItems": 1, "maxItems": 8, "items": {"type": "string", "minLength": 1}}}, "required": ["terms"], "additionalProperties": False}, **_security(WRITE_SECURITY), "annotations": {"readOnlyHint": False, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False}},
+    {"name": "resolve_subject_hierarchy", "title": "Resolve a semantic subject hierarchy", "description": "Use only after bounded root/child traversal provides enough evidence that the specific subject type does not yet exist. Submit the verified existing path plus genuinely missing terms broad-to-specific, for example ['food','recipe']. The server reuses existing dictionary entries, creates only missing provisional nodes in context, adds belongs_to relationships and rejects cycles. Cross-model creation beside existing peers requires an explicit convergence decision: reuse an equivalent peer as one stable type and register the proposed wording as its alias, or justify creation of a genuinely distinct type. Do not include 'review': review is the record type, not a subject category. Semantic placement must be based on meaning, never on which review arrived first.", "inputSchema": {"type": "object", "properties": {"terms": {"type": "array", "minItems": 1, "maxItems": 8, "items": {"type": "string", "minLength": 1}}, "peer_decisions": {"type": "array", "items": {"oneOf": [{"type": "object", "properties": {"term": {"type": "string", "minLength": 1}, "decision": {"const": "reuse"}, "existing_type": {"type": "string", "minLength": 1}, "reason": {"type": "string", "minLength": 1}}, "required": ["term", "decision", "existing_type", "reason"], "additionalProperties": False}, {"type": "object", "properties": {"term": {"type": "string", "minLength": 1}, "decision": {"const": "create"}, "reason": {"type": "string", "minLength": 1}}, "required": ["term", "decision", "reason"], "additionalProperties": False}]}}}, "required": ["terms"], "additionalProperties": False}, **_security(WRITE_SECURITY), "annotations": {"readOnlyHint": False, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False}},
     {"name": "register_subject_type_alias", "title": "Register a subject-type alias", "description": "Map a genuinely equivalent expression to an existing stable subject type. Never use this to express a category relationship.", "inputSchema": {"type": "object", "properties": {"subject_type": {"type": "string"}, "alias": {"type": "string"}}, "required": ["subject_type", "alias"], "additionalProperties": False}, **_security(WRITE_SECURITY), "annotations": {"readOnlyHint": False, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False}},
-    {"name": "set_type_relationship", "title": "Connect existing subject types", "description": "Add editable classification metadata between existing subject types, such as ferry belongs_to transportation. Unknown types must first be resolved with resolve_subject_hierarchy. Relationships improve broad search but never determine storage IDs.", "inputSchema": {"type": "object", "properties": {"source_type": {"type": "string"}, "relationship": {"type": "string", "default": "belongs_to"}, "target_type": {"type": "string"}}, "required": ["source_type", "target_type"], "additionalProperties": False}, **_security(WRITE_SECURITY), "annotations": {"readOnlyHint": False, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False}},
+    {"name": "set_type_relationship", "title": "Connect existing subject types", "description": "Add editable classification metadata between existing subject types, such as ferry belongs_to transportation. Unknown types must first be resolved with resolve_subject_hierarchy. In typed mode, adding a cross-client is_a peer requires peer_decision={decision:'create',reason:'...'} after semantic comparison; equivalent wording must be reused through resolve_subject_hierarchy before creating a separate type. Relationships improve broad search but never determine storage IDs.", "inputSchema": {"type": "object", "properties": {"source_type": {"type": "string"}, "relationship": {"type": "string", "default": "belongs_to"}, "target_type": {"type": "string"}, "peer_decision": {"type": "object", "properties": {"decision": {"const": "create"}, "reason": {"type": "string", "minLength": 1}}, "required": ["decision", "reason"], "additionalProperties": False}}, "required": ["source_type", "target_type"], "additionalProperties": False}, **_security(WRITE_SECURITY), "annotations": {"readOnlyHint": False, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False}},
     {"name": "retire_type_relationship", "title": "Retire an incorrect subject classification", "description": "Retire one exact semantic relationship while preserving the subject type, subjects and reviews. The retired edge remains as a rejection tombstone, so another AI cannot silently recreate it.", "inputSchema": {"type": "object", "properties": {"source_type": {"type": "string"}, "relationship": {"type": "string", "default": "belongs_to"}, "target_type": {"type": "string"}, "reason": {"type": "string", "minLength": 1}}, "required": ["source_type", "target_type", "reason"], "additionalProperties": False}, **_security(WRITE_SECURITY), "annotations": {"readOnlyHint": False, "destructiveHint": True, "idempotentHint": True, "openWorldHint": False}},
     {"name": "register_field", "title": "Register a reusable field", "description": "Register a genuinely new globally canonical field, or explicitly pre-attach one to subject types. Do not ask the user for routine confirmation to reuse an existing canonical field: a valid existing field is attached automatically on first use. Prefer raw_text for one-off narrative detail.", "inputSchema": {"type": "object", "properties": {"canonical_name": {"type": "string"}, "json_schema": {"type": "object", "additionalProperties": True}, "description": {"type": "string"}, "aliases": {"type": "array", "items": {"type": "string"}}, "subject_types": {"type": "array", "items": {"type": "string"}}}, "required": ["canonical_name", "json_schema", "subject_types"], "additionalProperties": False}, **_security(WRITE_SECURITY), "annotations": {"readOnlyHint": False, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False}},
     {
@@ -3190,7 +3228,12 @@ async def mcp_v2(request: Request, db: Session = Depends(get_db)):
                 elif name == "propose_subject_reclassification": result = _propose_subject_reclassification(db, principal, args)
                 elif name == "reopen_subject_classification": result = _reopen_subject_classification(db, principal, args)
                 elif name == "resolve_subject_hierarchy":
-                    hierarchy = resolve_subject_hierarchy(db, args["terms"], created_by=f"{principal.client_id}:v3")
+                    hierarchy = resolve_subject_hierarchy(
+                        db,
+                        args["terms"],
+                        created_by=f"{principal.client_id}:v3",
+                        peer_decisions=args.get("peer_decisions"),
+                    )
                     result = _result({
                         "resolved": True,
                         "leaf_id": str(hierarchy["leaf"].id),
@@ -3198,6 +3241,7 @@ async def mcp_v2(request: Request, db: Session = Depends(get_db)):
                         "path": hierarchy["path"],
                         "created_terms": hierarchy["created_terms"],
                         "relationships": hierarchy["relationships"],
+                        "convergence": hierarchy["convergence"],
                     })
                 elif name == "register_subject_type_alias":
                     target = resolve_subject_type(db, args["subject_type"])
@@ -3208,7 +3252,14 @@ async def mcp_v2(request: Request, db: Session = Depends(get_db)):
                     if not source_type or not target_type:
                         result = _error("Both subject types must already exist", {"instruction": "Use resolve_subject_hierarchy first for unknown subject types."})
                     else:
-                        rel = add_semantic_relationship(db, source_type, args.get("relationship", "belongs_to"), target_type, source=f"{principal.client_id}:v3")
+                        rel = add_semantic_relationship(
+                            db,
+                            source_type,
+                            args.get("relationship", "belongs_to"),
+                            target_type,
+                            source=f"{principal.client_id}:v3",
+                            peer_decision=args.get("peer_decision"),
+                        )
                         result = _result({"registered": True, "id": str(rel.id), "source": source_type.canonical_name, "relationship": rel.relationship, "target": target_type.canonical_name})
                 elif name == "retire_type_relationship":
                     source_type = resolve_subject_type(db, args["source_type"])
@@ -3247,6 +3298,8 @@ async def mcp_v2(request: Request, db: Session = Depends(get_db)):
                 db.rollback(); result = _location_error(exc)
             except IdempotencyKeyConflictError as exc:
                 db.rollback(); result = _idempotency_conflict_error(exc)
+            except VocabularyConvergenceRequired as exc:
+                db.rollback(); result = _vocabulary_convergence_error(exc, operation=name)
             except Exception as exc:
                 db.rollback(); result = _error("TasteGraph server error", {"type": type(exc).__name__, "message": str(exc)})
     else:

@@ -13,8 +13,36 @@ from app.services.classification_mode import (
     validate_classification_relationship,
 )
 from app.services.semantic_head import validate_semantic_type_name
-from app.services.v2 import ensure_subject_type, normalise_term, resolve_subject_type
+from app.services.v2 import (
+    add_subject_type_alias,
+    canonical_label,
+    ensure_subject_type,
+    normalise_term,
+    resolve_subject_type,
+)
 from app.services.synthetic_root import assert_semantic_type, attach_root_if_needed
+
+
+class VocabularyConvergenceRequired(ValueError):
+    """A new typed peer needs an explicit semantic reuse-or-create decision."""
+
+    def __init__(
+        self,
+        *,
+        term: str,
+        parent: str,
+        candidates: list[str],
+        candidates_truncated: bool = False,
+    ):
+        self.term = term
+        self.parent = parent
+        self.candidates = candidates
+        self.candidates_truncated = candidates_truncated
+        super().__init__(
+            f"A convergence decision is required before creating '{term}' beneath "
+            f"'{parent}'. Reuse an equivalent existing child or justify a distinct "
+            f"type after comparing these candidates: {', '.join(candidates)}"
+        )
 
 
 def _has_relationship_path(
@@ -42,6 +70,55 @@ def _has_relationship_path(
     return False
 
 
+def _lock_taxonomy_parent(db: Session, parent: SubjectType) -> None:
+    """Serialize peer checks and inserts for one parent on databases with row locks."""
+    db.execute(
+        select(SubjectType.id)
+        .where(SubjectType.id == parent.id)
+        .with_for_update()
+    ).scalar_one()
+
+
+def _foreign_peer_candidates(
+    db: Session,
+    parent: SubjectType,
+    *,
+    actor: str,
+    exclude_type_id: uuid.UUID | None = None,
+    limit: int = 100,
+) -> tuple[list[SubjectType], bool]:
+    statement = (
+        select(SubjectType)
+        .join(TypeRelationship, TypeRelationship.source_type_id == SubjectType.id)
+        .where(
+            TypeRelationship.target_type_id == parent.id,
+            TypeRelationship.relationship == taxonomy_relationship(),
+            TypeRelationship.status == "active",
+            SubjectType.is_synthetic.is_(False),
+            SubjectType.created_by != actor,
+        )
+        .order_by(SubjectType.normalized_name, SubjectType.id)
+    )
+    if exclude_type_id is not None:
+        statement = statement.where(SubjectType.id != exclude_type_id)
+    rows = list(db.scalars(statement.limit(limit + 1)).all())
+    return rows[:limit], len(rows) > limit
+
+
+def _is_active_taxonomy_child(
+    db: Session,
+    *,
+    child: SubjectType,
+    parent: SubjectType,
+) -> bool:
+    return db.scalar(select(TypeRelationship.id).where(
+        TypeRelationship.source_type_id == child.id,
+        TypeRelationship.target_type_id == parent.id,
+        TypeRelationship.relationship == taxonomy_relationship(),
+        TypeRelationship.status == "active",
+    )) is not None
+
+
 def add_semantic_relationship(
     db: Session,
     source_type: SubjectType,
@@ -51,6 +128,7 @@ def add_semantic_relationship(
     source: str,
     commit: bool = True,
     semantic_justification: str | None = None,
+    peer_decision: dict | None = None,
 ) -> TypeRelationship:
     """Add a relationship while preventing semantic-head mistakes, cycles and stale classifications.
 
@@ -95,6 +173,38 @@ def add_semantic_relationship(
                 f"'{target_type.canonical_name}'. It cannot be recreated automatically."
             )
         return existing
+
+    if classification_mode() == "typed" and rel == "is_a":
+        _lock_taxonomy_parent(db, target_type)
+        existing = db.scalar(select(TypeRelationship).where(
+            TypeRelationship.source_type_id == source_type.id,
+            TypeRelationship.relationship == rel,
+            TypeRelationship.target_type_id == target_type.id,
+        ))
+        if existing:
+            if existing.status == "retired":
+                raise ValueError(
+                    f"Relationship was previously rejected: '{source_type.canonical_name}' {rel} "
+                    f"'{target_type.canonical_name}'. It cannot be recreated automatically."
+                )
+            return existing
+        candidates, candidates_truncated = _foreign_peer_candidates(
+            db,
+            target_type,
+            actor=source_type.created_by,
+            exclude_type_id=source_type.id,
+        )
+        decision = peer_decision or {}
+        if candidates and (
+            decision.get("decision") != "create"
+            or not str(decision.get("reason", "")).strip()
+        ):
+            raise VocabularyConvergenceRequired(
+                term=source_type.canonical_name,
+                parent=target_type.canonical_name,
+                candidates=[item.canonical_name for item in candidates],
+                candidates_truncated=candidates_truncated,
+            )
 
     # Classification is editable. If an AI supplies a new belongs_to target, retire the
     # previous active parent automatically while keeping a full audit trail. A database
@@ -185,6 +295,7 @@ def resolve_subject_hierarchy(
     *,
     created_by: str,
     semantic_justification: str | None = None,
+    peer_decisions: list[dict] | None = None,
 ) -> dict:
     """Resolve/create a broad-to-specific semantic hierarchy as one transaction.
 
@@ -209,6 +320,23 @@ def resolve_subject_hierarchy(
     if len(set(keys)) != len(keys):
         raise ValueError("Hierarchy contains duplicate or mechanically equivalent terms")
 
+    decisions: dict[str, dict] = {}
+    for raw_decision in peer_decisions or []:
+        if not isinstance(raw_decision, dict):
+            raise ValueError("Each peer decision must be an object")
+        decision_term = normalise_term(str(raw_decision.get("term", "")))
+        if decision_term not in keys:
+            raise ValueError(f"Peer decision term '{decision_term}' is not in the hierarchy")
+        if decision_term in decisions:
+            raise ValueError(f"Duplicate peer decision for '{decision_term}'")
+        decision = str(raw_decision.get("decision", "")).strip().casefold()
+        if decision not in {"reuse", "create"}:
+            raise ValueError("Peer decision must be 'reuse' or 'create'")
+        reason = str(raw_decision.get("reason", "")).strip()
+        if not reason:
+            raise ValueError(f"Peer decision for '{decision_term}' requires a reason")
+        decisions[decision_term] = {**raw_decision, "decision": decision, "reason": reason}
+
     # Perform all dictionary lookups before creating anything. This makes vocabulary
     # discovery independent of the order in which reviews happen to arrive.
     resolved_before = [resolve_subject_type(db, term) for term in cleaned]
@@ -222,7 +350,71 @@ def resolve_subject_hierarchy(
 
     try:
         resolved: list[tuple[SubjectType, bool, str]] = []
-        for term in cleaned:
+        convergence: list[dict] = []
+        for index, term in enumerate(cleaned):
+            if classification_mode() == "typed" and resolved_before[index] is None:
+                if index == 0:
+                    from app.services.synthetic_root import ensure_synthetic_root
+                    parent = ensure_synthetic_root(db, commit=False)
+                else:
+                    parent = resolved[index - 1][0]
+                _lock_taxonomy_parent(db, parent)
+                resolved_after_lock = resolve_subject_type(db, term)
+                if resolved_after_lock is not None:
+                    resolution = (
+                        "canonical"
+                        if resolved_after_lock.normalized_name == keys[index]
+                        else "alias"
+                    )
+                    resolved.append((resolved_after_lock, False, resolution))
+                    continue
+                candidates, candidates_truncated = _foreign_peer_candidates(
+                    db,
+                    parent,
+                    actor=created_by,
+                )
+                if candidates:
+                    decision = decisions.get(keys[index])
+                    if decision is None:
+                        raise VocabularyConvergenceRequired(
+                            term=canonical_label(term),
+                            parent=parent.canonical_name,
+                            candidates=[item.canonical_name for item in candidates],
+                            candidates_truncated=candidates_truncated,
+                        )
+                    if decision["decision"] == "reuse":
+                        existing_term = str(decision.get("existing_type", "")).strip()
+                        existing = resolve_subject_type(db, existing_term)
+                        if existing is None or not _is_active_taxonomy_child(
+                            db,
+                            child=existing,
+                            parent=parent,
+                        ):
+                            raise ValueError(
+                                f"Reuse target '{existing_term}' must be an active immediate child "
+                                f"of '{parent.canonical_name}'"
+                            )
+                        add_subject_type_alias(
+                            db,
+                            existing,
+                            term,
+                            source=created_by,
+                            commit=False,
+                        )
+                        resolved.append((existing, False, "registered_alias"))
+                        convergence.append({
+                            "term": canonical_label(term),
+                            "decision": "reuse",
+                            "canonical_name": existing.canonical_name,
+                            "resolution": "registered_alias",
+                        })
+                        continue
+                    convergence.append({
+                        "term": canonical_label(term),
+                        "decision": "create",
+                        "canonical_name": canonical_label(term),
+                        "resolution": "created_distinct",
+                    })
             resolved.append(ensure_subject_type(
                 db,
                 term,
@@ -232,7 +424,10 @@ def resolve_subject_hierarchy(
             ))
 
         hierarchy_relationship = taxonomy_relationship()
-        for parent_result, child_result in zip(resolved, resolved[1:]):
+        for index, (parent_result, child_result) in enumerate(
+            zip(resolved, resolved[1:]),
+            start=1,
+        ):
             parent = parent_result[0]
             child = child_result[0]
             add_semantic_relationship(
@@ -243,6 +438,7 @@ def resolve_subject_hierarchy(
                 source=created_by,
                 commit=False,
                 semantic_justification=semantic_justification,
+                peer_decision=decisions.get(keys[index]),
             )
 
         db.commit()
@@ -275,6 +471,7 @@ def resolve_subject_hierarchy(
                 }
                 for parent_result, child_result in zip(resolved, resolved[1:])
             ],
+            "convergence": convergence,
         }
     except Exception:
         db.rollback()

@@ -13,7 +13,7 @@ from app.models.v2 import Assessment, SubjectClassificationDecision, SubjectType
 from app.schemas.v2 import AssessmentCreate, ExperienceCreate, FieldEnsure, RelationshipEnsure, SubjectEnsure, SubjectRead
 from app.services.v2 import (
     add_subject_type_alias, create_assessment, create_experience,
-    ensure_field, ensure_subject, ensure_subject_type, fields_for_type, resolve_subject_type,
+    ensure_field, ensure_subject, ensure_subject_type_for_direct_write, fields_for_type, resolve_subject_type,
     vocabulary_index,
 )
 from app.services.semantic import add_semantic_relationship
@@ -192,7 +192,12 @@ def subject_type_path(
 @router.post("/subject-types", status_code=201)
 def create_type(payload: dict, db: Session = Depends(get_db), principal: Principal = Depends(require_scope("subject:write"))):
     try:
-        obj, created, resolution = ensure_subject_type(db, str(payload["term"]), created_by=principal.client_id, description=payload.get("description"))
+        obj, created, resolution = ensure_subject_type_for_direct_write(
+            db,
+            str(payload["term"]),
+            created_by=principal.client_id,
+            description=payload.get("description"),
+        )
         return {"id": str(obj.id), "canonical_name": obj.canonical_name, "status": obj.status, "created": created, "resolution": resolution}
     except (KeyError, ValueError) as exc:
         db.rollback(); raise HTTPException(422, str(exc))
@@ -215,7 +220,12 @@ def create_relationship(payload: RelationshipEnsure, db: Session = Depends(get_d
     if not source or not target: raise HTTPException(404, "Both subject types must exist")
     try:
         obj = add_semantic_relationship(
-            db, source, payload.relationship, target, source=principal.client_id,
+            db,
+            source,
+            payload.relationship,
+            target,
+            source=principal.client_id,
+            peer_decision=payload.peer_decision,
         )
         return {"id": str(obj.id), "source": source.canonical_name, "relationship": obj.relationship, "target": target.canonical_name}
     except ValueError as exc:

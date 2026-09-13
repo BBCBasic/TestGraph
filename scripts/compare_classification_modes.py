@@ -30,6 +30,7 @@ PATTERNS = [
     ("chess piece", "game component", "chess"),
     ("pipe organ key", "keyboard component", "pipe organ"),
 ]
+COMPARISON_CLIENT = "classification-mode-comparison"
 
 
 @contextmanager
@@ -48,7 +49,7 @@ def _selected_mode(mode: str):
 
 
 def _type(db: Session, name: str) -> SubjectType:
-    return ensure_subject_type(db, name, created_by="classification-mode-comparison")[0]
+    return ensure_subject_type(db, name, created_by=COMPARISON_CLIENT)[0]
 
 
 def _serialize_edges(db: Session) -> list[dict]:
@@ -82,14 +83,18 @@ def _run_mode(mode: str) -> dict:
                 node_ids[parent_name] = str(parent.id)
                 node_ids[system_name] = str(system.id)
                 if mode == "typed":
-                    add_semantic_relationship(db, leaf, "is_a", parent, source="comparison")
-                    add_semantic_relationship(db, leaf, "part_of", system, source="comparison")
+                    add_semantic_relationship(db, leaf, "is_a", parent, source=COMPARISON_CLIENT)
+                    add_semantic_relationship(db, leaf, "part_of", system, source=COMPARISON_CLIENT)
                 else:
-                    add_semantic_relationship(db, leaf, "belongs_to", parent, source="comparison")
+                    add_semantic_relationship(db, leaf, "belongs_to", parent, source=COMPARISON_CLIENT)
 
             if mode == "typed":
                 add_semantic_relationship(
-                    db, _type(db, "model railway"), "is_a", _type(db, "toy"), source="comparison",
+                    db,
+                    _type(db, "model railway"),
+                    "is_a",
+                    _type(db, "toy"),
+                    source=COMPARISON_CLIENT,
                 )
 
             needle = _type(db, "needle")

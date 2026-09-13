@@ -34,6 +34,22 @@ def test_rest_navigation_returns_not_found_for_unknown_type_id(client):
     assert response.status_code == 404
 
 
+def test_direct_type_creation_cannot_bypass_typed_hierarchy_convergence(client, auth, monkeypatch):
+    monkeypatch.setenv("CLASSIFICATION_MODE", "typed")
+    get_settings.cache_clear()
+    try:
+        response = client.post(
+            "/api/v2/subject-types",
+            headers=auth,
+            json={"term": "unguarded typed peer"},
+        )
+
+        assert response.status_code == 422
+        assert "resolve_subject_hierarchy" in response.json()["detail"]
+    finally:
+        get_settings.cache_clear()
+
+
 def test_rest_typed_navigation_selects_relationship_and_reports_mode(client, monkeypatch):
     monkeypatch.setenv("CLASSIFICATION_MODE", "typed")
     get_settings.cache_clear()

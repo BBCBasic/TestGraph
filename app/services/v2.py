@@ -103,7 +103,35 @@ def ensure_subject_type(
     return obj, True, "created_provisional"
 
 
-def add_subject_type_alias(db: Session, subject_type: SubjectType, alias: str, *, source: str) -> SubjectTypeAlias:
+def ensure_subject_type_for_direct_write(
+    db: Session,
+    term: str,
+    *,
+    created_by: str,
+    description: str | None = None,
+) -> tuple[SubjectType, bool, str]:
+    """Prevent direct write surfaces from bypassing typed hierarchy convergence."""
+    if classification_mode() == "typed" and resolve_subject_type(db, term) is None:
+        raise ValueError(
+            f"Unknown typed subject type '{term}'. Use resolve_subject_hierarchy so existing "
+            "semantic peers are compared before a new type is created."
+        )
+    return ensure_subject_type(
+        db,
+        term,
+        created_by=created_by,
+        description=description,
+    )
+
+
+def add_subject_type_alias(
+    db: Session,
+    subject_type: SubjectType,
+    alias: str,
+    *,
+    source: str,
+    commit: bool = True,
+) -> SubjectTypeAlias:
     from app.services.synthetic_root import assert_semantic_type
     assert_semantic_type(subject_type)
     key = normalise_term(alias)
@@ -116,7 +144,11 @@ def add_subject_type_alias(db: Session, subject_type: SubjectType, alias: str, *
     if key == subject_type.normalized_name:
         raise ValueError("Alias is identical to the canonical subject type")
     obj = SubjectTypeAlias(subject_type_id=subject_type.id, alias=alias.strip(), normalized_alias=key, source=source)
-    db.add(obj); db.commit(); db.refresh(obj)
+    db.add(obj)
+    if commit:
+        db.commit(); db.refresh(obj)
+    else:
+        db.flush()
     return obj
 
 
