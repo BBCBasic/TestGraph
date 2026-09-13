@@ -38,7 +38,7 @@ def _payload(result):
 
 def _subject(db, principal):
     ensure_subject_type(db, "cafe", created_by="test")
-    return ensure_subject(
+    subject = ensure_subject(
         db,
         SubjectEnsure(
             subject_type="cafe", name="Example Cafe", canonical_key="example-cafe",
@@ -47,6 +47,10 @@ def _subject(db, principal):
         ),
         owner_id=principal.user_id,
     )
+    subject.classification_status = "confirmed"
+    db.commit()
+    db.refresh(subject)
+    return subject
 
 
 def _enrichment_args(subject, key, identifiers):

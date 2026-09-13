@@ -279,6 +279,19 @@ def apply_guidance_tool_policy(tools: list[dict]) -> None:
         "you must follow workflow.next_action with workflow.next_action_arguments and "
         "workflow.next_action_instruction before continuing."
     )
+    prewrite_classification_guidance = (
+        " WORKFLOW PRECONDITION: for an existing subject, the server checks classification before mutation. "
+        "An unsettled subject returns classification_review_required or classification_resolution_required "
+        "without applying the requested update. Complete the returned durable workflow, then retry the unchanged "
+        "request with the same deterministic idempotency key. You must not report the update as complete when "
+        "this prerequisite is returned."
+    )
+    for name in (
+        "enrich_subject", "correct_subject_fact", "save_experience", "assert_location",
+    ):
+        tool = by_name.get(name)
+        if tool and "WORKFLOW PRECONDITION:" not in tool["description"]:
+            tool["description"] += prewrite_classification_guidance
     enrichment = by_name.get("enrich_subject")
     if enrichment:
         enrichment["description"] += (
@@ -291,6 +304,10 @@ def apply_guidance_tool_policy(tools: list[dict]) -> None:
     save_experience = by_name.get("save_experience")
     if save_experience:
         save_experience["description"] += post_save_workflow_guidance
+    for name in ("correct_subject_fact", "assert_location"):
+        tool = by_name.get(name)
+        if tool:
+            tool["description"] += post_save_workflow_guidance
     contribution = by_name.get("submit_contribution")
     if contribution:
         enum = contribution.get("inputSchema", {}).get("properties", {}).get("contribution_type", {}).setdefault("enum", [])

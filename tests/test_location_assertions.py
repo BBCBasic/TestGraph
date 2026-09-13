@@ -51,6 +51,7 @@ def _subject(db, owner, *, kind=None, eligible=True, attributes=None):
         identifiers_json={},
         attributes_json=attributes or {},
         provenance_json={},
+        classification_status="confirmed",
     )
     db.add(subject)
     db.commit()
@@ -64,7 +65,7 @@ def _source(reference="official listing"):
 
 def test_location_tools_are_published():
     names = {tool["name"] for tool in TOOLS}
-    assert SERVER_VERSION == "3.23.0-alpha"
+    assert SERVER_VERSION == "3.24.0-alpha"
     assert {"assert_location", "get_location_assertions", "resolve_location_assertion"} <= names
 
 

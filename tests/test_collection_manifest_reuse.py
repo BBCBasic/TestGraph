@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 from app.api.mcp_v2 import _save_experience, _search
 from app.core.security import Principal
 from app.db.base import Base
-from app.models.v2 import V2Subject
+from app.models.v2 import V2Subject, now_utc
 from app.services.v2 import ensure_subject_type
 
 
@@ -36,6 +36,18 @@ def principal():
 
 def _payload(result):
     return json.loads(result["content"][0]["text"])
+
+
+def _confirm_fixture_subject(db, canonical_key):
+    subject = db.scalar(select(V2Subject).where(
+        V2Subject.canonical_key == canonical_key,
+        V2Subject.deleted_at.is_(None),
+    ))
+    assert subject is not None
+    subject.classification_status = "confirmed"
+    subject.classification_locked_at = now_utc()
+    db.commit()
+    return subject
 
 
 def _base_save(subject_name, canonical_key, idempotency_key):
@@ -139,6 +151,7 @@ def test_later_review_reuses_verified_manifest_without_resubmitting_members(db, 
     stored = collection.provenance_json["testgraph_collection_manifest"]
     assert stored["status"] == "verified"
     assert len(stored["member_subject_ids"]) == 3
+    _confirm_fixture_subject(db, "example-group-north")
 
     later = _base_save(
         "Example Group North", "example-group-north", "reuse-manifest-2"
@@ -186,6 +199,7 @@ def test_existing_full_save_is_backfilled_and_reused_without_resubmission(db, pr
     first = _payload(_save_experience(db, principal, _initial_collection_save()))
     reference = first["collection_reference"]
     collection = db.get(V2Subject, uuid.UUID(reference["collection_id"]))
+    _confirm_fixture_subject(db, "example-group-south")
 
     provenance = deepcopy(collection.provenance_json)
     provenance.pop("testgraph_collection_manifest")
@@ -218,6 +232,7 @@ def test_legacy_partial_manifest_cannot_support_tetbury_absence_or_reuse(db, pri
     first = _payload(_save_experience(db, principal, _initial_collection_save()))
     reference = first["collection_reference"]
     collection = db.get(V2Subject, uuid.UUID(reference["collection_id"]))
+    _confirm_fixture_subject(db, "example-group-north")
 
     provenance = deepcopy(collection.provenance_json)
     stored = provenance["testgraph_collection_manifest"]
@@ -268,4 +283,3 @@ def test_legacy_partial_manifest_cannot_support_tetbury_absence_or_reuse(db, pri
     assert body["details"]["code"] == "collection_manifest_coverage_incomplete"
     assert body["details"]["coverage_status"] == "partial"
     assert body["details"]["absence_claim_allowed"] is False
-

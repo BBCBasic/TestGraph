@@ -12,6 +12,7 @@ ENV/
 
 # Test and coverage output
 .pytest_cache/
+.worktrees/
 .coverage
 .coverage.*
 coverage.xml

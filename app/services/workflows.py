@@ -144,6 +144,27 @@ def start_or_resume_enrichment_workflow(
     )
 
 
+def preflight_existing_subject_mutation(
+    db: Session,
+    subject: V2Subject,
+    *,
+    owner_id,
+    actor_client: str | None,
+) -> dict | None:
+    """Return a durable prerequisite before mutating an unsettled subject."""
+    if subject.classification_status == "confirmed":
+        return None
+    run = start_or_resume_enrichment_workflow(
+        db,
+        subject,
+        owner_id=owner_id,
+        actor_client=actor_client,
+    )
+    body = workflow_body(run)
+    db.commit()
+    return body
+
+
 def sync_enrichment_classification_workflow(
     db: Session,
     subject: V2Subject,
@@ -252,4 +273,6 @@ def _finalize_subject_enrichment(db: Session, *, client_id: str, response_body: 
 
 
 register_write_finalize_hook("subject-enrichment", _finalize_subject_enrichment)
+register_write_finalize_hook("subject-correction", _finalize_subject_enrichment)
 register_write_finalize_hook("experience", _finalize_subject_enrichment)
+register_write_finalize_hook("location-assertion", _finalize_subject_enrichment)

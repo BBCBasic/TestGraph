@@ -6,6 +6,7 @@ All notable changes to TestGraph will be documented in this file.
 
 ### Fixed
 
+- Existing provisional subjects now enter their durable classification review or resolution workflow before enrichment, fact correction, experience enrichment, or location assertions can mutate data. Blocked requests leave their deterministic idempotency key available for an exact retry after classification settles; new-subject creation can still include classification evidence and initial attributes.
 - Fixed the live Explorer's Public Subjects panel so it derives from every current public, published review rather than only the 100 newest reviews. Subjects now appear and disappear immediately with review visibility changes and remain deduplicated by stable subject ID.
 
 ### Added

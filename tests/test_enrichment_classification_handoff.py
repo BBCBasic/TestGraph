@@ -29,6 +29,24 @@ def test_post_save_write_tools_require_following_the_workflow_next_action():
         assert "must follow workflow.next_action" in description
 
 
+def test_existing_subject_mutation_tools_publish_the_prewrite_classification_gate():
+    tools = deepcopy(TOOLS)
+    apply_guidance_tool_policy(tools)
+    by_name = {tool["name"]: tool for tool in tools}
+
+    for name in (
+        "enrich_subject",
+        "correct_subject_fact",
+        "save_experience",
+        "assert_location",
+    ):
+        description = by_name[name]["description"].lower()
+        assert "before mutation" in description
+        assert "classification_review_required" in description
+        assert "same deterministic idempotency key" in description
+        assert "must not report the update as complete" in description
+
+
 def test_classification_writes_keep_write_scope_without_per_call_version_probe():
     assert "affirm_subject_classification" in WRITE_TOOL_NAMES
     assert "propose_subject_reclassification" in WRITE_TOOL_NAMES
