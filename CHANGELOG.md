@@ -4,6 +4,10 @@ All notable changes to TestGraph will be documented in this file.
 
 ## Unreleased
 
+### Fixed
+
+- Fixed the live Explorer's Public Subjects panel so it derives from every current public, published review rather than only the 100 newest reviews. Subjects now appear and disappear immediately with review visibility changes and remain deduplicated by stable subject ID.
+
 ### Added
 
 - Cross-model vocabulary convergence at typed hierarchy write time: a model proposing a new peer beside another client's existing types must explicitly reuse an equivalent stable type as an alias or justify creating a distinct type.

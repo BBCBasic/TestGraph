@@ -4,7 +4,7 @@ import uuid
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import distinct, func, or_, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 from app.core.security import Principal, require_scope
@@ -32,7 +32,7 @@ def vocabulary(db: Session = Depends(get_db)):
 
 @router.get("/public/experiences")
 def public_experiences(limit: PageLimit = 20, db: Session = Depends(get_db)):
-    """Return a deliberately small, sanitised view of explicitly public V2 data."""
+    """Return public-subject summaries plus a limited, sanitised experience feed."""
     public_filter = (
         V2Experience.deleted_at.is_(None),
         V2Experience.publication_status == "published",
@@ -47,7 +47,16 @@ def public_experiences(limit: PageLimit = 20, db: Session = Depends(get_db)):
         .limit(limit)
     ).all()
     experience_ids = [experience.id for experience, _, _ in rows]
-    subject_ids = list({subject.id for _, subject, _ in rows})
+    public_review_exists = select(V2Experience.id).where(
+        V2Experience.subject_id == V2Subject.id,
+        *public_filter,
+    ).exists()
+    public_subject_rows = db.execute(
+        select(V2Subject, SubjectType)
+        .join(SubjectType, V2Subject.subject_type_id == SubjectType.id)
+        .where(V2Subject.deleted_at.is_(None), public_review_exists)
+        .order_by(SubjectType.canonical_name, V2Subject.name, V2Subject.id)
+    ).all()
     assessments = (
         list(db.scalars(
             select(Assessment)
@@ -68,42 +77,59 @@ def public_experiences(limit: PageLimit = 20, db: Session = Depends(get_db)):
     classification_decisions = (
         list(db.scalars(
             select(SubjectClassificationDecision)
-            .where(SubjectClassificationDecision.subject_id.in_(subject_ids))
+            .where(SubjectClassificationDecision.subject_id.in_(
+                select(V2Subject.id).where(
+                    V2Subject.deleted_at.is_(None),
+                    public_review_exists,
+                )
+            ))
             .order_by(SubjectClassificationDecision.created_at)
         ).all())
-        if subject_ids else []
+        if public_subject_rows else []
     )
     decisions_by_subject: dict[uuid.UUID, list[SubjectClassificationDecision]] = {}
     for decision in classification_decisions:
         decisions_by_subject.setdefault(decision.subject_id, []).append(decision)
 
+    def classification_summary(subject: V2Subject) -> dict:
+        return {
+            "status": subject.classification_status,
+            "version": subject.classification_version,
+            "locked": subject.classification_locked_at is not None,
+            "decisions": [
+                {
+                    "source_model": decision.source_model,
+                    "outcome": decision.outcome,
+                }
+                for decision in decisions_by_subject.get(subject.id, [])
+                if decision.classification_version == subject.classification_version
+            ],
+        }
+
     public_experience_ids = select(V2Experience.id).where(*public_filter)
     return {
         "counts": {
             "experiences": db.scalar(select(func.count()).select_from(V2Experience).where(*public_filter)) or 0,
-            "subjects": db.scalar(select(func.count(distinct(V2Experience.subject_id))).where(*public_filter)) or 0,
+            "subjects": len(public_subject_rows),
             "assessments": db.scalar(select(func.count()).select_from(Assessment).where(
                 Assessment.experience_id.in_(public_experience_ids)
             )) or 0,
         },
+        "subjects": [
+            {
+                "id": str(subject.id),
+                "name": subject.name,
+                "subject_type": subject_type.canonical_name,
+                "classification": classification_summary(subject),
+            }
+            for subject, subject_type in public_subject_rows
+        ],
         "experiences": [
             {
                 "subject": {
                     "name": subject.name,
                     "subject_type": subject_type.canonical_name,
-                    "classification": {
-                        "status": subject.classification_status,
-                        "version": subject.classification_version,
-                        "locked": subject.classification_locked_at is not None,
-                        "decisions": [
-                            {
-                                "source_model": decision.source_model,
-                                "outcome": decision.outcome,
-                            }
-                            for decision in decisions_by_subject.get(subject.id, [])
-                            if decision.classification_version == subject.classification_version
-                        ],
-                    },
+                    "classification": classification_summary(subject),
                 },
                 "headline": experience.headline,
                 "summary": experience.summary,
