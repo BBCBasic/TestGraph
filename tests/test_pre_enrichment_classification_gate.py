@@ -15,7 +15,7 @@ from app.core.security import Principal
 from app.db.base import Base
 from app.models.entities import IdempotencyRecord
 from app.models.v2 import LocationAssertion, SubjectRelationship, V2Experience, V2Subject, now_utc
-from app.schemas.v2 import SubjectEnsure
+from app.schemas.v2 import ExperienceCreate, SubjectEnsure
 from app.services.classification import (
     affirm_classification,
     apply_resolver_arbitration,
@@ -23,7 +23,7 @@ from app.services.classification import (
 )
 from app.services.semantic import resolve_subject_hierarchy
 from app.services.tg_ai_resolver import ResolverDecision
-from app.services.v2 import ensure_subject, ensure_subject_type, resolve_subject_type
+from app.services.v2 import create_experience, ensure_subject, ensure_subject_type, resolve_subject_type
 
 
 SOURCE = "https://example.test/renault-zoe"
@@ -51,7 +51,7 @@ def _body(result):
     return json.loads(result["content"][0]["text"])
 
 
-def _subject(db, principal, *, confirmed=False, hierarchy=("car",)):
+def _subject(db, principal, *, confirmed=False, hierarchy=("car",), owned=False):
     if len(hierarchy) == 1:
         ensure_subject_type(db, hierarchy[0], created_by="test")
     else:
@@ -67,7 +67,7 @@ def _subject(db, principal, *, confirmed=False, hierarchy=("car",)):
             provenance={},
         ),
         client_id="creator:v3",
-        owner_id=principal.user_id,
+        owner_id=principal.user_id if owned else uuid.uuid4(),
         source_model="creator-model",
         classification_source_client="creator-oauth-client",
     )
@@ -341,3 +341,109 @@ def test_location_preflight_preserves_shared_subject_write_access(db, principal)
     )
 
     _assert_classification_block(result, subject)
+
+
+@pytest.mark.parametrize("status", ["provisional", "candidate", "disputed"])
+@pytest.mark.parametrize("client_id", ["creator-oauth-client", "another-oauth-client"])
+def test_owner_enriches_without_independent_classification(db, principal, status, client_id):
+    subject = _subject(db, principal, owned=True)
+    subject.classification_status = status
+    db.commit()
+    principal.client_id = client_id
+    original_proposal = dict(subject.provenance_json["classification_proposal"])
+    args = _enrichment_args(subject)
+
+    result = _enrich_subject(db, principal, args)
+
+    assert not result.get("isError"), _body(result)
+    payload = _body(result)
+    db.refresh(subject)
+    assert subject.attributes_json["battery_capacity_kwh"] == 41
+    assert subject.classification_status == status
+    assert subject.classification_locked_at is None
+    assert subject.provenance_json["classification_proposal"] == original_proposal
+    assert payload["workflow"]["completed"] is False
+    assert payload["workflow"]["workflow_action_required"] is True
+    assert _body(_enrich_subject(db, principal, args)) == payload
+    assert db.scalar(select(func.count()).select_from(IdempotencyRecord)) == 1
+
+
+def test_new_review_creator_can_enrich_and_self_review_still_cannot_confirm(db, principal):
+    ensure_subject_type(db, "car", created_by="test")
+    saved = _body(_save_experience(db, principal, _save_args()))
+    subject = db.get(V2Subject, uuid.UUID(saved["subject_id"]))
+
+    enriched = _enrich_subject(db, principal, _enrichment_args(subject))
+
+    assert not enriched.get("isError"), _body(enriched)
+    state = _affirm(db, subject, principal)
+    assert state["status"] == "candidate"
+    assert state["locked_at"] is None
+    principal.client_id = "independent-review-client"
+    assert _affirm(db, subject, principal)["status"] == "confirmed"
+
+
+@pytest.mark.parametrize("deleted", [False, True])
+def test_review_ownership_allows_enrichment_only_while_review_exists(db, principal, deleted):
+    subject = _subject(db, principal)
+    review = create_experience(db, ExperienceCreate(
+        owner_id=principal.user_id, subject_id=subject.id,
+        headline="My review", summary="My review", raw_text="My review",
+        visibility="private", user_approved=True,
+    ), principal.client_id)
+    if deleted:
+        review.deleted_at = now_utc()
+        db.commit()
+
+    result = _enrich_subject(db, principal, _enrichment_args(subject))
+
+    if deleted:
+        _assert_classification_block(result, subject)
+        assert "battery_capacity_kwh" not in subject.attributes_json
+    else:
+        assert not result.get("isError"), _body(result)
+        db.refresh(subject)
+        assert subject.attributes_json["battery_capacity_kwh"] == 41
+        assert subject.classification_status == "provisional"
+
+
+def test_ownerless_subject_does_not_grant_anonymous_enrichment(db, principal):
+    subject = _subject(db, principal)
+    subject.owner_id = None
+    principal.user_id = None
+    db.commit()
+
+    _assert_classification_block(_enrich_subject(db, principal, _enrichment_args(subject)), subject)
+
+
+@pytest.mark.parametrize("operation", ["correction", "save", "location"])
+def test_owner_can_complete_review_updates_while_classification_pending(db, principal, operation):
+    subject = _subject(db, principal, owned=True)
+    if operation == "correction":
+        result = _correct_subject_fact(db, principal, {
+            "subject_id": str(subject.id), "field_root": "attributes", "field_path": "colour",
+            "expected_value": "silver/grey", "corrected_value": "red",
+            "evidence_sources": [SOURCE], "reason": "The owner reported the repaint.",
+            "idempotency_key": "owner-colour-correction",
+        })
+    elif operation == "save":
+        result = _save_experience(db, principal, _save_args())
+    else:
+        resolve_subject_type(db, "car").public_location_eligible = True
+        db.commit()
+        result = _assert_location(db, principal, {
+            "subject_id": str(subject.id), "predicate": "postcode", "value": "GL5 4AQ",
+            "source": {"reference": SOURCE, "kind": "authoritative"},
+            "idempotency_key": "owner-location-assertion",
+        })
+
+    assert not result.get("isError"), _body(result)
+    db.refresh(subject)
+    assert subject.classification_status == "provisional"
+    assert subject.classification_locked_at is None
+    if operation == "correction":
+        assert subject.attributes_json["colour"] == "red"
+    elif operation == "save":
+        assert db.scalar(select(func.count()).select_from(V2Experience)) == 1
+    else:
+        assert db.scalar(select(func.count()).select_from(LocationAssertion)) == 1

@@ -42,6 +42,8 @@ The server stores and verifies the process; the calling AI supplies the open-end
 
 In the experimental typed-classification mode, the `is_a` graph has one reserved synthetic root, `.`. It gives every semantic branch a common structural origin without making `entity` or another model-chosen term globally privileged. Classifiers traverse outward from `.` progressively; they never use it as an ordinary subject type.
 
+You can keep enriching a subject you own, or one attached to your own non-deleted review, while its classification awaits independent review or dispute resolution. This follows your authenticated TestGraph user identity across AI clients. Enrichment preserves the pending classification and its audit trail; it does not count as an independent classification decision. Other contributors must settle an unconfirmed subject's classification before updating it through the MCP mutation tools. Evidence, conflict-preservation and other write validations still apply.
+
 ## What TestGraph is investigating
 
 1. **Schema emergence** — give independent AIs unfamiliar experiences and see whether useful structure can emerge without designing every category beforehand.
