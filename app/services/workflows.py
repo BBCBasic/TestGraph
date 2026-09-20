@@ -3,7 +3,7 @@ from __future__ import annotations
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.models.v2 import SubjectClassificationDecision, V2Subject, now_utc
+from app.models.v2 import SubjectClassificationDecision, V2Experience, V2Subject, now_utc
 from app.models.workflow import WorkflowEvent, WorkflowRun
 from app.services.write_safety import register_write_finalize_hook
 
@@ -151,9 +151,24 @@ def preflight_existing_subject_mutation(
     owner_id,
     actor_client: str | None,
 ) -> dict | None:
-    """Return a durable prerequisite before mutating an unsettled subject."""
+    """Gate other contributors while allowing owners to continue their own work.
+
+    Enrichment does not settle classification. A subject owner or the owner of
+    a live review may keep supplying evidence while independent review remains
+    pending, including during a classification dispute.
+    """
     if subject.classification_status == "confirmed":
         return None
+    if owner_id is not None:
+        if subject.owner_id == owner_id:
+            return None
+        own_review = db.scalar(select(V2Experience.id).where(
+            V2Experience.subject_id == subject.id,
+            V2Experience.owner_id == owner_id,
+            V2Experience.deleted_at.is_(None),
+        ).limit(1))
+        if own_review is not None:
+            return None
     run = start_or_resume_enrichment_workflow(
         db,
         subject,
@@ -208,8 +223,9 @@ def workflow_body(run: WorkflowRun) -> dict:
             else "The current client must inspect the current classification"
         )
         independence_instruction = (
-            " The creating or already-deciding client must stop and leave this durable workflow for a different "
-            "authenticated client; changing source_model does not establish independence."
+            " The creating or already-deciding client must stop self-confirming and leave the classification "
+            "decision in this durable workflow for a different authenticated client; changing source_model "
+            "does not establish independence."
             if requires_handoff
             else ""
         )
@@ -218,6 +234,9 @@ def workflow_body(run: WorkflowRun) -> dict:
             "of decision_tools: agree when the existing type is supported, or different_type when evidence "
             "supports another type. Use the acting model's own stable source_model identity."
             f"{independence_instruction}"
+            " This pending classification does not prevent the authenticated user from enriching a subject "
+            "they own or one attached to their own non-deleted review. Continue requested enrichment and "
+            "report classification as pending; enrichment does not confirm classification."
         )
     elif run.state == "disputed":
         next_action = "create_deliberation"
@@ -225,6 +244,8 @@ def workflow_body(run: WorkflowRun) -> dict:
             "Call next_action to preserve and reconcile the classification disagreement; do not silently choose either "
             f"candidate. Include subject_id {subject_id} and workflow_run_id {run.id} in its context. Supply "
             "canonical_key, title, question and idempotency_key."
+            " The authenticated user may continue enriching a subject they own or one attached to their own "
+            "non-deleted review while this dispute remains open; enrichment does not resolve the dispute."
         )
     elif run.state == "blocked":
         next_action = None

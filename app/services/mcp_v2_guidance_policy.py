@@ -277,11 +277,18 @@ def apply_guidance_tool_policy(tools: list[dict]) -> None:
     post_save_workflow_guidance = (
         " WORKFLOW: after every successful write, inspect workflow.workflow_action_required. When it is true, "
         "you must follow workflow.next_action with workflow.next_action_arguments and "
-        "workflow.next_action_instruction before continuing."
+        "workflow.next_action_instruction for the classification decision. When independent review or "
+        "dispute resolution is pending, leave that classification action pending and continue requested "
+        "enrichment of the authenticated user's own subject or one attached to their own non-deleted review. "
+        "Report a successful enrichment separately from the still-pending classification."
     )
     prewrite_classification_guidance = (
         " WORKFLOW PRECONDITION: for an existing subject, the server checks classification before mutation. "
-        "An unsettled subject returns classification_review_required or classification_resolution_required "
+        "The authenticated user may always enrich a subject they own or one attached to their own non-deleted "
+        "review without waiting for another AI, including while classification is disputed. Ownership is "
+        "determined by the authenticated user, not the AI client; all other evidence and write validations "
+        "still apply. Enrichment does not confirm or resolve classification. For other contributors, "
+        "an unsettled subject returns classification_review_required or classification_resolution_required "
         "without applying the requested update. Complete the returned durable workflow, then retry the unchanged "
         "request with the same deterministic idempotency key. You must not report the update as complete when "
         "this prerequisite is returned."
