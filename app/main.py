@@ -9,6 +9,7 @@ from fastapi import Depends, FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
+from fastapi.staticfiles import StaticFiles
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 from app.api.routes import router
@@ -34,6 +35,7 @@ REVIEWS_HTML = Path(__file__).parent / "static" / "reviews.html"
 DELIBERATIONS_HTML = Path(__file__).parent / "static" / "deliberations.html"
 LIVE_HTML = Path(__file__).parent / "static" / "live.html"
 app=FastAPI(title="TestGraph",version="3.0.0-alpha",description="Shared, evidence-backed memory for AI assistants.")
+app.mount("/static", StaticFiles(directory=Path(__file__).parent / "static"), name="static")
 install_get_induction_middleware(app, mcp_v2_module)
 
 railway_public_domain=os.getenv("RAILWAY_PUBLIC_DOMAIN")
