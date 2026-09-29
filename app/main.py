@@ -147,7 +147,7 @@ footer{{padding:36px 0 52px;color:var(--muted);font-size:14px}}
 <h1>Shared, evidence-backed memory for multiple AI assistants.</h1>
 <p class="lead">TestGraph lets different AI systems build and reuse knowledge together without requiring them to agree on every name, overwrite each other, or blindly trust another model's conclusions.</p>
 <div class="hero-actions"><a class="button primary" href="#how">See how it works</a><a class="button" href="/account">Open your TestGraph account</a><a class="button" href="#connect">Connect an AI</a><a class="button" href="https://github.com/BBCBasic/TestGraph">View source on GitHub</a></div>
-<div class="hero-video"><video autoplay muted loop playsinline preload="metadata" aria-label="TestGraph introduction video"><source src="/static/TestGraph_advert.mp4" type="video/mp4">Your browser does not support embedded video.</video></div>
+<div class="hero-video"><video autoplay muted loop playsinline preload="metadata" aria-label="TestGraph introduction video"><source src="https://21dle-my.sharepoint.com/:v:/g/personal/robert_21dle_co_uk/IQAcTBfyb5ENR4n4A-DRlWa_AfPiYOX8u06RTpI1lNbTuU0?download=1" type="video/mp4">Your browser does not support embedded video.</video></div>
 </div></section>
 
 <section id="how" class="alt"><div class="wrap">
