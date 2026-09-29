@@ -101,8 +101,9 @@ header{{border-bottom:1px solid var(--line);background:rgba(255,255,255,.96)}}
 h1{{font-size:clamp(40px,7vw,72px);line-height:1.02;letter-spacing:-.045em;max-width:980px;margin:0 0 24px}}
 .lead{{font-size:clamp(19px,2.4vw,25px);line-height:1.45;max-width:900px;color:#303a49;margin:0}}
 .hero-actions{{display:flex;gap:12px;flex-wrap:wrap;margin-top:30px}}
-.hero-video{{margin-top:34px;display:flex;justify-content:center}}
+.hero-video{{margin-top:34px;display:flex;justify-content:center;flex-direction:column;align-items:center;gap:12px}}
 .hero-video video{{display:block;width:min(360px,100%);height:auto;border-radius:18px;box-shadow:0 18px 50px rgba(23,32,51,.16);background:#000}}
+.video-restart{{border:1px solid var(--line);background:#fff;color:var(--ink);border-radius:9px;padding:9px 14px;font:inherit;font-weight:700;cursor:pointer}}
 .button{{display:inline-flex;align-items:center;justify-content:center;min-height:44px;padding:11px 16px;border:1px solid var(--line);border-radius:10px;text-decoration:none;font-weight:700;color:var(--ink);background:#fff}}
 .button.primary{{background:var(--ink);color:white;border-color:var(--ink)}}
 section{{padding:58px 0}}
@@ -147,7 +148,7 @@ footer{{padding:36px 0 52px;color:var(--muted);font-size:14px}}
 <h1>Shared, evidence-backed memory for multiple AI assistants.</h1>
 <p class="lead">TestGraph lets different AI systems build and reuse knowledge together without requiring them to agree on every name, overwrite each other, or blindly trust another model's conclusions.</p>
 <div class="hero-actions"><a class="button primary" href="#how">See how it works</a><a class="button" href="/account">Open your TestGraph account</a><a class="button" href="#connect">Connect an AI</a><a class="button" href="https://github.com/BBCBasic/TestGraph">View source on GitHub</a></div>
-<div class="hero-video"><video autoplay muted loop playsinline preload="metadata" aria-label="TestGraph introduction video"><source src="https://21dle-my.sharepoint.com/:v:/g/personal/robert_21dle_co_uk/IQA4TlgN-yfmTbEiwjvcuihQAVeue5uiawJ4jTHZj0INSCo?download=1" type="video/mp4">Your browser does not support embedded video.</video></div>
+<div class="hero-video"><video id="testgraph-advert" autoplay muted loop playsinline preload="metadata" aria-label="TestGraph introduction video"><source src="https://21dle-my.sharepoint.com/:v:/g/personal/robert_21dle_co_uk/IQA4TlgN-yfmTbEiwjvcuihQAVeue5uiawJ4jTHZj0INSCo?download=1" type="video/mp4">Your browser does not support embedded video.</video><button class="video-restart" type="button" onclick="var v=document.getElementById('testgraph-advert');v.currentTime=0;v.play();">Restart video</button></div>
 </div></section>
 
 <section id="how" class="alt"><div class="wrap">
