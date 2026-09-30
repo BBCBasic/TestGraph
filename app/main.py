@@ -148,7 +148,44 @@ footer{{padding:36px 0 52px;color:var(--muted);font-size:14px}}
 <h1>Shared, evidence-backed memory for multiple AI assistants.</h1>
 <p class="lead">TestGraph lets different AI systems build and reuse knowledge together without requiring them to agree on every name, overwrite each other, or blindly trust another model's conclusions.</p>
 <div class="hero-actions"><a class="button primary" href="#how">See how it works</a><a class="button" href="/account">Open your TestGraph account</a><a class="button" href="#connect">Connect an AI</a><a class="button" href="https://github.com/BBCBasic/TestGraph">View source on GitHub</a></div>
-<div class="hero-video"><video id="testgraph-advert" autoplay muted loop playsinline preload="metadata" aria-label="TestGraph introduction video"><source src="https://21dle-my.sharepoint.com/:v:/g/personal/robert_21dle_co_uk/IQA4TlgN-yfmTbEiwjvcuihQAVeue5uiawJ4jTHZj0INSCo?download=1" type="video/mp4">Your browser does not support embedded video.</video><button class="video-restart" type="button" onclick="var v=document.getElementById('testgraph-advert');v.currentTime=0;v.play();">Restart video</button></div>
+<div class="hero-video"><video id="testgraph-advert" autoplay muted loop playsinline preload="auto" aria-label="TestGraph introduction video"><source src="/static/TestGraph_advert.mp4" type="video/mp4">Your browser does not support embedded video.</video><button id="video-restart" class="video-restart" type="button">Restart video</button></div>
+<script>
+(function () {{
+  const video = document.getElementById('testgraph-advert');
+  const restart = document.getElementById('video-restart');
+  if (!video || !restart) return;
+
+  video.muted = true;
+  video.loop = true;
+
+  function playVideo(fromStart) {{
+    if (fromStart) {{
+      try {{ video.currentTime = 0; }} catch (e) {{}}
+    }}
+    const attempt = video.play();
+    if (attempt && typeof attempt.catch === 'function') {{
+      attempt.catch(function () {{
+        restart.textContent = 'Play video';
+      }});
+    }}
+  }}
+
+  restart.addEventListener('click', function () {{
+    restart.textContent = 'Restart video';
+    playVideo(true);
+  }});
+
+  video.addEventListener('ended', function () {{
+    playVideo(true);
+  }});
+
+  video.addEventListener('canplay', function () {{
+    playVideo(false);
+  }}, {{ once: true }});
+
+  playVideo(false);
+}})();
+</script>
 </div></section>
 
 <section id="how" class="alt"><div class="wrap">
